@@ -299,8 +299,17 @@ async function evolutionRequest(opts: { baseUrl: string; apiKey: string; path: s
       }
       return { ok: res.ok, status: res.status, body: json, url: args.urlRedacted }
     } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : 'Falha ao conectar na Evolution API'
-      return { ok: false, status: 502, body: { error: 'evolution_fetch_failed', message, url: args.urlRedacted }, url: args.urlRedacted }
+      const errAny = e as { name?: unknown; message?: unknown }
+      const name = typeof errAny.name === 'string' ? errAny.name : ''
+      const message = typeof errAny.message === 'string' ? errAny.message : e instanceof Error ? e.message : 'Falha ao conectar na Evolution API'
+      const lower = message.toLowerCase()
+      const isAbort = name === 'AbortError' || lower.includes('aborted') || lower.includes('abort')
+      return {
+        ok: false,
+        status: isAbort ? 504 : 502,
+        body: { error: isAbort ? 'evolution_timeout' : 'evolution_fetch_failed', message, url: args.urlRedacted },
+        url: args.urlRedacted,
+      }
     } finally {
       clearTimeout(timeout)
     }
@@ -421,7 +430,12 @@ async function evolutionRequestAuto(opts: { baseUrl: string; apiKey: string; pat
   const candidates = buildEvolutionBaseUrls(opts.baseUrl)
   const attempts: Array<{ baseUrl: string; url: string | null; status: number; ok: boolean }> = []
   let last: { ok: boolean; status: number; body: unknown; baseUrlUsed: string; url: string } | null = null
+  const startedAt = Date.now()
+  const deadlineMs = 35000
+  const maxCandidates = 4
   for (const baseUrl of candidates) {
+    if (attempts.length >= maxCandidates) break
+    if (Date.now() - startedAt > deadlineMs) break
     const res = await evolutionRequest({ ...opts, baseUrl })
     const url = (res as unknown as { url?: string }).url ?? `${cleanUrl(baseUrl)}${opts.path.startsWith('/') ? '' : '/'}${opts.path}`
     attempts.push({ baseUrl, url, status: res.status, ok: res.ok })
@@ -431,7 +445,17 @@ async function evolutionRequestAuto(opts: { baseUrl: string; apiKey: string; pat
       continue
     }
 
-    if (res.status === 502) {
+    if (res.status === 502 || res.status === 504) {
+      if (attempts.length >= 2) {
+        return {
+          ...last,
+          body: {
+            error: 'evolution_unreachable',
+            attempts,
+            last: res.body,
+          },
+        }
+      }
       continue
     }
 
@@ -439,6 +463,17 @@ async function evolutionRequestAuto(opts: { baseUrl: string; apiKey: string; pat
   }
   if (!last) {
     return { ok: false as const, status: 404, body: null, baseUrlUsed: candidates[0] ?? opts.baseUrl, url: '' }
+  }
+
+  if (last.status === 502 || last.status === 504) {
+    return {
+      ...last,
+      body: {
+        error: 'evolution_unreachable',
+        attempts,
+        last: last.body,
+      },
+    }
   }
 
   if (last.status === 404) {
@@ -523,6 +558,8 @@ function isEvolutionFetchFailed(details: unknown) {
   if (!unwrapped || typeof unwrapped !== 'object') return false
   const obj = unwrapped as Record<string, unknown>
   if (obj.error === 'evolution_fetch_failed') return true
+  if (obj.error === 'evolution_timeout') return true
+  if (obj.error === 'evolution_unreachable') return true
   const text = extractTextFragments(unwrapped).join(' | ').toLowerCase()
   if (!text) return false
   return text.includes('signal has been aborted') || text.includes('timed out') || text.includes('timeout') || text.includes('fetch failed')
