@@ -992,6 +992,130 @@ using (public.is_super_admin());
 grant select on public.usuarios to authenticated;`
   }, [])
 
+  const sqlWhatsappGlobalConfig = useMemo(() => {
+    return `create table if not exists public.super_admin (
+  id uuid primary key references auth.users(id) on delete cascade,
+  nome text not null default 'Super Admin',
+  email text null,
+  nivel text not null default 'super_admin',
+  criado_em timestamptz not null default now(),
+  whatsapp_api_url text,
+  whatsapp_api_key text,
+  whatsapp_instance_name text
+);
+
+alter table public.super_admin enable row level security;
+
+drop policy if exists "super_admin_self_select" on public.super_admin;
+create policy "super_admin_self_select" on public.super_admin
+for select to authenticated
+using (id = auth.uid());
+
+drop policy if exists "super_admin_self_update" on public.super_admin;
+create policy "super_admin_self_update" on public.super_admin
+for update to authenticated
+using (id = auth.uid())
+with check (id = auth.uid());
+
+grant select, update on public.super_admin to authenticated;
+
+create or replace function public.is_super_admin() returns boolean
+language sql stable as $$
+  select exists (select 1 from public.super_admin sa where sa.id = auth.uid())
+$$;
+
+alter table public.usuarios add column if not exists whatsapp_habilitado boolean not null default false;
+alter table public.usuarios add column if not exists whatsapp_instance_name text;
+alter table public.usuarios add column if not exists enviar_confirmacao boolean not null default true;
+alter table public.usuarios add column if not exists enviar_lembrete boolean not null default false;
+alter table public.usuarios add column if not exists lembrete_horas_antes int not null default 24;
+alter table public.usuarios add column if not exists mensagem_confirmacao text;
+alter table public.usuarios add column if not exists mensagem_lembrete text;
+
+create index if not exists usuarios_whatsapp_habilitado_idx on public.usuarios (whatsapp_habilitado);
+
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'usuarios'
+      and column_name = 'whatsapp_api_url'
+  ) and exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'usuarios'
+      and column_name = 'whatsapp_api_key'
+  ) then
+    execute $$
+      create or replace function public.usuarios_block_whatsapp_update()
+      returns trigger
+      language plpgsql
+      security definer
+      set search_path = public
+      as $$
+      begin
+        if public.is_super_admin() then
+          return NEW;
+        end if;
+
+        if NEW.whatsapp_habilitado is distinct from OLD.whatsapp_habilitado
+          or NEW.whatsapp_api_url is distinct from OLD.whatsapp_api_url
+          or NEW.whatsapp_api_key is distinct from OLD.whatsapp_api_key then
+          raise exception 'not_allowed';
+        end if;
+
+        return NEW;
+      end;
+      $$;
+    $$;
+  else
+    execute $$
+      create or replace function public.usuarios_block_whatsapp_update()
+      returns trigger
+      language plpgsql
+      security definer
+      set search_path = public
+      as $$
+      begin
+        if public.is_super_admin() then
+          return NEW;
+        end if;
+
+        if NEW.whatsapp_habilitado is distinct from OLD.whatsapp_habilitado then
+          raise exception 'not_allowed';
+        end if;
+
+        return NEW;
+      end;
+      $$;
+    $$;
+  end if;
+
+  execute 'drop trigger if exists usuarios_block_whatsapp_update on public.usuarios';
+  execute 'create trigger usuarios_block_whatsapp_update before update on public.usuarios for each row execute function public.usuarios_block_whatsapp_update()';
+
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'usuarios'
+      and column_name = 'whatsapp_api_url'
+  ) and exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'usuarios'
+      and column_name = 'whatsapp_api_key'
+  ) then
+    execute 'update public.usuarios set whatsapp_api_url = null, whatsapp_api_key = null';
+  end if;
+end;
+$$;`
+  }, [])
+
   const sqlWhatsappLembretesCron = useMemo(() => {
     return `create extension if not exists pg_net;
 create extension if not exists pg_cron;
@@ -1280,6 +1404,12 @@ $$;`
           title="SQL do WhatsApp (Super Admin)"
           description="Use para salvar a Evolution API e enviar avisos na tela do Super Admin."
           sql={sqlWhatsappSuperAdmin}
+        />
+
+        <SqlCard
+          title="SQL do WhatsApp (migração p/ config global)"
+          description="Use para aplicar o modelo novo (URL/key no Super Admin) e limpar URL/key dos usuários."
+          sql={sqlWhatsappGlobalConfig}
         />
 
         <SqlCard

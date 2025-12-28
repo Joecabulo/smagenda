@@ -38,10 +38,6 @@ export function OnboardingPage() {
   const [servicoPreco, setServicoPreco] = useState('')
   const [servicoCor, setServicoCor] = useState('#0f172a')
 
-  const [enviarManual, setEnviarManual] = useState(true)
-  const [apiUrl, setApiUrl] = useState('')
-  const [apiKey, setApiKey] = useState('')
-
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -155,15 +151,6 @@ export function OnboardingPage() {
   const saveStep3 = async () => {
     setSubmitting(true)
     setError(null)
-    const { error: updateError } = await supabase
-      .from('usuarios')
-      .update({ whatsapp_api_url: enviarManual ? null : apiUrl || null, whatsapp_api_key: enviarManual ? null : apiKey || null })
-      .eq('id', usuarioId)
-    if (updateError) {
-      setError(updateError.message)
-      setSubmitting(false)
-      return
-    }
     setSubmitting(false)
     setStep(4)
   }
@@ -296,26 +283,9 @@ export function OnboardingPage() {
         <Card>
           <div className="p-6 space-y-4">
             <div className="text-sm font-semibold text-slate-900">Etapa 3: WhatsApp</div>
-            <div className="space-y-2">
-              <label className="flex items-center gap-2 text-sm text-slate-700">
-                <input type="radio" checked={enviarManual} onChange={() => setEnviarManual(true)} />
-                Enviar manualmente por enquanto
-              </label>
-              <label className="flex items-center gap-2 text-sm text-slate-700">
-                <input type="radio" checked={!enviarManual} onChange={() => setEnviarManual(false)} />
-                Configurar Evolution API agora
-              </label>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+              A configuração da Evolution API é feita no painel do Super Admin.
             </div>
-
-            {!enviarManual ? (
-              <div className="space-y-4">
-                <Input label="URL da API" value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} placeholder="https://sua-instancia.railway.app" />
-                <Input label="API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} type="password" />
-                <a className="text-sm font-medium text-slate-900 hover:underline" href="https://github.com/EvolutionAPI/evolution-api" target="_blank">
-                  Ver como instalar Evolution API
-                </a>
-              </div>
-            ) : null}
 
             <div className="flex justify-end">
               <Button onClick={saveStep3} disabled={submitting}>

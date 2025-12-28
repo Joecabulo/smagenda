@@ -157,8 +157,7 @@ export function WhatsappSettingsPage() {
   const { principal } = useAuth()
   const usuarioId = principal?.kind === 'usuario' ? principal.profile.id : null
 
-  const [apiUrl, setApiUrl] = useState('')
-  const [apiKey, setApiKey] = useState('')
+  const [configurado, setConfigurado] = useState(false)
   const [whatsappHabilitado, setWhatsappHabilitado] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
   const [connecting, setConnecting] = useState(false)
@@ -186,7 +185,6 @@ export function WhatsappSettingsPage() {
     }
   }, [])
 
-  const configurado = useMemo(() => Boolean(apiUrl.trim() && apiKey.trim()), [apiUrl, apiKey])
   const habilitado = useMemo(() => (whatsappHabilitado === null ? true : Boolean(whatsappHabilitado)), [whatsappHabilitado])
 
   const callWhatsapp = async (body: unknown) => {
@@ -321,41 +319,37 @@ export function WhatsappSettingsPage() {
       setError(null)
       const isMissingColumnError = (message: string) => message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
 
-      const first = await supabase.from('usuarios').select('whatsapp_api_url,whatsapp_api_key,whatsapp_habilitado').eq('id', usuarioId).maybeSingle()
+      const first = await supabase.from('usuarios').select('whatsapp_habilitado').eq('id', usuarioId).maybeSingle()
       if (first.error) {
         if (isMissingColumnError(first.error.message)) {
-          const fallback = await supabase.from('usuarios').select('whatsapp_api_url,whatsapp_api_key').eq('id', usuarioId).maybeSingle()
-          if (fallback.error) {
-            setError(fallback.error.message)
-            setLoading(false)
-            return
-          }
-          const row = (fallback.data ?? null) as unknown as { whatsapp_api_url?: string | null; whatsapp_api_key?: string | null } | null
           setWhatsappHabilitado(null)
-          setApiUrl(row?.whatsapp_api_url ?? '')
-          setApiKey(row?.whatsapp_api_key ?? '')
+        } else {
+          setError(first.error.message)
+          setConfigurado(false)
           setLoading(false)
           return
         }
-
-        setError(first.error.message)
+      } else {
+        const row = (first.data ?? null) as unknown as { whatsapp_habilitado?: boolean | null } | null
+        setWhatsappHabilitado(typeof row?.whatsapp_habilitado === 'boolean' ? row.whatsapp_habilitado : null)
+      }
+      const cfg = await callWhatsappFunction({ action: 'config_status' })
+      if (!cfg.ok && cfg.body && typeof cfg.body === 'object' && (cfg.body as Record<string, unknown>).error === 'whatsapp_config_requires_service_role') {
+        const hint = getOptionalString(cfg.body, 'hint')
+        const details = typeof cfg.body === 'string' ? cfg.body : JSON.stringify(cfg.body)
+        setError(hint ? `Falha ao carregar configuração do WhatsApp: ${details} | Dica: ${hint}` : `Falha ao carregar configuração do WhatsApp: ${details}`)
+        setConfigurado(false)
         setLoading(false)
         return
       }
 
-      const row = (first.data ?? null) as unknown as {
-        whatsapp_api_url?: string | null
-        whatsapp_api_key?: string | null
-        whatsapp_habilitado?: boolean | null
-      } | null
-
-      setWhatsappHabilitado(typeof row?.whatsapp_habilitado === 'boolean' ? row.whatsapp_habilitado : null)
-      setApiUrl(row?.whatsapp_api_url ?? '')
-      setApiKey(row?.whatsapp_api_key ?? '')
+      if (cfg.ok && cfg.body && typeof cfg.body === 'object') setConfigurado(Boolean((cfg.body as Record<string, unknown>).configured))
+      else setConfigurado(false)
       setLoading(false)
     }
     run().catch((e: unknown) => {
       setError(e instanceof Error ? e.message : 'Erro ao carregar configurações')
+      setConfigurado(false)
       setLoading(false)
       setCheckingStatus(false)
     })
@@ -390,6 +384,11 @@ export function WhatsappSettingsPage() {
         setConnecting(false)
         return
       }
+      if (res.status === 0 && typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'timeout') {
+        setError('Tempo esgotado ao gerar QR Code. A Edge Function pode estar temporariamente sem recursos ou indisponível. Aguarde 1–2 minutos e tente novamente.')
+        setConnecting(false)
+        return
+      }
       if (
         typeof res.body === 'object' &&
         res.body !== null &&
@@ -409,8 +408,14 @@ export function WhatsappSettingsPage() {
         setConnecting(false)
         return
       }
+      if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'whatsapp_not_configured') {
+        setError('WhatsApp ainda não foi configurado no painel do Super Admin.')
+        setConnecting(false)
+        return
+      }
+      const hint = getOptionalString(res.body, 'hint')
       const details = typeof res.body === 'string' ? res.body : JSON.stringify(res.body)
-      setError(`Falha ao gerar QR Code (HTTP ${res.status}): ${details}`)
+      setError(hint ? `Falha ao gerar QR Code (HTTP ${res.status}): ${details}\n\nDica: ${hint}` : `Falha ao gerar QR Code (HTTP ${res.status}): ${details}`)
       setConnecting(false)
       return
     }
@@ -437,8 +442,14 @@ export function WhatsappSettingsPage() {
           setConnecting(false)
           return
         }
+        if (next.status === 0 && typeof next.body === 'object' && next.body !== null && (next.body as Record<string, unknown>).error === 'timeout') {
+          setError('Tempo esgotado ao verificar status do WhatsApp. A Edge Function pode estar temporariamente sem recursos ou indisponível. Aguarde 1–2 minutos e tente novamente.')
+          setConnecting(false)
+          return
+        }
+        const hint = getOptionalString(next.body, 'hint')
         const details = typeof next.body === 'string' ? next.body : JSON.stringify(next.body)
-        setError(`Falha ao verificar status (HTTP ${next.status}): ${details}`)
+        setError(hint ? `Falha ao verificar status (HTTP ${next.status}): ${details}\n\nDica: ${hint}` : `Falha ao verificar status (HTTP ${next.status}): ${details}`)
         setConnecting(false)
         return
       }

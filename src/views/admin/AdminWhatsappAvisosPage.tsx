@@ -280,8 +280,6 @@ export function AdminWhatsappAvisosPage() {
     const patch: Record<string, unknown> = enabled
       ? {
           whatsapp_habilitado: true,
-          whatsapp_api_url: apiUrl.trim() || null,
-          whatsapp_api_key: apiKey.trim() || null,
         }
       : {
           whatsapp_habilitado: false,

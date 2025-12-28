@@ -2,14 +2,18 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.89.0'
 
 type UsuarioRow = {
   id: string
-  whatsapp_api_url: string | null
-  whatsapp_api_key: string | null
   whatsapp_instance_name: string | null
   slug: string | null
   lembrete_horas_antes: number | null
   mensagem_lembrete: string | null
   nome_negocio: string | null
   telefone: string | null
+}
+
+type SuperAdminConfigRow = {
+  id: string
+  whatsapp_api_url: string | null
+  whatsapp_api_key: string | null
 }
 
 type ServicoRow = { nome: string | null; preco: number | null }
@@ -243,13 +247,32 @@ Deno.serve(async (req) => {
   const adminClient = createClient(supabaseUrl, serviceRoleKey)
 
   const isMissingColumnError = (message: string) => message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
+  const isMissingTableError = (message: string) => message.includes('schema cache') || message.includes("Could not find the table 'public.")
+
+  const { data: saRaw, error: saErr } = await adminClient
+    .from('super_admin')
+    .select('id,whatsapp_api_url,whatsapp_api_key')
+    .not('whatsapp_api_url', 'is', null)
+    .not('whatsapp_api_key', 'is', null)
+    .limit(1)
+    .maybeSingle()
+
+  if (saErr) {
+    if (isMissingColumnError(saErr.message) || isMissingTableError(saErr.message)) {
+      return jsonResponse(400, { error: 'schema_incomplete', message: saErr.message })
+    }
+    return jsonResponse(400, { error: 'load_super_admin_failed', message: saErr.message })
+  }
+
+  const sa = (saRaw ?? null) as unknown as SuperAdminConfigRow | null
+  const globalApiUrl = sa?.whatsapp_api_url ?? null
+  const globalApiKey = sa?.whatsapp_api_key ?? null
+  if (!globalApiUrl || !globalApiKey) return jsonResponse(200, { ok: true, skipped_all: 'not_configured', results: [] })
 
   const { data: users, error: usersErr } = await adminClient
     .from('usuarios')
-    .select('id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name,slug,enviar_lembrete,lembrete_horas_antes,mensagem_lembrete,nome_negocio,telefone')
+    .select('id,whatsapp_instance_name,slug,enviar_lembrete,lembrete_horas_antes,mensagem_lembrete,nome_negocio,telefone')
     .eq('enviar_lembrete', true)
-    .not('whatsapp_api_url', 'is', null)
-    .not('whatsapp_api_key', 'is', null)
     .limit(500)
 
   if (usersErr) {
@@ -264,9 +287,6 @@ Deno.serve(async (req) => {
 
   for (const u of users ?? []) {
     const uRow = u as unknown as UsuarioRow
-    const apiUrl = uRow.whatsapp_api_url
-    const apiKey = uRow.whatsapp_api_key
-    if (!apiUrl || !apiKey) continue
 
     const instanceNameRaw = uRow.whatsapp_instance_name ?? uRow.slug ?? ''
     const instanceName = sanitizeInstanceName(instanceNameRaw)
@@ -332,8 +352,8 @@ Deno.serve(async (req) => {
       }
 
       const sendRes = await evolutionRequestAuto({
-        baseUrl: apiUrl,
-        apiKey,
+        baseUrl: globalApiUrl,
+        apiKey: globalApiKey,
         path: `/message/sendText/${instanceName}`,
         method: 'POST',
         body: { number, text },

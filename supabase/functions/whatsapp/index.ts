@@ -6,6 +6,7 @@ type Payload =
   | { action: 'disconnect' }
   | { action: 'send_test'; number: string; text: string }
   | { action: 'send_confirmacao'; agendamento_id: string }
+  | { action: 'config_status' }
   | { action: 'admin_status' }
   | { action: 'admin_connect'; number?: string | null }
   | { action: 'admin_disconnect' }
@@ -138,6 +139,37 @@ function isMissingTableError(message: string) {
 
 function isMissingColumnError(message: string) {
   return message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
+}
+
+async function loadGlobalWhatsappConfig(dbClient: ReturnType<typeof createClient>) {
+  const { data, error } = await dbClient
+    .from('super_admin')
+    .select('id,whatsapp_api_url,whatsapp_api_key')
+    .not('whatsapp_api_url', 'is', null)
+    .not('whatsapp_api_key', 'is', null)
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    const msg = String(error.message ?? '')
+    const lower = msg.toLowerCase()
+    const rls = lower.includes('row level security') || lower.includes('permission denied')
+    if (rls) {
+      return { ok: false as const, error: 'permission_denied' as const, message: msg }
+    }
+    if (isMissingTableError(error.message) || isMissingColumnError(error.message)) {
+      return { ok: false as const, error: 'schema_incomplete' as const, message: error.message }
+    }
+    return { ok: false as const, error: 'load_failed' as const, message: error.message }
+  }
+
+  const row = (data ?? null) as unknown as { whatsapp_api_url?: string | null; whatsapp_api_key?: string | null } | null
+  const apiUrl = typeof row?.whatsapp_api_url === 'string' ? row.whatsapp_api_url : null
+  const apiKey = typeof row?.whatsapp_api_key === 'string' ? row.whatsapp_api_key : null
+  const hasConfig = Boolean(apiUrl && apiKey)
+
+  if (!hasConfig) return { ok: true as const, configured: false as const, apiUrl: null, apiKey: null }
+  return { ok: true as const, configured: true as const, apiUrl: apiUrl!, apiKey: apiKey! }
 }
 
 function cleanUrl(input: string) {
@@ -1139,7 +1171,7 @@ Deno.serve(async (req) => {
 
   const { data: userBase, error: userBaseErr } = await dbClient
     .from('usuarios')
-    .select('id,slug,nome_negocio,telefone,endereco,whatsapp_api_url,whatsapp_api_key,whatsapp_habilitado')
+    .select('id,slug,nome_negocio,telefone,endereco,whatsapp_habilitado')
     .eq('id', masterId)
     .maybeSingle()
 
@@ -1159,13 +1191,35 @@ Deno.serve(async (req) => {
   const userBaseRow = userBase as unknown as UsuarioBaseRow
   const userExtra = (userExtraSafe ?? null) as unknown as UsuarioExtraRow | null
 
-  const apiUrl = userBaseRow.whatsapp_api_url
-  const apiKey = userBaseRow.whatsapp_api_key
+  const globalCfg = await loadGlobalWhatsappConfig(dbClient)
+  if (!globalCfg.ok) {
+    if (globalCfg.error === 'schema_incomplete') {
+      return jsonResponse(400, { error: 'schema_incomplete', message: 'Execute o SQL do WhatsApp (Super Admin) em /admin/configuracoes.' })
+    }
+    if (globalCfg.error === 'permission_denied') {
+      return jsonResponse(500, {
+        error: 'whatsapp_config_requires_service_role',
+        message: 'A Edge Function precisa do SERVICE_ROLE_KEY para ler a configuração global do WhatsApp.',
+        hint: 'No Supabase: Project Settings → Edge Functions → Secrets. Defina SERVICE_ROLE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) e faça o deploy da função novamente.',
+      })
+    }
+    return jsonResponse(502, { error: 'load_whatsapp_config_failed', message: globalCfg.message })
+  }
+
+  const apiUrl = globalCfg.apiUrl
+  const apiKey = globalCfg.apiKey
   const enabled = userBaseRow.whatsapp_habilitado
   const whatsappEnabled = enabled === undefined || enabled === null ? true : Boolean(enabled)
   const slug = userBaseRow.slug ?? ''
   const instanceNameRaw = userExtra?.whatsapp_instance_name ?? slug
   const instanceName = sanitizeInstanceName(instanceNameRaw)
+
+  if (payload.action === 'config_status') {
+    const configured = Boolean(apiUrl && apiKey)
+    if (!configured) return jsonResponse(200, { ok: true, configured: false })
+    const v = validateEvolutionBaseUrl(apiUrl)
+    return jsonResponse(200, { ok: true, configured: v.ok })
+  }
 
   if (!whatsappEnabled) {
     return jsonResponse(403, { error: 'whatsapp_disabled' })
