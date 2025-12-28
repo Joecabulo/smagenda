@@ -25,9 +25,33 @@ type SuperAdminConfigRow = {
   whatsapp_instance_name: string | null
 }
 
+function decodeJwtPayload(jwt: string) {
+  const parts = jwt.split('.')
+  if (parts.length !== 3) return null
+  const payload = parts[1]
+  if (!payload) return null
+
+  const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+  const pad = normalized.length % 4
+  const padded = normalized + (pad ? '='.repeat(4 - pad) : '')
+
+  try {
+    const json = JSON.parse(atob(padded)) as Record<string, unknown>
+    return {
+      iss: typeof json.iss === 'string' ? json.iss : null,
+      aud: typeof json.aud === 'string' ? json.aud : null,
+      exp: typeof json.exp === 'number' ? json.exp : null,
+      role: typeof json.role === 'string' ? json.role : null,
+      sub: typeof json.sub === 'string' ? json.sub : null,
+    }
+  } catch {
+    return null
+  }
+}
+
 async function callAdminWhatsapp(body: unknown) {
   if (!supabaseEnv.ok) {
-    return { ok: false as const, status: 0, body: { error: 'missing_supabase_env', missing: supabaseEnv.missing } }
+    return { ok: false as const, status: 0, body: { error: 'missing_supabase_env', missing: supabaseEnv.missing }, fnVersion: null as string | null, elapsedMs: 0 }
   }
 
   const supabaseUrl = supabaseEnv.values.VITE_SUPABASE_URL
@@ -54,14 +78,15 @@ async function callAdminWhatsapp(body: unknown) {
 
   const sess = await getSession()
   if (!sess?.access_token) {
-    return { ok: false as const, status: 401, body: { error: 'unauthorized', message: 'missing_session' } }
+    return { ok: false as const, status: 401, body: { error: 'unauthorized', message: 'missing_session' }, fnVersion: null as string | null, elapsedMs: 0 }
   }
 
   const fnUrl = `${supabaseUrl.replace(/\/+$/, '')}/functions/v1/whatsapp`
 
   const post = async (token: string) => {
+    const startedAt = performance.now()
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 20000)
+    const timeoutId = setTimeout(() => controller.abort(), 45000)
     try {
       const res = await fetch(fnUrl, {
         method: 'POST',
@@ -82,7 +107,7 @@ async function callAdminWhatsapp(body: unknown) {
         text = await res.text()
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : 'Falha de rede'
-        return { ok: false as const, status: 0, body: { error: 'network_error', message: msg }, fnVersion }
+        return { ok: false as const, status: 0, body: { error: 'network_error', message: msg }, fnVersion, elapsedMs: Math.round(performance.now() - startedAt) }
       }
 
       let parsed: unknown = null
@@ -92,11 +117,12 @@ async function callAdminWhatsapp(body: unknown) {
         parsed = text
       }
 
-      if (!res.ok) return { ok: false as const, status: res.status, body: parsed, fnVersion }
-      return { ok: true as const, status: res.status, body: parsed, fnVersion }
+      const elapsedMs = Math.round(performance.now() - startedAt)
+      if (!res.ok) return { ok: false as const, status: res.status, body: parsed, fnVersion, elapsedMs }
+      return { ok: true as const, status: res.status, body: parsed, fnVersion, elapsedMs }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Falha de rede'
-      return { ok: false as const, status: 0, body: { error: 'network_error', message: msg }, fnVersion: null }
+      return { ok: false as const, status: 0, body: { error: 'network_error', message: msg }, fnVersion: null, elapsedMs: Math.round(performance.now() - startedAt) }
     } finally {
       clearTimeout(timeoutId)
     }
@@ -128,14 +154,14 @@ async function callAdminWhatsapp(body: unknown) {
             ? { ...(second.body as Record<string, unknown>), fn: second.fnVersion }
             : { error: 'fn_error', fn: second.fnVersion, details: second.body }
           : second.body
-        return { ok: false as const, status: second.status, body: withFn }
+        return { ok: false as const, status: second.status, body: withFn, fnVersion: second.fnVersion, elapsedMs: second.elapsedMs }
       }
-      return { ok: true as const, status: second.status, body: second.body }
+      return { ok: true as const, status: second.status, body: second.body, fnVersion: second.fnVersion, elapsedMs: second.elapsedMs }
     }
   }
 
-  if (!resOk) return { ok: false as const, status: resStatus, body: parsed }
-  return { ok: true as const, status: resStatus, body: parsed }
+  if (!resOk) return { ok: false as const, status: resStatus, body: parsed, fnVersion, elapsedMs: first.elapsedMs }
+  return { ok: true as const, status: resStatus, body: parsed, fnVersion, elapsedMs: first.elapsedMs }
 }
 
 export function AdminWhatsappAvisosPage() {
@@ -164,6 +190,9 @@ export function AdminWhatsappAvisosPage() {
   const [mensagem, setMensagem] = useState('')
   const [sending, setSending] = useState(false)
   const [lastSendSummary, setLastSendSummary] = useState<string | null>(null)
+
+  const [diagRunning, setDiagRunning] = useState(false)
+  const [diagText, setDiagText] = useState<string | null>(null)
 
   const [updatingClientesWhatsapp, setUpdatingClientesWhatsapp] = useState(false)
   const [schemaClientesWhatsappIncompleto, setSchemaClientesWhatsappIncompleto] = useState(false)
@@ -317,17 +346,98 @@ export function AdminWhatsappAvisosPage() {
       whatsapp_api_key: apiKey.trim() || null,
       whatsapp_instance_name: instanceName.trim() || null,
     }
-    const { error: err } = await supabase.from('super_admin').update(payload).eq('id', superAdminId)
+    const { data, error: err } = await supabase
+      .from('super_admin')
+      .upsert({ id: superAdminId, ...payload }, { onConflict: 'id' })
+      .select('id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name')
+      .maybeSingle()
     if (err) {
       setError(err.message)
       setSavingConfig(false)
       return
     }
+    if (!data) {
+      setError('Não foi possível salvar a configuração do Super Admin. Em /admin/configuracoes, execute “SQL do WhatsApp (Super Admin)” e “SQL do Bootstrap (Super Admin)”.')
+      setSavingConfig(false)
+      return
+    }
+    const row = data as unknown as SuperAdminConfigRow
+    setApiUrl(row.whatsapp_api_url ?? '')
+    setApiKey(row.whatsapp_api_key ?? '')
+    setInstanceName(row.whatsapp_instance_name ?? '')
     setConfigSaved(true)
     setSavingConfig(false)
   }
 
+  const runDiagnostics = async () => {
+    setDiagRunning(true)
+    setError(null)
+    setDiagText(null)
+    try {
+      const envInfo = supabaseEnv.ok
+        ? { supabaseUrl: supabaseEnv.values.VITE_SUPABASE_URL, anonKeyPrefix: `${supabaseEnv.values.VITE_SUPABASE_ANON_KEY.slice(0, 12)}…` }
+        : { error: 'missing_supabase_env', missing: supabaseEnv.missing }
+
+      const { data: sessData, error: sessErr } = await supabase.auth.getSession()
+      const sess = sessData.session
+      const access = sess?.access_token ?? null
+      const tokenInfo = access
+        ? {
+            prefix: `${access.slice(0, 12)}…`,
+            length: access.length,
+            hasDots: access.split('.').length === 3,
+            expiresAt: sess?.expires_at ?? null,
+            claims: decodeJwtPayload(access),
+          }
+        : null
+
+      const { data: userData, error: userErr } = await supabase.auth.getUser()
+
+      const edge = await callAdminWhatsapp({ action: 'admin_diagnostics' })
+      if (!aliveRef.current) return
+      const edgeBody = typeof edge.body === 'string' ? edge.body : JSON.stringify(edge.body, null, 2)
+      setDiagText(
+        JSON.stringify(
+          {
+            env: envInfo,
+            session: {
+              ok: !sessErr,
+              error: sessErr?.message ?? null,
+              hasSession: Boolean(sess),
+              userId: sess?.user?.id ?? null,
+              token: tokenInfo,
+            },
+            auth: {
+              ok: !userErr,
+              error: userErr?.message ?? null,
+              userId: userData.user?.id ?? null,
+              email: userData.user?.email ?? null,
+            },
+            edge: {
+              ok: edge.ok,
+              status: edge.status,
+              fn: edge.fnVersion,
+              elapsedMs: edge.elapsedMs,
+              body: edgeBody,
+            },
+          },
+          null,
+          2
+        )
+      )
+    } catch (e: unknown) {
+      if (!aliveRef.current) return
+      setDiagText(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : 'Falha no diagnóstico' }, null, 2))
+    } finally {
+      if (aliveRef.current) setDiagRunning(false)
+    }
+  }
+
   const checkStatus = async () => {
+    if (!conectado) {
+      setError('Preencha a Evolution API (URL e Key), clique em Salvar e tente novamente.')
+      return
+    }
     setCheckingStatus(true)
     setError(null)
     setQrBase64(null)
@@ -336,12 +446,18 @@ export function AdminWhatsappAvisosPage() {
       const res = await callAdminWhatsapp({ action: 'admin_status' })
       if (!aliveRef.current) return
       if (!res.ok) {
+        if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'whatsapp_not_configured') {
+          setError('WhatsApp ainda não foi configurado. Preencha a Evolution API acima e clique em Salvar.')
+          return
+        }
         if (
           typeof res.body === 'object' &&
           res.body !== null &&
           (res.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
         ) {
-          setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
+          setError(
+            'O Supabase rejeitou o JWT antes de executar a Edge Function. Isso costuma acontecer quando a função está com verify_jwt=true no deploy (ou quando o app aponta para outro projeto). Faça logout/login e confirme se o deploy da função whatsapp está com verify_jwt=false.'
+          )
           return
         }
         if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).hint) {
@@ -365,6 +481,10 @@ export function AdminWhatsappAvisosPage() {
   }
 
   const connect = async () => {
+    if (!conectado) {
+      setError('Preencha a Evolution API (URL e Key), clique em Salvar e tente novamente.')
+      return
+    }
     setConnecting(true)
     setError(null)
     setQrBase64(null)
@@ -374,12 +494,18 @@ export function AdminWhatsappAvisosPage() {
       const res = await callAdminWhatsapp({ action: 'admin_connect', number: null })
       if (!aliveRef.current) return
       if (!res.ok) {
+        if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'whatsapp_not_configured') {
+          setError('WhatsApp ainda não foi configurado. Preencha a Evolution API acima e clique em Salvar.')
+          return
+        }
         if (
           typeof res.body === 'object' &&
           res.body !== null &&
           (res.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
         ) {
-          setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
+          setError(
+            'O Supabase rejeitou o JWT antes de executar a Edge Function. Isso costuma acontecer quando a função está com verify_jwt=true no deploy (ou quando o app aponta para outro projeto). Faça logout/login e confirme se o deploy da função whatsapp está com verify_jwt=false.'
+          )
           return
         }
         if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).hint) {
@@ -405,18 +531,28 @@ export function AdminWhatsappAvisosPage() {
   }
 
   const disconnect = async () => {
+    if (!conectado) {
+      setError('Preencha a Evolution API (URL e Key), clique em Salvar e tente novamente.')
+      return
+    }
     setDisconnecting(true)
     setError(null)
     try {
       const res = await callAdminWhatsapp({ action: 'admin_disconnect' })
       if (!aliveRef.current) return
       if (!res.ok) {
+        if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'whatsapp_not_configured') {
+          setError('WhatsApp ainda não foi configurado. Preencha a Evolution API acima e clique em Salvar.')
+          return
+        }
         if (
           typeof res.body === 'object' &&
           res.body !== null &&
           (res.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
         ) {
-          setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
+          setError(
+            'O Supabase rejeitou o JWT antes de executar a Edge Function. Isso costuma acontecer quando a função está com verify_jwt=true no deploy (ou quando o app aponta para outro projeto). Faça logout/login e confirme se o deploy da função whatsapp está com verify_jwt=false.'
+          )
           return
         }
         if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).hint) {
@@ -546,13 +682,13 @@ export function AdminWhatsappAvisosPage() {
             <div className="text-sm text-slate-700">Configuração: {conectado ? '🟢 OK' : '🟡 Pendente'}</div>
             <div className="text-sm text-slate-700">Conexão: {checkingStatus ? 'verificando…' : instanceState ?? '—'}</div>
             <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={checkStatus} disabled={!conectado || checkingStatus || connecting || disconnecting}>
+              <Button variant="secondary" onClick={checkStatus} disabled={checkingStatus || connecting || disconnecting}>
                 Atualizar status
               </Button>
-              <Button onClick={connect} disabled={!conectado || connecting || disconnecting}>
+              <Button onClick={connect} disabled={connecting || disconnecting}>
                 Conectar
               </Button>
-              <Button variant="secondary" onClick={disconnect} disabled={!conectado || disconnecting || connecting}>
+              <Button variant="secondary" onClick={disconnect} disabled={disconnecting || connecting}>
                 Desconectar
               </Button>
             </div>
@@ -569,6 +705,23 @@ export function AdminWhatsappAvisosPage() {
                   <img src={`data:image/png;base64,${qrBase64}`} alt="QR Code" className="h-64 w-64" />
                 </div>
               </div>
+            ) : null}
+          </div>
+        </Card>
+
+        <Card>
+          <div className="p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Diagnóstico</div>
+                <div className="text-sm text-slate-600">Valida sessão, Super Admin e Evolution API.</div>
+              </div>
+              <Button variant="secondary" onClick={() => void runDiagnostics()} disabled={diagRunning}>
+                {diagRunning ? 'Executando…' : 'Executar diagnóstico'}
+              </Button>
+            </div>
+            {diagText ? (
+              <pre className="whitespace-pre-wrap break-words rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800">{diagText}</pre>
             ) : null}
           </div>
         </Card>

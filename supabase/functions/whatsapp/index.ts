@@ -7,6 +7,7 @@ type Payload =
   | { action: 'send_test'; number: string; text: string }
   | { action: 'send_confirmacao'; agendamento_id: string }
   | { action: 'config_status' }
+  | { action: 'admin_diagnostics' }
   | { action: 'admin_status' }
   | { action: 'admin_connect'; number?: string | null }
   | { action: 'admin_disconnect' }
@@ -816,7 +817,12 @@ Deno.serve(async (req) => {
   }
 
   const uid = authData.user.id
-  const isAdminAction = payload.action === 'admin_status' || payload.action === 'admin_connect' || payload.action === 'admin_disconnect' || payload.action === 'admin_send_aviso'
+  const isAdminAction =
+    payload.action === 'admin_diagnostics' ||
+    payload.action === 'admin_status' ||
+    payload.action === 'admin_connect' ||
+    payload.action === 'admin_disconnect' ||
+    payload.action === 'admin_send_aviso'
 
   let principal:
     | { ok: true; kind: 'super_admin'; uid: string }
@@ -876,7 +882,13 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (payload.action === 'admin_status' || payload.action === 'admin_connect' || payload.action === 'admin_disconnect' || payload.action === 'admin_send_aviso') {
+  if (
+    payload.action === 'admin_diagnostics' ||
+    payload.action === 'admin_status' ||
+    payload.action === 'admin_connect' ||
+    payload.action === 'admin_disconnect' ||
+    payload.action === 'admin_send_aviso'
+  ) {
     if (principal.kind !== 'super_admin') return jsonResponse(403, { error: 'not_allowed' })
 
     const { data: saRaw, error: saErr } = await dbClient
@@ -898,6 +910,34 @@ Deno.serve(async (req) => {
     const apiKey = sa.whatsapp_api_key
     const instanceNameRaw = sa.whatsapp_instance_name ?? `admin-${principal.uid.slice(0, 8)}`
     const instanceName = sanitizeInstanceName(instanceNameRaw)
+
+    if (payload.action === 'admin_diagnostics') {
+      const urlValidation = apiUrl ? validateEvolutionBaseUrl(apiUrl) : { ok: false as const, reason: 'missing_url' as const }
+      const evolution =
+        apiUrl && apiKey && (urlValidation as unknown as { ok?: unknown }).ok === true
+          ? await (async () => {
+              const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
+              const res = await evolutionRequestAuto({ baseUrl: apiUrl, apiKey, path: `/instance/connectionState/${instanceName}`, method: 'GET', stopOn404 })
+              const hint = res.ok ? null : evolutionHint(res.body)
+              const state = res.ok ? extractInstanceState(res.body) : null
+              return { ok: res.ok, status: res.status, state, body: res.body, hint }
+            })()
+          : null
+
+      return jsonResponse(200, {
+        ok: true,
+        uid: principal.uid,
+        hasServiceRoleKey: Boolean(serviceRoleKey),
+        superAdminRow: { id: sa.id },
+        config: {
+          hasApiUrl: Boolean(apiUrl),
+          hasApiKey: Boolean(apiKey),
+          instanceName,
+        },
+        urlValidation,
+        evolution,
+      })
+    }
 
     if (!apiUrl || !apiKey) return jsonResponse(400, { error: 'whatsapp_not_configured' })
 
