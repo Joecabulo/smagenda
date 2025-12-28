@@ -9,6 +9,9 @@ import { ResetPasswordPage } from './views/auth/ResetPasswordPage'
 import { DashboardPage } from './views/app/DashboardPage'
 import { ServicosPage } from './views/app/ServicosPage'
 import { FuncionariosPage } from './views/app/FuncionariosPage'
+import { ClientesPage } from './views/app/ClientesPage'
+import { ClienteDetalhesPage } from './views/app/ClienteDetalhesPage'
+import { RelatoriosPage } from './views/app/RelatoriosPage'
 import { WhatsappSettingsPage } from './views/app/WhatsappSettingsPage'
 import { MensagensSettingsPage } from './views/app/MensagensSettingsPage'
 import { PaginaPublicaSettingsPage } from './views/app/PaginaPublicaSettingsPage'
@@ -55,6 +58,30 @@ function App() {
         element={
           <RequireAuth requiredKind="usuario">
             <ServicosPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/clientes"
+        element={
+          <RequireAuth requiredKind="usuario">
+            <ClientesPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/clientes/:telefone"
+        element={
+          <RequireAuth requiredKind="usuario">
+            <ClienteDetalhesPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/relatorios"
+        element={
+          <RequireAuth requiredKind="usuario">
+            <RelatoriosPage />
           </RequireAuth>
         }
       />

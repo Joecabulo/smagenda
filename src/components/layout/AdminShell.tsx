@@ -3,7 +3,7 @@ import { useAuth } from '../../state/auth/useAuth'
 import { Button } from '../ui/Button'
 
 export function AdminShell({ children }: { children: React.ReactNode }) {
-  const { signOut } = useAuth()
+  const { signOut, impersonation, stopImpersonation } = useAuth()
   const location = useLocation()
   const nav = [
     { to: '/admin/dashboard', label: 'Dashboard' },
@@ -20,9 +20,21 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             <div className="text-xs font-semibold tracking-wide text-slate-500">SMagenda</div>
             <div className="text-lg font-semibold text-slate-900">Super Admin</div>
           </div>
-          <Button variant="secondary" onClick={() => signOut()}>
-            Sair
-          </Button>
+          <div className="flex items-center gap-2">
+            {impersonation ? (
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  stopImpersonation()
+                }}
+              >
+                Parar impersonation
+              </Button>
+            ) : null}
+            <Button variant="secondary" onClick={() => signOut()}>
+              Sair
+            </Button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-[240px_1fr]">

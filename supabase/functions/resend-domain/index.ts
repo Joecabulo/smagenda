@@ -24,7 +24,12 @@ type ResendDomain = {
 type Payload = {
   domain?: string
   domain_id?: string
-  action?: 'status' | 'verify'
+  action?: 'status' | 'verify' | 'send_test'
+  from?: string
+  to?: string
+  subject?: string
+  text?: string
+  html?: string
 }
 
 function jsonResponse(status: number, body: unknown) {
@@ -95,16 +100,39 @@ function parseMxAnswerData(data: string) {
   return { prio: Number.isFinite(prio) ? prio : null, host: host.toLowerCase() }
 }
 
-async function resendRequest(path: string, method: string, apiKey: string) {
+async function resendRequest(path: string, method: string, apiKey: string, body?: unknown) {
   const res = await fetch(`https://api.resend.com${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
+    body: body === undefined ? undefined : JSON.stringify(body),
   })
   const json = (await res.json().catch(() => null)) as unknown
   return { ok: res.ok, status: res.status, json }
+}
+
+function splitEmailList(raw: string) {
+  const cleaned = raw
+    .split(/[;,\n]/g)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return cleaned
+}
+
+function extractEmailAddress(raw: string) {
+  const s = raw.trim()
+  const m = s.match(/<([^>]+)>/)
+  return (m?.[1] ?? s).trim()
+}
+
+function isLikelyEmail(s: string) {
+  const v = s.trim()
+  if (!v.includes('@')) return false
+  const [local, domain] = v.split('@')
+  if (!local || !domain) return false
+  return domain.includes('.') && !domain.startsWith('.') && !domain.endsWith('.')
 }
 
 Deno.serve(async (req) => {
@@ -173,6 +201,40 @@ Deno.serve(async (req) => {
       error: 'domain_not_found',
       domains: domains.map((d) => ({ id: d.id ?? null, name: d.name ?? null, status: d.status ?? null })),
     })
+  }
+
+  if (action === 'send_test') {
+    const fromRaw = (payload.from ?? '').trim()
+    const toRaw = (payload.to ?? '').trim()
+    const subject = (payload.subject ?? '').trim() || 'Teste de email (Resend) — SMagenda'
+    const text = (payload.text ?? '').trim() || `Teste de envio via Resend em ${new Date().toISOString()}`
+    const html = (payload.html ?? '').trim() || `<p>${text}</p>`
+
+    if (!fromRaw || !toRaw) return jsonResponse(400, { error: 'missing_email_fields' })
+
+    const fromEmail = extractEmailAddress(fromRaw)
+    if (!isLikelyEmail(fromEmail)) return jsonResponse(400, { error: 'invalid_from' })
+
+    const toList = splitEmailList(toRaw)
+    if (toList.length === 0 || toList.some((t) => !isLikelyEmail(extractEmailAddress(t)))) {
+      return jsonResponse(400, { error: 'invalid_to' })
+    }
+
+    const selectedDomain = (selected.name ?? '').trim().toLowerCase()
+    const fromDomain = fromEmail.split('@')[1]?.trim().toLowerCase() ?? ''
+    if (selectedDomain && fromDomain && fromDomain !== selectedDomain && !fromDomain.endsWith(`.${selectedDomain}`)) {
+      return jsonResponse(400, { error: 'from_domain_mismatch', message: `O domínio do remetente deve ser ${selectedDomain}.` })
+    }
+
+    const emailRes = await resendRequest('/emails', 'POST', resendApiKey, {
+      from: fromRaw,
+      to: toList,
+      subject,
+      text,
+      html,
+    })
+    if (!emailRes.ok) return jsonResponse(502, { error: 'resend_send_failed', details: emailRes.json })
+    return jsonResponse(200, { ok: true, email: emailRes.json })
   }
 
   if (action === 'verify') {
@@ -275,4 +337,3 @@ Deno.serve(async (req) => {
     },
   })
 })
-

@@ -118,8 +118,8 @@ function toFormState(f?: Funcionario | null): FormState {
 }
 
 export function FuncionariosPage() {
-  const { principal } = useAuth()
-  const usuario = principal?.kind === 'usuario' ? principal.profile : null
+  const { appPrincipal } = useAuth()
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
 
   const usuarioId = usuario?.id
 

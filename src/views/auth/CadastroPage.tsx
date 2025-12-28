@@ -85,7 +85,7 @@ export function CadastroPage() {
         setDiagnostico(
           `Supabase=${host} • Conexão OK • Email=${emailOn ? 'on' : 'off'} • Signup=${signupOff ? 'off' : 'on'} • AutoConfirm=${autoConfirm ? 'on' : 'off'}${
             emailOn && !autoConfirm
-              ? ' • Dica: se o email não chega, configure SMTP em Authentication → SMTP Settings (o serviço padrão é limitado).'
+              ? ' • Dica: se o email não chega, configure SMTP (Resend) em Authentication → SMTP Settings e valide em /admin/configuracoes.'
               : ''
           }`
         )
@@ -232,7 +232,7 @@ export function CadastroPage() {
       const emailOn = json?.external?.email === true
       const autoConfirm = json?.mailer_autoconfirm === true
       if (emailOn && !autoConfirm) {
-        setDiagnostico('Dica: se o email não chega, configure SMTP em Authentication → SMTP Settings (o serviço padrão é limitado).')
+        setDiagnostico('Dica: se o email não chega, configure SMTP (Resend) em Authentication → SMTP Settings e valide em /admin/configuracoes.')
       }
       if (!emailOn && !autoConfirm) {
         setError('O provedor de Email está desativado no Supabase. Ative em Authentication → Providers → Email.')

@@ -154,8 +154,8 @@ async function callWhatsappFunction(body: unknown) {
 }
 
 export function WhatsappSettingsPage() {
-  const { principal } = useAuth()
-  const usuarioId = principal?.kind === 'usuario' ? principal.profile.id : null
+  const { appPrincipal } = useAuth()
+  const usuarioId = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.id : null
 
   const [configurado, setConfigurado] = useState(false)
   const [whatsappHabilitado, setWhatsappHabilitado] = useState<boolean | null>(null)
@@ -172,8 +172,6 @@ export function WhatsappSettingsPage() {
   const [pairingCode, setPairingCode] = useState<string | null>(null)
   const [testNumber, setTestNumber] = useState('')
   const [testText, setTestText] = useState('Olá! Teste de envio do SMagenda.')
-  const [diagnostic, setDiagnostic] = useState<string | null>(null)
-  const [runningDiagnostic, setRunningDiagnostic] = useState(false)
 
   const aliveRef = useRef(true)
   const allowStatusRef = useRef(false)
@@ -199,117 +197,6 @@ export function WhatsappSettingsPage() {
     }
 
     return callWhatsappFunction(body)
-  }
-
-  const runDiagnostic = async () => {
-    setRunningDiagnostic(true)
-    setDiagnostic(null)
-    allowStatusRef.current = true
-    try {
-      const lines: string[] = []
-      lines.push(`at=${new Date().toISOString()}`)
-      lines.push(`principal_kind=${principal?.kind ?? 'null'}`)
-      lines.push(`usuario_id=${usuarioId ?? 'null'}`)
-      lines.push(`supabase_env_ok=${supabaseEnv.ok ? 'true' : 'false'}`)
-      if (!supabaseEnv.ok) lines.push(`supabase_env_missing=${supabaseEnv.missing.join(',')}`)
-
-      const { data: sessionData } = await supabase.auth.getSession()
-      const sess = sessionData.session
-      lines.push(`session_present=${sess ? 'true' : 'false'}`)
-      lines.push(`session_user_id=${sess?.user?.id ?? 'null'}`)
-      lines.push(`session_expires_at=${sess?.expires_at ?? 'null'}`)
-      lines.push(`session_access_token_len=${sess?.access_token ? String(sess.access_token).length : '0'}`)
-      if (supabaseEnv.ok) {
-        const key = supabaseEnv.values.VITE_SUPABASE_ANON_KEY
-        const kind = key.startsWith('sb_') ? 'sb_key' : key.split('.').length === 3 ? 'jwt' : 'unknown'
-        lines.push(`supabase_key_kind=${kind}`)
-      }
-
-      const userRes = await supabase.auth.getUser()
-      lines.push(`get_user_ok=${userRes.error ? 'false' : userRes.data.user ? 'true' : 'false'}`)
-      if (userRes.error) {
-        const errAny = userRes.error as unknown as { status?: unknown; message?: unknown; name?: unknown }
-        const status = typeof errAny.status === 'number' ? errAny.status : 0
-        const message = typeof errAny.message === 'string' ? errAny.message : ''
-        const name = typeof errAny.name === 'string' ? errAny.name : ''
-        lines.push(`get_user_error_status=${status}`)
-        lines.push(`get_user_error_name=${name || 'unknown'}`)
-        lines.push(`get_user_error_message=${message || 'unknown'}`)
-      }
-
-      if (userRes.data.user?.id) {
-        const dbRes = await supabase.from('usuarios').select('id').eq('id', userRes.data.user.id).maybeSingle()
-        lines.push(`db_usuario_row_ok=${dbRes.error ? 'false' : dbRes.data?.id ? 'true' : 'false'}`)
-        if (dbRes.error) {
-          lines.push(`db_usuario_error=${dbRes.error.message}`)
-        }
-      }
-
-      lines.push(`whatsapp_configured=${configurado ? 'true' : 'false'}`)
-      lines.push(`whatsapp_enabled=${habilitado ? 'true' : 'false'}`)
-      if (configurado && habilitado) {
-        if (supabaseEnv.ok && sess?.access_token) {
-          const fnUrl = `${supabaseEnv.values.VITE_SUPABASE_URL}/functions/v1/whatsapp`
-          let fetchStatus = 0
-          let fetchBody: unknown = null
-          let fetchFnVersion: string | null = null
-          try {
-            const fetchRes = await fetch(fnUrl, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                apikey: supabaseEnv.values.VITE_SUPABASE_ANON_KEY,
-                Authorization: `Bearer ${sess.access_token}`,
-              },
-              body: JSON.stringify({ action: 'status' }),
-            })
-            fetchStatus = fetchRes.status
-            fetchFnVersion = fetchRes.headers.get('x-smagenda-fn')
-            const text = await fetchRes.text()
-            try {
-              fetchBody = text ? JSON.parse(text) : null
-            } catch {
-              fetchBody = text
-            }
-          } catch (e: unknown) {
-            fetchStatus = 0
-            fetchBody = e instanceof Error ? e.message : 'Falha de rede'
-          }
-          lines.push(`direct_fetch_status=${fetchStatus}`)
-          lines.push(`direct_fetch_fn=${fetchFnVersion ?? 'null'}`)
-          lines.push(`direct_fetch_body=${typeof fetchBody === 'string' ? fetchBody : JSON.stringify(fetchBody)}`)
-        }
-
-        const raw = await supabase.functions.invoke('whatsapp', { body: { action: 'status' } })
-        lines.push(`invoke_status_action_ok=${raw.error ? 'false' : 'true'}`)
-        if (raw.error) {
-          const errAny = raw.error as unknown as { name?: unknown; message?: unknown; context?: unknown; status?: unknown }
-          const name = typeof errAny.name === 'string' ? errAny.name : 'unknown'
-          const message = typeof errAny.message === 'string' ? errAny.message : 'unknown'
-          const ctx = (errAny.context ?? null) as null | Record<string, unknown>
-          const status = typeof (ctx?.status ?? errAny.status) === 'number' ? ((ctx?.status ?? errAny.status) as number) : 0
-          const body = ctx?.body ?? null
-          lines.push(`invoke_error_name=${name}`)
-          lines.push(`invoke_error_message=${message}`)
-          lines.push(`invoke_error_status=${status}`)
-          lines.push(`invoke_error_body=${typeof body === 'string' ? body : JSON.stringify(body)}`)
-        } else {
-          lines.push(`invoke_data=${JSON.stringify(raw.data)}`)
-        }
-
-        const wrapped = await callWhatsapp({ action: 'status' })
-        lines.push(`wrapped_call_ok=${wrapped.ok ? 'true' : 'false'}`)
-        lines.push(`wrapped_call_status=${wrapped.status}`)
-        lines.push(`wrapped_call_body=${typeof wrapped.body === 'string' ? wrapped.body : JSON.stringify(wrapped.body)}`)
-      }
-
-      setDiagnostic(lines.join('\n'))
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Erro no diagnóstico'
-      setDiagnostic(`at=${new Date().toISOString()}\nerror=${msg}`)
-    } finally {
-      setRunningDiagnostic(false)
-    }
   }
 
   useEffect(() => {
@@ -641,21 +528,6 @@ export function WhatsappSettingsPage() {
                 </div>
               </div>
             )}
-          </div>
-        </Card>
-
-        <Card>
-          <div className="p-6 space-y-4">
-            <div className="text-sm font-semibold text-slate-900">Diagnóstico</div>
-            <div className="text-sm text-slate-600">Verifica sessão do Supabase e resposta da função WhatsApp.</div>
-            <div className="flex justify-end">
-              <Button variant="secondary" onClick={runDiagnostic} disabled={runningDiagnostic || loading || connecting || disconnecting || checkingStatus}>
-                {runningDiagnostic ? 'Executando…' : 'Rodar diagnóstico'}
-              </Button>
-            </div>
-            {diagnostic ? (
-              <pre className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800 overflow-auto whitespace-pre-wrap">{diagnostic}</pre>
-            ) : null}
           </div>
         </Card>
 

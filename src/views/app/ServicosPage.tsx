@@ -42,8 +42,8 @@ function toFormState(servico?: Servico | null): FormState {
 }
 
 export function ServicosPage() {
-  const { principal } = useAuth()
-  const usuario = principal?.kind === 'usuario' ? principal.profile : null
+  const { appPrincipal } = useAuth()
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
 
   const usuarioId = usuario?.id
 

@@ -1,11 +1,12 @@
-import { Link, useLocation } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../state/auth/useAuth'
 import { Button } from '../ui/Button'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { principal, signOut } = useAuth()
+  const { principal, appPrincipal, impersonation, stopImpersonation, signOut } = useAuth()
   const location = useLocation()
-  const isFuncionario = principal?.kind === 'funcionario'
+  const navigate = useNavigate()
+  const isFuncionario = appPrincipal?.kind === 'funcionario'
 
   const nav = isFuncionario
     ? [
@@ -15,6 +16,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     : [
         { to: '/dashboard', label: 'Agenda' },
         { to: '/servicos', label: 'Meus Serviços' },
+        { to: '/clientes', label: 'Clientes' },
+        { to: '/relatorios', label: 'Relatórios' },
         { to: '/funcionarios', label: 'Funcionários' },
         { to: '/configuracoes/whatsapp', label: 'WhatsApp' },
         { to: '/configuracoes/mensagens', label: 'Mensagens Automáticas' },
@@ -28,16 +31,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div>
             <div className="text-xs font-semibold tracking-wide text-slate-500">SMagenda</div>
             <div className="text-lg font-semibold text-slate-900">
-              {principal?.kind === 'usuario'
-                ? principal.profile.nome_negocio
-                : principal?.kind === 'funcionario'
-                  ? `Olá, ${principal.profile.nome_completo}`
+              {appPrincipal?.kind === 'usuario'
+                ? appPrincipal.profile.nome_negocio
+                : appPrincipal?.kind === 'funcionario'
+                  ? `Olá, ${appPrincipal.profile.nome_completo}`
                   : ''}
             </div>
           </div>
-          <Button variant="secondary" onClick={() => signOut()}>
-            Sair
-          </Button>
+          <div className="flex items-center gap-2">
+            {principal?.kind === 'super_admin' && impersonation ? (
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  stopImpersonation()
+                  navigate('/admin/clientes')
+                }}
+              >
+                Voltar ao admin
+              </Button>
+            ) : null}
+            <Button variant="secondary" onClick={() => signOut()}>
+              Sair
+            </Button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-[240px_1fr]">

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../../lib/supabase'
 import type { FuncionarioProfile, Principal, SuperAdminProfile, UsuarioProfile } from './types'
-import { AuthContext, type AuthState } from './AuthContext'
+import { AuthContext, type AuthState, type Impersonation } from './AuthContext'
 
 function deriveEmailPrefix(email: string | null) {
   if (!email) return null
@@ -128,6 +128,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [principal, setPrincipal] = useState<Principal | null>(null)
   const [loading, setLoading] = useState(true)
 
+  const [impersonation, setImpersonation] = useState<Impersonation | null>(() => {
+    try {
+      const raw = window.localStorage.getItem('smagenda:impersonation')
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as unknown
+      if (!parsed || typeof parsed !== 'object') return null
+      const p = parsed as Record<string, unknown>
+      const usuarioId = typeof p.usuarioId === 'string' ? p.usuarioId : null
+      return usuarioId ? { usuarioId } : null
+    } catch {
+      return null
+    }
+  })
+
+  const [impersonatedUsuario, setImpersonatedUsuario] = useState<UsuarioProfile | null>(null)
+
   const refresh = useCallback(async () => {
     const { data } = await supabase.auth.getSession()
     setSession(data.session)
@@ -145,7 +161,71 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await supabase.auth.signOut()
     setSession(null)
     setPrincipal(null)
+    setImpersonation(null)
+    setImpersonatedUsuario(null)
+    try {
+      window.localStorage.removeItem('smagenda:impersonation')
+    } catch {
+      return
+    }
   }, [])
+
+  const stopImpersonation = useCallback(() => {
+    setImpersonation(null)
+    setImpersonatedUsuario(null)
+    try {
+      window.localStorage.removeItem('smagenda:impersonation')
+    } catch {
+      return
+    }
+  }, [])
+
+  const startImpersonation = useCallback(
+    async (usuarioId: string) => {
+      if (principal?.kind !== 'super_admin') return { ok: false as const, message: 'Sem permissão.' }
+      const id = usuarioId.trim()
+      if (!id) return { ok: false as const, message: 'Cliente inválido.' }
+
+      const { data, error } = await supabase.from('usuarios').select('*').eq('id', id).maybeSingle()
+      if (error) return { ok: false as const, message: error.message }
+      if (!data) return { ok: false as const, message: 'Cliente não encontrado na tabela usuarios.' }
+
+      const profile = toUsuarioProfile(data as unknown as Record<string, unknown>, id)
+      setImpersonation({ usuarioId: id })
+      setImpersonatedUsuario(profile)
+      try {
+        window.localStorage.setItem('smagenda:impersonation', JSON.stringify({ usuarioId: id }))
+      } catch {
+        return { ok: true as const }
+      }
+      return { ok: true as const }
+    },
+    [principal?.kind]
+  )
+
+  useEffect(() => {
+    const run = async () => {
+      if (!impersonation) {
+        setImpersonatedUsuario(null)
+        return
+      }
+      if (principal?.kind !== 'super_admin') {
+        stopImpersonation()
+        return
+      }
+
+      const { data, error } = await supabase.from('usuarios').select('*').eq('id', impersonation.usuarioId).maybeSingle()
+      if (error || !data) {
+        stopImpersonation()
+        return
+      }
+      setImpersonatedUsuario(toUsuarioProfile(data as unknown as Record<string, unknown>, impersonation.usuarioId))
+    }
+
+    run().catch(() => {
+      stopImpersonation()
+    })
+  }, [impersonation, principal?.kind, stopImpersonation])
 
   useEffect(() => {
     void (async () => {
@@ -171,7 +251,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [refresh])
 
-  const value = useMemo<AuthState>(() => ({ session, principal, loading, refresh, signOut }), [session, principal, loading, refresh, signOut])
+  const appPrincipal = useMemo<Principal | null>(() => {
+    if (principal?.kind === 'super_admin' && impersonation && impersonatedUsuario) {
+      return { kind: 'usuario', profile: impersonatedUsuario }
+    }
+    return principal
+  }, [impersonatedUsuario, impersonation, principal])
+
+  const value = useMemo<AuthState>(
+    () => ({
+      session,
+      principal,
+      appPrincipal,
+      loading,
+      refresh,
+      signOut,
+      impersonation,
+      startImpersonation,
+      stopImpersonation,
+    }),
+    [session, principal, appPrincipal, loading, refresh, signOut, impersonation, startImpersonation, stopImpersonation]
+  )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

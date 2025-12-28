@@ -10,7 +10,7 @@ type Props = {
 }
 
 export function RequireAuth({ children, requiredKind }: Props) {
-  const { loading, session, principal, signOut } = useAuth()
+  const { loading, session, principal, appPrincipal, impersonation, signOut } = useAuth()
   const location = useLocation()
   const [masterBlocked, setMasterBlocked] = useState(false)
   const [checkingMaster, setCheckingMaster] = useState(false)
@@ -90,6 +90,9 @@ export function RequireAuth({ children, requiredKind }: Props) {
     return <Navigate to="/login" replace />
   }
 
+  const inAdmin = location.pathname.startsWith('/admin')
+  const effective = inAdmin ? principal : (appPrincipal ?? principal)
+
   if (principal.kind === 'funcionario' && masterBlocked) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
@@ -134,13 +137,13 @@ export function RequireAuth({ children, requiredKind }: Props) {
     }
   }
 
-  if (principal.kind === 'super_admin' && !location.pathname.startsWith('/admin')) {
+  if (principal.kind === 'super_admin' && !inAdmin && !impersonation) {
     return <Navigate to="/admin/dashboard" replace />
   }
 
-  if (requiredKind && principal.kind !== requiredKind) {
+  if (requiredKind && effective.kind !== requiredKind) {
     if (principal.kind === 'super_admin') return <Navigate to="/admin/dashboard" replace />
-    if (principal.kind === 'funcionario') return <Navigate to="/funcionario/agenda" replace />
+    if (effective.kind === 'funcionario') return <Navigate to="/funcionario/agenda" replace />
     return <Navigate to="/dashboard" replace />
   }
 

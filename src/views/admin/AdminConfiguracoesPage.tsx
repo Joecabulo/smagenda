@@ -62,19 +62,97 @@ export function AdminConfiguracoesPage() {
       }
   >(null)
 
+  const [resendTestFrom, setResendTestFrom] = useState('')
+  const [resendTestTo, setResendTestTo] = useState('')
+  const [resendTestSubject, setResendTestSubject] = useState('')
+  const [resendTestSending, setResendTestSending] = useState(false)
+  const [resendTestError, setResendTestError] = useState<string | null>(null)
+  const [resendTestResult, setResendTestResult] = useState<unknown>(null)
+
   useEffect(() => {
     const run = async () => {
       const { data } = await supabase.auth.getSession()
       setUserId(data.session?.user?.id ?? null)
-      setEmail(data.session?.user?.email ?? null)
+      const sessionEmail = data.session?.user?.email ?? null
+      setEmail(sessionEmail)
+      if (sessionEmail && !resendTestTo) setResendTestTo(sessionEmail)
 
       const host = window.location.hostname
       if (host && host !== 'localhost' && host !== '127.0.0.1' && host.includes('.') && !resendDomain) {
         setResendDomain(host)
       }
+      if (host && host !== 'localhost' && host !== '127.0.0.1' && host.includes('.') && !resendTestFrom) {
+        setResendTestFrom(`SMagenda <no-reply@${host}>`)
+      }
     }
     run().catch(() => undefined)
-  }, [resendDomain])
+  }, [resendDomain, resendTestFrom, resendTestTo])
+
+  const sendResendTest = async () => {
+    setResendTestSending(true)
+    setResendTestError(null)
+    setResendTestResult(null)
+
+    if (!supabaseEnv.ok) {
+      setResendTestError(`Supabase não configurado. Faltando: ${supabaseEnv.missing.join(', ')}`)
+      setResendTestSending(false)
+      return
+    }
+
+    const domain = resendDomain.trim().toLowerCase()
+    if (!domain) {
+      setResendTestError('Informe o domínio (ex.: smagenda.com.br).')
+      setResendTestSending(false)
+      return
+    }
+
+    const from = resendTestFrom.trim()
+    const to = resendTestTo.trim()
+    if (!from || !to) {
+      setResendTestError('Informe remetente e destinatário.')
+      setResendTestSending(false)
+      return
+    }
+
+    const { data } = await supabase.auth.getSession()
+    const accessToken = data.session?.access_token ?? null
+    if (!accessToken) {
+      setResendTestError('Sessão expirada. Faça login novamente.')
+      setResendTestSending(false)
+      return
+    }
+
+    const fnUrl = `${supabaseEnv.values.VITE_SUPABASE_URL.replace(/\/$/, '')}/functions/v1/resend-domain`
+    const subject = resendTestSubject.trim() || 'Teste de email (Resend) — SMagenda'
+    const text = `Teste real de envio via Resend em ${new Date().toISOString()}`
+
+    try {
+      const res = await fetch(fnUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: supabaseEnv.values.VITE_SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ domain, action: 'send_test', from, to, subject, text }),
+      })
+      const json = (await res.json().catch(() => null)) as unknown
+      if (!res.ok) {
+        const obj = json && typeof json === 'object' ? (json as Record<string, unknown>) : null
+        const msg = (typeof obj?.message === 'string' && obj.message) || (typeof obj?.error === 'string' && obj.error) || `HTTP ${res.status}`
+        setResendTestError(String(msg))
+        setResendTestResult(json)
+        setResendTestSending(false)
+        return
+      }
+
+      setResendTestResult(json)
+      setResendTestSending(false)
+    } catch (e: unknown) {
+      setResendTestError(e instanceof Error ? e.message : 'Falha de rede ao enviar email')
+      setResendTestSending(false)
+    }
+  }
 
   const runResend = async (action: 'status' | 'verify') => {
     setResendLoading(true)
@@ -289,11 +367,48 @@ alter table public.servicos enable row level security;
 alter table public.agendamentos enable row level security;
 alter table public.bloqueios enable row level security;
 
+create table if not exists public.super_admin (
+  id uuid primary key references auth.users(id) on delete cascade,
+  nome text not null default 'Super Admin',
+  email text null,
+  nivel text not null default 'super_admin',
+  criado_em timestamptz not null default now(),
+  whatsapp_api_url text,
+  whatsapp_api_key text,
+  whatsapp_instance_name text
+);
+
+alter table public.super_admin enable row level security;
+
+drop policy if exists "super_admin_self_select" on public.super_admin;
+create policy "super_admin_self_select" on public.super_admin
+for select to authenticated
+using (id = auth.uid());
+
+drop policy if exists "super_admin_self_insert" on public.super_admin;
+create policy "super_admin_self_insert" on public.super_admin
+for insert to authenticated
+with check (id = auth.uid());
+
+drop policy if exists "super_admin_self_update" on public.super_admin;
+create policy "super_admin_self_update" on public.super_admin
+for update to authenticated
+using (id = auth.uid())
+with check (id = auth.uid());
+
+grant select, insert, update on public.super_admin to authenticated;
+
+create or replace function public.is_super_admin() returns boolean
+language sql stable as $$
+  select exists (select 1 from public.super_admin sa where sa.id = auth.uid())
+$$;
+
 drop policy if exists "usuarios_select_self_or_master_for_funcionario" on public.usuarios;
 create policy "usuarios_select_self_or_master_for_funcionario" on public.usuarios
 for select to authenticated
 using (
   id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -306,38 +421,58 @@ using (
 drop policy if exists "usuarios_update_self" on public.usuarios;
 create policy "usuarios_update_self" on public.usuarios
 for update to authenticated
-using (id = auth.uid())
-with check (id = auth.uid());
+using (
+  id = auth.uid()
+  or public.is_super_admin()
+)
+with check (
+  id = auth.uid()
+  or public.is_super_admin()
+);
 
 drop policy if exists "funcionarios_select_master_or_self" on public.funcionarios;
 create policy "funcionarios_select_master_or_self" on public.funcionarios
 for select to authenticated
 using (
   usuario_master_id = auth.uid()
+  or public.is_super_admin()
   or id = auth.uid()
 );
 
 drop policy if exists "funcionarios_insert_master" on public.funcionarios;
 create policy "funcionarios_insert_master" on public.funcionarios
 for insert to authenticated
-with check (usuario_master_id = auth.uid());
+with check (
+  usuario_master_id = auth.uid()
+  or public.is_super_admin()
+);
 
 drop policy if exists "funcionarios_update_master" on public.funcionarios;
 create policy "funcionarios_update_master" on public.funcionarios
 for update to authenticated
-using (usuario_master_id = auth.uid())
-with check (usuario_master_id = auth.uid());
+using (
+  usuario_master_id = auth.uid()
+  or public.is_super_admin()
+)
+with check (
+  usuario_master_id = auth.uid()
+  or public.is_super_admin()
+);
 
 drop policy if exists "funcionarios_delete_master" on public.funcionarios;
 create policy "funcionarios_delete_master" on public.funcionarios
 for delete to authenticated
-using (usuario_master_id = auth.uid());
+using (
+  usuario_master_id = auth.uid()
+  or public.is_super_admin()
+);
 
 drop policy if exists "servicos_select_master_or_funcionario" on public.servicos;
 create policy "servicos_select_master_or_funcionario" on public.servicos
 for select to authenticated
 using (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -352,6 +487,7 @@ create policy "servicos_insert_master_or_funcionario" on public.servicos
 for insert to authenticated
 with check (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -367,6 +503,7 @@ create policy "servicos_update_master_or_funcionario" on public.servicos
 for update to authenticated
 using (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -378,6 +515,7 @@ using (
 )
 with check (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -393,6 +531,7 @@ create policy "servicos_delete_master_or_funcionario" on public.servicos
 for delete to authenticated
 using (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -408,6 +547,7 @@ create policy "agendamentos_select_master_or_funcionario" on public.agendamentos
 for select to authenticated
 using (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or (
     funcionario_id = auth.uid()
     and exists (
@@ -426,6 +566,7 @@ create policy "agendamentos_insert_master_or_funcionario" on public.agendamentos
 for insert to authenticated
 with check (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or (
     funcionario_id = auth.uid()
     and exists (
@@ -444,6 +585,7 @@ create policy "agendamentos_update_master_or_funcionario" on public.agendamentos
 for update to authenticated
 using (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or (
     funcionario_id = auth.uid()
     and exists (
@@ -458,6 +600,7 @@ using (
 )
 with check (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or (
     funcionario_id = auth.uid()
     and exists (
@@ -474,13 +617,17 @@ with check (
 drop policy if exists "agendamentos_delete_master" on public.agendamentos;
 create policy "agendamentos_delete_master" on public.agendamentos
 for delete to authenticated
-using (usuario_id = auth.uid());
+using (
+  usuario_id = auth.uid()
+  or public.is_super_admin()
+);
 
 drop policy if exists "bloqueios_select_master_or_funcionario" on public.bloqueios;
 create policy "bloqueios_select_master_or_funcionario" on public.bloqueios
 for select to authenticated
 using (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or (
     (bloqueios.funcionario_id is null or bloqueios.funcionario_id = auth.uid())
     and exists (
@@ -499,6 +646,7 @@ create policy "bloqueios_insert_master_or_funcionario" on public.bloqueios
 for insert to authenticated
 with check (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -515,6 +663,7 @@ create policy "bloqueios_update_master_or_funcionario" on public.bloqueios
 for update to authenticated
 using (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -527,6 +676,7 @@ using (
 )
 with check (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -543,6 +693,7 @@ create policy "bloqueios_delete_master_or_funcionario" on public.bloqueios
 for delete to authenticated
 using (
   usuario_id = auth.uid()
+  or public.is_super_admin()
   or exists (
     select 1
     from public.funcionarios f
@@ -969,13 +1120,18 @@ create policy "super_admin_self_select" on public.super_admin
 for select to authenticated
 using (id = auth.uid());
 
+drop policy if exists "super_admin_self_insert" on public.super_admin;
+create policy "super_admin_self_insert" on public.super_admin
+for insert to authenticated
+with check (id = auth.uid());
+
 drop policy if exists "super_admin_self_update" on public.super_admin;
 create policy "super_admin_self_update" on public.super_admin
 for update to authenticated
 using (id = auth.uid())
 with check (id = auth.uid());
 
-grant select, update on public.super_admin to authenticated;
+grant select, insert, update on public.super_admin to authenticated;
 
 create or replace function public.is_super_admin() returns boolean
 language sql stable as $$
@@ -1011,13 +1167,18 @@ create policy "super_admin_self_select" on public.super_admin
 for select to authenticated
 using (id = auth.uid());
 
+drop policy if exists "super_admin_self_insert" on public.super_admin;
+create policy "super_admin_self_insert" on public.super_admin
+for insert to authenticated
+with check (id = auth.uid());
+
 drop policy if exists "super_admin_self_update" on public.super_admin;
 create policy "super_admin_self_update" on public.super_admin
 for update to authenticated
 using (id = auth.uid())
 with check (id = auth.uid());
 
-grant select, update on public.super_admin to authenticated;
+grant select, insert, update on public.super_admin to authenticated;
 
 create or replace function public.is_super_admin() returns boolean
 language sql stable as $$
@@ -1344,6 +1505,55 @@ $$;`
                 ) : null}
               </div>
             ) : null}
+          </div>
+        </Card>
+
+        <Card>
+          <div className="p-6 space-y-3">
+            <div className="text-sm font-semibold text-slate-900">Email (Resend) — Teste de envio</div>
+            <div className="text-sm text-slate-600">
+              Envia um email real via API do Resend. Se falhar, normalmente é DNS/domínio não verificado ou falta da secret `RESEND_API_KEY`.
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <Input label="Remetente (From)" value={resendTestFrom} onChange={(e) => setResendTestFrom(e.target.value)} placeholder="SMagenda <no-reply@smagenda.com.br>" />
+              <Input
+                label="Destinatário (To)"
+                value={resendTestTo}
+                onChange={(e) => setResendTestTo(e.target.value)}
+                placeholder="seuemail@dominio.com"
+              />
+              <Input
+                label="Assunto"
+                value={resendTestSubject}
+                onChange={(e) => setResendTestSubject(e.target.value)}
+                placeholder="Teste de email"
+              />
+              <div className="flex justify-end">
+                <Button onClick={sendResendTest} disabled={resendTestSending || resendLoading}>
+                  {resendTestSending ? 'Enviando…' : 'Enviar email teste'}
+                </Button>
+              </div>
+            </div>
+
+            {resendTestError ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{resendTestError}</div>
+            ) : null}
+            {resendTestResult ? (
+              <pre className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800 overflow-auto whitespace-pre-wrap">
+                {JSON.stringify(resendTestResult, null, 2)}
+              </pre>
+            ) : null}
+
+            <div className="rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-700">
+              <div className="font-semibold text-slate-900">SMTP (Supabase Auth)</div>
+              <div className="text-slate-600">
+                Para os emails de confirmação e recuperação de senha do Supabase, configure em Authentication → SMTP Settings.
+              </div>
+              <div className="mt-2 text-xs text-slate-600 font-mono">
+                Host=smtp.resend.com • Username=resend • Password=RESEND_API_KEY • Port=465 (SMTPS) ou 587 (STARTTLS)
+              </div>
+            </div>
           </div>
         </Card>
 

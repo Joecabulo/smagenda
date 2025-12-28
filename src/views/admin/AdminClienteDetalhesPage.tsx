@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { AdminShell } from '../../components/layout/AdminShell'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
-import { supabase } from '../../lib/supabase'
+import { supabase, supabaseEnv } from '../../lib/supabase'
+import { useAuth } from '../../state/auth/useAuth'
 
 type Cliente = {
   id: string
@@ -18,6 +19,56 @@ type Cliente = {
   status_pagamento: string
   ativo: boolean
   limite_funcionarios: number | null
+}
+
+type Funcionario = {
+  id: string
+  nome_completo: string
+  email: string
+  telefone: string | null
+  permissao: 'admin' | 'funcionario'
+  ativo: boolean
+}
+
+type FnResult = { ok: true; status: number; body: unknown } | { ok: false; status: number; body: unknown }
+
+async function callFn(path: string, body: unknown): Promise<FnResult> {
+  if (!supabaseEnv.ok) return { ok: false, status: 0, body: { error: 'missing_supabase_env', missing: supabaseEnv.missing } }
+
+  const { data } = await supabase.auth.getSession()
+  const accessToken = data.session?.access_token ?? null
+  if (!accessToken) return { ok: false, status: 401, body: { error: 'missing_session' } }
+
+  const fnUrl = `${supabaseEnv.values.VITE_SUPABASE_URL.replace(/\/$/, '')}/functions/v1/${path}`
+  let res: Response
+  try {
+    res = await fetch(fnUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: supabaseEnv.values.VITE_SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(body),
+    })
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'Falha de rede'
+    return { ok: false, status: 0, body: { error: 'network_error', message: msg } }
+  }
+
+  const raw = await res.text().catch(() => null)
+  const parsed = raw
+    ? (() => {
+        try {
+          return JSON.parse(raw) as unknown
+        } catch {
+          return raw
+        }
+      })()
+    : null
+
+  if (!res.ok) return { ok: false, status: res.status, body: parsed }
+  return { ok: true, status: res.status, body: parsed }
 }
 
 const planoOptions = ['free', 'basic', 'pro', 'team', 'enterprise']
@@ -33,16 +84,38 @@ const planoDefaultLimite: Record<string, number | null> = {
 
 export function AdminClienteDetalhesPage() {
   const { id } = useParams()
+  const navigate = useNavigate()
+  const { startImpersonation } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [cliente, setCliente] = useState<Cliente | null>(null)
   const [servicosCount, setServicosCount] = useState(0)
   const [funcionariosCount, setFuncionariosCount] = useState(0)
+  const [funcionarios, setFuncionarios] = useState<Funcionario[]>([])
   const [saving, setSaving] = useState(false)
   const [plano, setPlano] = useState('')
   const [statusPagamento, setStatusPagamento] = useState('')
   const [ativo, setAtivo] = useState(true)
   const [limiteFuncionarios, setLimiteFuncionarios] = useState('')
+  const [creatingFuncionario, setCreatingFuncionario] = useState(false)
+  const [funcFormOpen, setFuncFormOpen] = useState(false)
+  const [funcNome, setFuncNome] = useState('')
+  const [funcEmail, setFuncEmail] = useState('')
+  const [funcSenha, setFuncSenha] = useState('')
+  const [funcPermissao, setFuncPermissao] = useState<'admin' | 'funcionario'>('funcionario')
+  const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null)
+  const [creatingCheckout, setCreatingCheckout] = useState(false)
+
+  const limiteParsed = useMemo(() => {
+    const n = limiteFuncionarios.trim() === '' ? null : Number(limiteFuncionarios)
+    return Number.isNaN(n as number) ? null : n
+  }, [limiteFuncionarios])
+
+  const limiteAtingido = useMemo(() => {
+    if (!cliente) return false
+    if (limiteParsed === null) return false
+    return funcionariosCount >= limiteParsed
+  }, [cliente, funcionariosCount, limiteParsed])
 
   useEffect(() => {
     const run = async () => {
@@ -78,6 +151,13 @@ export function AdminClienteDetalhesPage() {
       setServicosCount(sCount ?? 0)
       setFuncionariosCount(fCount ?? 0)
 
+      const { data: funcs } = await supabase
+        .from('funcionarios')
+        .select('id,nome_completo,email,telefone,permissao,ativo')
+        .eq('usuario_master_id', id)
+        .order('nome_completo', { ascending: true })
+      setFuncionarios((funcs ?? []) as unknown as Funcionario[])
+
       setLoading(false)
     }
     run().catch((e: unknown) => {
@@ -111,6 +191,128 @@ export function AdminClienteDetalhesPage() {
     setSaving(false)
   }
 
+  const logarComoCliente = async () => {
+    if (!cliente) return
+    setError(null)
+    setCheckoutUrl(null)
+    const res = await startImpersonation(cliente.id)
+    if (!res.ok) {
+      setError(res.message)
+      return
+    }
+    navigate('/dashboard')
+  }
+
+  const createFuncionario = async () => {
+    if (!cliente) return
+    const nome = funcNome.trim()
+    const email = funcEmail.trim().toLowerCase()
+    const senha = funcSenha
+    if (!nome || !email || !senha) {
+      setError('Preencha nome, email e senha.')
+      return
+    }
+    if (senha.trim().length < 8) {
+      setError('A senha deve ter no mínimo 8 caracteres.')
+      return
+    }
+    setCreatingFuncionario(true)
+    setError(null)
+
+    const res = await callFn('admin-create-funcionario', {
+      usuario_master_id: cliente.id,
+      nome_completo: nome,
+      email,
+      senha,
+      permissao: funcPermissao,
+    })
+
+    if (!res.ok) {
+      const msg = typeof res.body === 'object' && res.body !== null && typeof (res.body as Record<string, unknown>).message === 'string'
+        ? String((res.body as Record<string, unknown>).message)
+        : `Erro ao criar funcionário (HTTP ${res.status}).`
+      setError(msg)
+      setCreatingFuncionario(false)
+      return
+    }
+
+    const body = res.body as Record<string, unknown>
+    const newId = typeof body.id === 'string' ? body.id : null
+    if (!newId) {
+      setError('Falha ao criar funcionário.')
+      setCreatingFuncionario(false)
+      return
+    }
+
+    setFuncNome('')
+    setFuncEmail('')
+    setFuncSenha('')
+    setFuncPermissao('funcionario')
+    setFuncFormOpen(false)
+    setCreatingFuncionario(false)
+    await Promise.resolve()
+    const { data: funcs } = await supabase
+      .from('funcionarios')
+      .select('id,nome_completo,email,telefone,permissao,ativo')
+      .eq('usuario_master_id', cliente.id)
+      .order('nome_completo', { ascending: true })
+    setFuncionarios((funcs ?? []) as unknown as Funcionario[])
+    setFuncionariosCount((funcs ?? []).length)
+  }
+
+  const gerarCheckout = async () => {
+    if (!cliente) return
+    if (!plano) {
+      setError('Selecione um plano antes de gerar o link de pagamento.')
+      return
+    }
+    setCreatingCheckout(true)
+    setError(null)
+    setCheckoutUrl(null)
+
+    const res = await callFn('payments', { action: 'create_checkout', usuario_id: cliente.id, plano })
+    if (!res.ok) {
+      const msg = typeof res.body === 'object' && res.body !== null && typeof (res.body as Record<string, unknown>).message === 'string'
+        ? String((res.body as Record<string, unknown>).message)
+        : `Erro ao gerar link (HTTP ${res.status}).`
+      setError(msg)
+      setCreatingCheckout(false)
+      return
+    }
+    const body = res.body as Record<string, unknown>
+    const url = typeof body.url === 'string' ? body.url : null
+    if (!url) {
+      setError('A função não retornou o link de checkout.')
+      setCreatingCheckout(false)
+      return
+    }
+    setCheckoutUrl(url)
+    setCreatingCheckout(false)
+  }
+
+  const toggleFuncionario = async (f: Funcionario) => {
+    setError(null)
+    const { error: err } = await supabase.from('funcionarios').update({ ativo: !f.ativo }).eq('id', f.id)
+    if (err) {
+      setError(err.message)
+      return
+    }
+    setFuncionarios((prev) => prev.map((x) => (x.id === f.id ? { ...x, ativo: !x.ativo } : x)))
+  }
+
+  const removeFuncionario = async (f: Funcionario) => {
+    setError(null)
+    const ok = window.confirm(`Excluir funcionário "${f.nome_completo}"?`)
+    if (!ok) return
+    const { error: err } = await supabase.from('funcionarios').delete().eq('id', f.id)
+    if (err) {
+      setError(err.message)
+      return
+    }
+    setFuncionarios((prev) => prev.filter((x) => x.id !== f.id))
+    setFuncionariosCount((n) => Math.max(0, n - 1))
+  }
+
   return (
     <AdminShell>
       <div className="space-y-6">
@@ -131,22 +333,25 @@ export function AdminClienteDetalhesPage() {
           <div className="space-y-4">
             <Card>
               <div className="p-6 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-lg font-semibold text-slate-900">{cliente.nome_negocio}</div>
-                  <div className="text-sm text-slate-600">/{cliente.slug}</div>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-lg font-semibold text-slate-900">{cliente.nome_negocio}</div>
+                    <div className="text-sm text-slate-600">/{cliente.slug}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {cliente.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}
+                    <Badge tone="slate">{cliente.plano.toUpperCase()}</Badge>
+                    <Badge tone={cliente.status_pagamento === 'inadimplente' ? 'red' : 'slate'}>{cliente.status_pagamento}</Badge>
+                  </div>
                 </div>
-              <div className="flex items-center gap-2">
-                  {cliente.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}
-                  <Badge tone="slate">{cliente.plano.toUpperCase()}</Badge>
-                  <Badge tone={cliente.status_pagamento === 'inadimplente' ? 'red' : 'slate'}>{cliente.status_pagamento}</Badge>
+                <div className="text-sm text-slate-700">{cliente.nome_completo}</div>
+                <div className="text-sm text-slate-700">{cliente.email}</div>
+                {cliente.telefone ? <div className="text-sm text-slate-700">{cliente.telefone}</div> : null}
+                <div className="text-sm text-slate-700">Serviços: {servicosCount}</div>
+                <div className="text-sm text-slate-700">Funcionários: {funcionariosCount}</div>
+                <div className="flex justify-end">
+                  <Button onClick={logarComoCliente}>Logar como cliente</Button>
                 </div>
-              </div>
-              <div className="text-sm text-slate-700">{cliente.nome_completo}</div>
-              <div className="text-sm text-slate-700">{cliente.email}</div>
-              {cliente.telefone ? <div className="text-sm text-slate-700">{cliente.telefone}</div> : null}
-              <div className="text-sm text-slate-700">Serviços: {servicosCount}</div>
-              <div className="text-sm text-slate-700">Funcionários: {funcionariosCount}</div>
               </div>
             </Card>
 
@@ -213,10 +418,136 @@ export function AdminClienteDetalhesPage() {
                   />
                 </div>
 
+                {limiteFuncionarios.trim() !== '' && limiteParsed === null ? (
+                  <div className="text-sm text-rose-700">Limite de funcionários inválido.</div>
+                ) : null}
+
                 <div className="flex justify-end">
                   <Button onClick={save} disabled={saving || !plano || !statusPagamento}>
                     Salvar alterações
                   </Button>
+                </div>
+
+                <div className="border-t border-slate-100 pt-4 space-y-3">
+                  <div className="text-sm font-semibold text-slate-900">Pagamento</div>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-sm text-slate-600">Gera um link de checkout para o plano selecionado.</div>
+                    <Button variant="secondary" onClick={gerarCheckout} disabled={creatingCheckout || !plano}>
+                      {creatingCheckout ? 'Gerando…' : 'Gerar link de pagamento'}
+                    </Button>
+                  </div>
+                  {checkoutUrl ? (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                      <div className="text-xs font-semibold tracking-wide text-slate-500">CHECKOUT URL</div>
+                      <a className="block break-all text-sm text-slate-900 hover:underline" href={checkoutUrl} target="_blank" rel="noreferrer">
+                        {checkoutUrl}
+                      </a>
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <Button
+                          variant="secondary"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(checkoutUrl)
+                            } catch {
+                              window.prompt('Copie o link:', checkoutUrl)
+                            }
+                          }}
+                        >
+                          Copiar
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          onClick={() => {
+                            window.open(checkoutUrl, '_blank', 'noreferrer')
+                          }}
+                        >
+                          Abrir
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </Card>
+
+            <Card>
+              <div className="p-6 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-900">Funcionários</div>
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setError(null)
+                      setCheckoutUrl(null)
+                      setFuncFormOpen((v) => !v)
+                    }}
+                    disabled={creatingFuncionario || limiteAtingido}
+                  >
+                    {funcFormOpen ? 'Fechar' : 'Novo funcionário'}
+                  </Button>
+                </div>
+
+                {limiteAtingido ? (
+                  <div className="text-sm text-rose-700">Limite de funcionários atingido para o plano.</div>
+                ) : null}
+
+                {funcFormOpen ? (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-4">
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      <Input label="Nome completo" value={funcNome} onChange={(e) => setFuncNome(e.target.value)} />
+                      <Input label="Email" value={funcEmail} onChange={(e) => setFuncEmail(e.target.value)} />
+                      <Input label="Senha" type="password" value={funcSenha} onChange={(e) => setFuncSenha(e.target.value)} />
+                      <label className="block">
+                        <div className="text-sm font-medium text-slate-700 mb-1">Permissão</div>
+                        <select
+                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                          value={funcPermissao}
+                          onChange={(e) => setFuncPermissao(e.target.value as 'admin' | 'funcionario')}
+                        >
+                          <option value="funcionario">Funcionário</option>
+                          <option value="admin">Admin</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <Button
+                        variant="secondary"
+                        onClick={() => {
+                          setFuncFormOpen(false)
+                        }}
+                        disabled={creatingFuncionario}
+                      >
+                        Cancelar
+                      </Button>
+                      <Button onClick={createFuncionario} disabled={creatingFuncionario}>
+                        {creatingFuncionario ? 'Criando…' : 'Criar funcionário'}
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {funcionarios.length === 0 ? <div className="text-sm text-slate-600">Nenhum funcionário.</div> : null}
+                <div className="divide-y divide-slate-100">
+                  {funcionarios.map((f) => (
+                    <div key={f.id} className="py-3 flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">{f.nome_completo}</div>
+                        <div className="text-sm text-slate-600">{f.email}</div>
+                        {f.telefone ? <div className="text-sm text-slate-600">{f.telefone}</div> : null}
+                        <div className="text-sm text-slate-700">{f.permissao}</div>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {f.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}
+                        <Button variant="secondary" onClick={() => toggleFuncionario(f)}>
+                          {f.ativo ? 'Desativar' : 'Ativar'}
+                        </Button>
+                        <Button variant="danger" onClick={() => removeFuncionario(f)}>
+                          Excluir
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             </Card>

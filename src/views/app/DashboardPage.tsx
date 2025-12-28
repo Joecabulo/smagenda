@@ -60,6 +60,52 @@ function addDays(value: Date, days: number) {
   return d
 }
 
+function addMonths(value: Date, months: number) {
+  const d = new Date(value)
+  const day = d.getDate()
+  d.setDate(1)
+  d.setMonth(d.getMonth() + months)
+  const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
+  d.setDate(Math.min(day, lastDay))
+  return d
+}
+
+function parseDateKey(value: string) {
+  const [y, m, d] = value.split('-').map((v) => Number(v))
+  const out = new Date(y, m - 1, d)
+  out.setHours(0, 0, 0, 0)
+  return out
+}
+
+function overlaps(startA: number, endA: number, startB: number, endB: number) {
+  return startA < endB && endA > startB
+}
+
+type RepeatKind = 'none' | 'daily' | 'weekly' | 'monthly'
+
+function buildRepeatKeys(startKey: string, repeat: RepeatKind, untilKey: string | null) {
+  if (repeat === 'none') return { keys: [startKey], error: null as string | null }
+  if (!untilKey) return { keys: [] as string[], error: 'Selecione a data final da recorrência.' }
+
+  const start = parseDateKey(startKey)
+  const until = parseDateKey(untilKey)
+  if (until < start) return { keys: [] as string[], error: 'A data final deve ser igual ou posterior ao início.' }
+
+  const keys: string[] = []
+  const max = 90
+  let cur = start
+  while (cur <= until && keys.length < max) {
+    keys.push(toISODate(cur))
+    cur = repeat === 'daily' ? addDays(cur, 1) : repeat === 'weekly' ? addDays(cur, 7) : addMonths(cur, 1)
+  }
+
+  if (cur <= until) {
+    return { keys: [] as string[], error: 'Intervalo muito grande. Reduza a data final da recorrência.' }
+  }
+
+  return { keys, error: null as string | null }
+}
+
 function normalizeText(value: string) {
   return value
     .toLowerCase()
@@ -179,8 +225,8 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
 }
 
 export function DashboardPage() {
-  const { principal } = useAuth()
-  const usuario = principal?.kind === 'usuario' ? principal.profile : null
+  const { appPrincipal } = useAuth()
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
   const usuarioId = usuario?.id ?? null
 
   const tutorialKey = useMemo(() => (usuarioId ? `smagenda:tutorial:dashboard:${usuarioId}` : null), [usuarioId])
@@ -244,6 +290,8 @@ export function DashboardPage() {
   const [blockEnd, setBlockEnd] = useState('')
   const [blockMotivo, setBlockMotivo] = useState('')
   const [blockFuncionarioId, setBlockFuncionarioId] = useState<string>('')
+  const [blockRepeat, setBlockRepeat] = useState<RepeatKind>('none')
+  const [blockRepeatUntil, setBlockRepeatUntil] = useState('')
   const [savingBlock, setSavingBlock] = useState(false)
 
   const weekStartDate = useMemo(() => startOfWeek(date), [date])
@@ -423,6 +471,10 @@ export function DashboardPage() {
     })
   }
 
+  const repeatPreview = useMemo(() => {
+    return buildRepeatKeys(dayKey, blockRepeat, blockRepeatUntil.trim() ? blockRepeatUntil : null)
+  }, [blockRepeat, blockRepeatUntil, dayKey])
+
   const canSaveBlock = useMemo(() => {
     if (!usuarioId) return false
     if (!blockStart || !blockEnd) return false
@@ -430,8 +482,10 @@ export function DashboardPage() {
     const e = parseTimeToMinutes(blockEnd)
     if (!Number.isFinite(s) || !Number.isFinite(e)) return false
     if (e <= s) return false
+    if (repeatPreview.error) return false
+    if (repeatPreview.keys.length === 0) return false
     return true
-  }, [usuarioId, blockStart, blockEnd])
+  }, [usuarioId, blockStart, blockEnd, repeatPreview.error, repeatPreview.keys.length])
 
   const resolveFuncionarioLabel = (id: string | null) => {
     if (!id) return 'Geral'
@@ -478,27 +532,64 @@ export function DashboardPage() {
     setError(null)
     const funcionarioId = blockFuncionarioId.trim() ? blockFuncionarioId : null
     const motivo = blockMotivo.trim() ? blockMotivo.trim() : null
-    const { data: created, error: err } = await supabase
-      .from('bloqueios')
-      .insert({
-        usuario_id: usuarioId,
-        data: dayKey,
-        hora_inicio: blockStart,
-        hora_fim: blockEnd,
-        motivo,
-        funcionario_id: funcionarioId,
+
+    const { keys, error: repeatErr } = buildRepeatKeys(dayKey, blockRepeat, blockRepeatUntil.trim() ? blockRepeatUntil : null)
+    if (repeatErr) {
+      setError(repeatErr)
+      setSavingBlock(false)
+      return
+    }
+
+    const s = parseTimeToMinutes(blockStart)
+    const e = parseTimeToMinutes(blockEnd)
+    type OcupacaoRow = { start_min: number; end_min: number }
+    for (const k of keys) {
+      const { data: ocupacoesData, error: ocupacoesErr } = await supabase.rpc('public_get_ocupacoes', {
+        p_usuario_id: usuarioId,
+        p_data: k,
+        p_funcionario_id: funcionarioId,
       })
+      if (ocupacoesErr) {
+        setError(ocupacoesErr.message)
+        setSavingBlock(false)
+        return
+      }
+      const occupied = ((ocupacoesData ?? []) as unknown as OcupacaoRow[]).some((r) => overlaps(s, e, r.start_min, r.end_min))
+      if (occupied) {
+        setError(`Conflito de horário em ${new Date(k).toLocaleDateString('pt-BR')}.`)
+        setSavingBlock(false)
+        return
+      }
+    }
+
+    const rows = keys.map((k) => ({
+      usuario_id: usuarioId,
+      data: k,
+      hora_inicio: blockStart,
+      hora_fim: blockEnd,
+      motivo,
+      funcionario_id: funcionarioId,
+    }))
+
+    const { data: createdRows, error: err } = await supabase
+      .from('bloqueios')
+      .insert(rows)
       .select('id,data,hora_inicio,hora_fim,motivo,funcionario_id')
-      .maybeSingle()
+
     if (err) {
       setError(err.message)
       setSavingBlock(false)
       return
     }
-    if (created) {
-      setBloqueios((prev) => [...prev, created as unknown as Bloqueio])
-    }
+
+    const inserted = (createdRows ?? []) as unknown as Bloqueio[]
+    const inRange = (b: Bloqueio) =>
+      viewMode === 'dia' ? b.data === dayKey : b.data >= weekStartKey && b.data <= weekEndKey
+
+    setBloqueios((prev) => [...prev, ...inserted.filter(inRange)])
     setBlockMotivo('')
+    setBlockRepeat('none')
+    setBlockRepeatUntil('')
     setSavingBlock(false)
   }
 
@@ -638,6 +729,8 @@ export function DashboardPage() {
                   <option value="">Todos</option>
                   <option value="pendente">Pendente</option>
                   <option value="confirmado">Confirmado</option>
+                  <option value="concluido">Concluído</option>
+                  <option value="nao_compareceu">No-show</option>
                   <option value="cancelado">Cancelado</option>
                 </select>
               </label>
@@ -699,6 +792,50 @@ export function DashboardPage() {
                 </select>
               </label>
               <Input label="Motivo (opcional)" value={blockMotivo} onChange={(e) => setBlockMotivo(e.target.value)} />
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+              <label className="block">
+                <div className="text-sm font-medium text-slate-700 mb-1">Repetir</div>
+                <select
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                  value={blockRepeat}
+                  onChange={(e) => {
+                    const next = e.target.value as RepeatKind
+                    setBlockRepeat(next)
+                    if (next === 'none') {
+                      setBlockRepeatUntil('')
+                      return
+                    }
+                    if (!blockRepeatUntil.trim()) {
+                      setBlockRepeatUntil(toISODate(addDays(date, next === 'monthly' ? 180 : 30)))
+                    }
+                  }}
+                >
+                  <option value="none">Não repetir</option>
+                  <option value="daily">Diariamente</option>
+                  <option value="weekly">Semanalmente</option>
+                  <option value="monthly">Mensalmente</option>
+                </select>
+              </label>
+              <div className="sm:col-span-3">
+                {blockRepeat !== 'none' ? (
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <Input
+                      label="Até"
+                      type="date"
+                      min={dayKey}
+                      value={blockRepeatUntil}
+                      onChange={(e) => setBlockRepeatUntil(e.target.value)}
+                    />
+                    <div className="sm:col-span-2 flex items-end">
+                      <div className="text-xs text-slate-600">
+                        {repeatPreview.error ? repeatPreview.error : `Serão criados ${repeatPreview.keys.length} bloqueios.`}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
 
             <div className="flex justify-end">
@@ -801,6 +938,25 @@ export function DashboardPage() {
                               }}
                             >
                               ✓ Confirmar
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              onClick={async () => {
+                                setError(null)
+                                const ok = window.confirm('Marcar como no-show?')
+                                if (!ok) return
+                                const { error: updErr } = await supabase
+                                  .from('agendamentos')
+                                  .update({ status: 'nao_compareceu' })
+                                  .eq('id', ag.id)
+                                if (updErr) {
+                                  setError(updErr.message)
+                                  return
+                                }
+                                setAgendamentos((prev) => prev.map((x) => (x.id === ag.id ? { ...x, status: 'nao_compareceu' } : x)))
+                              }}
+                            >
+                              No-show
                             </Button>
                             <Button
                               variant="danger"

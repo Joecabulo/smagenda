@@ -9,10 +9,10 @@ const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n�
 const defaultLembrete = `Oi {nome}!\n\nLembrete: você tem agendamento amanhã às {hora}.\n\nSe não puder comparecer, me avise!\n{telefone_profissional}`
 
 export function MensagensSettingsPage() {
-  const { principal } = useAuth()
+  const { appPrincipal } = useAuth()
   const usuarioId =
-    principal?.kind === 'usuario' ? principal.profile.id : principal?.kind === 'funcionario' ? principal.profile.usuario_master_id : null
-  const canEdit = useMemo(() => principal?.kind === 'usuario' && Boolean(usuarioId), [principal?.kind, usuarioId])
+    appPrincipal?.kind === 'usuario' ? appPrincipal.profile.id : appPrincipal?.kind === 'funcionario' ? appPrincipal.profile.usuario_master_id : null
+  const canEdit = useMemo(() => appPrincipal?.kind === 'usuario' && Boolean(usuarioId), [appPrincipal?.kind, usuarioId])
 
   const [mensagemConfirmacao, setMensagemConfirmacao] = useState(defaultConfirmacao)
   const [mensagemLembrete, setMensagemLembrete] = useState(defaultLembrete)

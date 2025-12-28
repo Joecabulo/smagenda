@@ -18,10 +18,10 @@ const weekdayOptions = [
 ]
 
 export function OnboardingPage() {
-  const { principal, refresh } = useAuth()
-  const usuarioId = principal?.kind === 'usuario' ? principal.profile.id : null
-  const slug = principal?.kind === 'usuario' ? principal.profile.slug : null
-  const initialLogoUrl = principal?.kind === 'usuario' ? principal.profile.logo_url : null
+  const { appPrincipal, refresh } = useAuth()
+  const usuarioId = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.id : null
+  const slug = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.slug : null
+  const initialLogoUrl = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.logo_url : null
 
   const [step, setStep] = useState<Step>(1)
   const [horarioInicio, setHorarioInicio] = useState('08:00')

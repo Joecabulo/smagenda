@@ -19,9 +19,9 @@ function normalizeSlug(s: string) {
 }
 
 export function PaginaPublicaSettingsPage() {
-  const { principal, refresh } = useAuth()
-  const usuarioId = principal?.kind === 'usuario' ? principal.profile.id : null
-  const nomeNegocio = principal?.kind === 'usuario' ? principal.profile.nome_negocio : null
+  const { appPrincipal, refresh } = useAuth()
+  const usuarioId = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.id : null
+  const nomeNegocio = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.nome_negocio : null
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
