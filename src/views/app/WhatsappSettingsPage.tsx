@@ -177,6 +177,7 @@ export function WhatsappSettingsPage() {
   const [runningDiagnostic, setRunningDiagnostic] = useState(false)
 
   const aliveRef = useRef(true)
+  const allowStatusRef = useRef(false)
 
   useEffect(() => {
     aliveRef.current = true
@@ -188,9 +189,24 @@ export function WhatsappSettingsPage() {
   const configurado = useMemo(() => Boolean(apiUrl.trim() && apiKey.trim()), [apiUrl, apiKey])
   const habilitado = useMemo(() => (whatsappHabilitado === null ? true : Boolean(whatsappHabilitado)), [whatsappHabilitado])
 
+  const callWhatsapp = async (body: unknown) => {
+    const action = (() => {
+      if (!body || typeof body !== 'object') return null
+      const raw = (body as Record<string, unknown>).action
+      return typeof raw === 'string' ? raw : null
+    })()
+
+    if (action === 'status' && !allowStatusRef.current) {
+      return { ok: false as const, status: 0, body: { error: 'status_not_allowed' } }
+    }
+
+    return callWhatsappFunction(body)
+  }
+
   const runDiagnostic = async () => {
     setRunningDiagnostic(true)
     setDiagnostic(null)
+    allowStatusRef.current = true
     try {
       const lines: string[] = []
       lines.push(`at=${new Date().toISOString()}`)
@@ -283,7 +299,7 @@ export function WhatsappSettingsPage() {
           lines.push(`invoke_data=${JSON.stringify(raw.data)}`)
         }
 
-        const wrapped = await callWhatsappFunction({ action: 'status' })
+        const wrapped = await callWhatsapp({ action: 'status' })
         lines.push(`wrapped_call_ok=${wrapped.ok ? 'true' : 'false'}`)
         lines.push(`wrapped_call_status=${wrapped.status}`)
         lines.push(`wrapped_call_body=${typeof wrapped.body === 'string' ? wrapped.body : JSON.stringify(wrapped.body)}`)
@@ -366,7 +382,8 @@ export function WhatsappSettingsPage() {
       return
     }
     setConnecting(true)
-    const res = await callWhatsappFunction({ action: 'connect' })
+    allowStatusRef.current = true
+    const res = await callWhatsapp({ action: 'connect' })
     if (!res.ok) {
       if (isWorkerLimitResponse({ status: res.status, body: res.body })) {
         setError('O Supabase está sem recursos para executar a Edge Function agora (WORKER_LIMIT). Aguarde 1–2 minutos e tente novamente.')
@@ -413,7 +430,7 @@ export function WhatsappSettingsPage() {
       }
       await new Promise((r) => setTimeout(r, 4000))
       if (!aliveRef.current) return
-      const next = await callWhatsappFunction({ action: 'status' })
+      const next = await callWhatsapp({ action: 'status' })
       if (!next.ok) {
         if (isWorkerLimitResponse({ status: next.status, body: next.body })) {
           setError('O Supabase está sem recursos para executar a Edge Function agora (WORKER_LIMIT). Aguarde 1–2 minutos e tente novamente.')
@@ -492,7 +509,8 @@ export function WhatsappSettingsPage() {
       return
     }
     setCheckingStatus(true)
-    const res = await callWhatsappFunction({ action: 'status' })
+    allowStatusRef.current = true
+    const res = await callWhatsapp({ action: 'status' })
     if (!res.ok) {
       if (isWorkerLimitResponse({ status: res.status, body: res.body })) {
         setError('O Supabase está sem recursos para executar a Edge Function agora (WORKER_LIMIT). Aguarde 1–2 minutos e tente novamente.')
