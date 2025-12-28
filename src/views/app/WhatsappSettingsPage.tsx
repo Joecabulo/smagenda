@@ -12,6 +12,12 @@ function getOptionalString(payload: unknown, key: string) {
   return typeof value === 'string' ? value : null
 }
 
+function isWorkerLimitResponse(args: { status: number; body: unknown }) {
+  if (args.status === 546) return true
+  if (!args.body || typeof args.body !== 'object') return false
+  return (args.body as Record<string, unknown>).code === 'WORKER_LIMIT'
+}
+
 async function callWhatsappFunction(body: unknown) {
   if (!supabaseEnv.ok) {
     return { ok: false as const, status: 0, body: { error: 'missing_supabase_env' } }
@@ -331,46 +337,6 @@ export function WhatsappSettingsPage() {
       setApiUrl(row?.whatsapp_api_url ?? '')
       setApiKey(row?.whatsapp_api_key ?? '')
       setLoading(false)
-
-      const hasConfig = Boolean((row?.whatsapp_api_url ?? '').trim() && (row?.whatsapp_api_key ?? '').trim())
-      const enabled = typeof row?.whatsapp_habilitado === 'boolean' ? row.whatsapp_habilitado : true
-      if (hasConfig && enabled) {
-        setCheckingStatus(true)
-        const statusRes = await callWhatsappFunction({ action: 'status' })
-        if (statusRes.ok) {
-          setInstanceState(getOptionalString(statusRes.body, 'state'))
-        } else {
-          if (typeof statusRes.body === 'object' && statusRes.body !== null && (statusRes.body as Record<string, unknown>).error === 'timeout') {
-            setError(
-              'Tempo esgotado ao verificar status do WhatsApp. Isso costuma acontecer quando a Edge Function "whatsapp" não está deployada ou está indisponível.'
-            )
-            setCheckingStatus(false)
-            return
-          }
-          if (
-            typeof statusRes.body === 'object' &&
-            statusRes.body !== null &&
-            (statusRes.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
-          ) {
-            setError('A Edge Function "whatsapp" está exigindo JWT no Supabase. Refaça o deploy com verify_jwt=false e tente novamente.')
-            setCheckingStatus(false)
-            return
-          }
-          if (typeof statusRes.body === 'object' && statusRes.body !== null && (statusRes.body as Record<string, unknown>).error === 'invalid_jwt') {
-            setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
-            setCheckingStatus(false)
-            return
-          }
-          if (typeof statusRes.body === 'object' && statusRes.body !== null && (statusRes.body as Record<string, unknown>).error === 'whatsapp_disabled') {
-            setError('WhatsApp desabilitado para sua conta. Solicite habilitação ao suporte.')
-            setCheckingStatus(false)
-            return
-          }
-          const details = typeof statusRes.body === 'string' ? statusRes.body : JSON.stringify(statusRes.body)
-          setError(`Falha ao verificar status (HTTP ${statusRes.status}): ${details}`)
-        }
-        setCheckingStatus(false)
-      }
     }
     run().catch((e: unknown) => {
       setError(e instanceof Error ? e.message : 'Erro ao carregar configurações')
@@ -400,20 +366,13 @@ export function WhatsappSettingsPage() {
       return
     }
     setConnecting(true)
-    const pollOnce = async () => {
-      const r = await callWhatsappFunction({ action: 'connect' })
-      if (!r.ok) return r
-      const nextState = getOptionalString(r.body, 'state')
-      const nextQr = getOptionalString(r.body, 'qrBase64')
-      const nextPairing = getOptionalString(r.body, 'pairingCode')
-      if (nextState) setInstanceState(nextState)
-      if (nextQr && nextQr.trim()) setQrBase64(nextQr)
-      if (nextPairing && nextPairing.trim()) setPairingCode(nextPairing)
-      return r
-    }
-
-    const res = await pollOnce()
+    const res = await callWhatsappFunction({ action: 'connect' })
     if (!res.ok) {
+      if (isWorkerLimitResponse({ status: res.status, body: res.body })) {
+        setError('O Supabase está sem recursos para executar a Edge Function agora (WORKER_LIMIT). Aguarde 1–2 minutos e tente novamente.')
+        setConnecting(false)
+        return
+      }
       if (
         typeof res.body === 'object' &&
         res.body !== null &&
@@ -439,37 +398,45 @@ export function WhatsappSettingsPage() {
       return
     }
 
-    let lastOkBody: unknown = res.body
+    const initialState = getOptionalString(res.body, 'state')
+    const initialQr = getOptionalString(res.body, 'qrBase64')
+    const initialPairing = getOptionalString(res.body, 'pairingCode')
+    let currentState: string | null = initialState
+    if (initialState) setInstanceState(initialState)
+    if (initialQr && initialQr.trim()) setQrBase64(initialQr)
+    if (initialPairing && initialPairing.trim()) setPairingCode(initialPairing)
 
-    for (let i = 0; i < 60; i += 1) {
-      const state = getOptionalString(lastOkBody, 'state')
-      if (state === 'open') {
+    for (let i = 0; i < 30; i += 1) {
+      if (currentState === 'open') {
         setConnecting(false)
         return
       }
-      await new Promise((r) => setTimeout(r, 2000))
+      await new Promise((r) => setTimeout(r, 4000))
       if (!aliveRef.current) return
-      const next = await pollOnce()
+      const next = await callWhatsappFunction({ action: 'status' })
       if (!next.ok) {
+        if (isWorkerLimitResponse({ status: next.status, body: next.body })) {
+          setError('O Supabase está sem recursos para executar a Edge Function agora (WORKER_LIMIT). Aguarde 1–2 minutos e tente novamente.')
+          setConnecting(false)
+          return
+        }
         const details = typeof next.body === 'string' ? next.body : JSON.stringify(next.body)
-        setError(`Falha ao gerar QR Code (HTTP ${next.status}): ${details}`)
+        setError(`Falha ao verificar status (HTTP ${next.status}): ${details}`)
         setConnecting(false)
         return
       }
-
-      lastOkBody = next.body
       const nextState = getOptionalString(next.body, 'state')
-      const nextQr = getOptionalString(next.body, 'qrBase64')
-      const nextPairing = getOptionalString(next.body, 'pairingCode')
-      if (nextState === 'open') {
+      if (nextState) {
+        currentState = nextState
+        setInstanceState(nextState)
+      }
+      if (currentState === 'open') {
         setConnecting(false)
         return
       }
-      if (nextQr && nextQr.trim()) setQrBase64(nextQr)
-      if (nextPairing && nextPairing.trim()) setPairingCode(nextPairing)
     }
 
-    const hint = getOptionalString(lastOkBody, 'hint')
+    const hint = getOptionalString(res.body, 'hint')
     if (hint) {
       setError(hint)
     } else {
@@ -527,8 +494,13 @@ export function WhatsappSettingsPage() {
     setCheckingStatus(true)
     const res = await callWhatsappFunction({ action: 'status' })
     if (!res.ok) {
+      if (isWorkerLimitResponse({ status: res.status, body: res.body })) {
+        setError('O Supabase está sem recursos para executar a Edge Function agora (WORKER_LIMIT). Aguarde 1–2 minutos e tente novamente.')
+        setCheckingStatus(false)
+        return
+      }
       if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'timeout') {
-        setError('Tempo esgotado ao verificar status do WhatsApp. Verifique se a Edge Function "whatsapp" está ativa.')
+        setError('Tempo esgotado ao verificar status do WhatsApp. A Edge Function pode estar temporariamente sem recursos ou indisponível. Aguarde 1–2 minutos e tente novamente.')
         setCheckingStatus(false)
         return
       }
