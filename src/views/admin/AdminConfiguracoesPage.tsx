@@ -1049,13 +1049,16 @@ begin
       and table_name = 'usuarios'
       and column_name = 'whatsapp_api_key'
   ) then
-    execute $$
+    execute 'drop trigger if exists usuarios_block_whatsapp_update on public.usuarios';
+    execute 'update public.usuarios set whatsapp_api_url = null, whatsapp_api_key = null';
+
+    execute $sql$
       create or replace function public.usuarios_block_whatsapp_update()
       returns trigger
       language plpgsql
       security definer
       set search_path = public
-      as $$
+      as $func$
       begin
         if public.is_super_admin() then
           return NEW;
@@ -1069,16 +1072,18 @@ begin
 
         return NEW;
       end;
-      $$;
-    $$;
+      $func$;
+    $sql$;
+    execute 'create trigger usuarios_block_whatsapp_update before update on public.usuarios for each row execute function public.usuarios_block_whatsapp_update()';
   else
-    execute $$
+    execute 'drop trigger if exists usuarios_block_whatsapp_update on public.usuarios';
+    execute $sql$
       create or replace function public.usuarios_block_whatsapp_update()
       returns trigger
       language plpgsql
       security definer
       set search_path = public
-      as $$
+      as $func$
       begin
         if public.is_super_admin() then
           return NEW;
@@ -1090,27 +1095,9 @@ begin
 
         return NEW;
       end;
-      $$;
-    $$;
-  end if;
-
-  execute 'drop trigger if exists usuarios_block_whatsapp_update on public.usuarios';
-  execute 'create trigger usuarios_block_whatsapp_update before update on public.usuarios for each row execute function public.usuarios_block_whatsapp_update()';
-
-  if exists (
-    select 1
-    from information_schema.columns
-    where table_schema = 'public'
-      and table_name = 'usuarios'
-      and column_name = 'whatsapp_api_url'
-  ) and exists (
-    select 1
-    from information_schema.columns
-    where table_schema = 'public'
-      and table_name = 'usuarios'
-      and column_name = 'whatsapp_api_key'
-  ) then
-    execute 'update public.usuarios set whatsapp_api_url = null, whatsapp_api_key = null';
+      $func$;
+    $sql$;
+    execute 'create trigger usuarios_block_whatsapp_update before update on public.usuarios for each row execute function public.usuarios_block_whatsapp_update()';
   end if;
 end;
 $$;`
