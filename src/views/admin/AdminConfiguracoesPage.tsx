@@ -1050,6 +1050,7 @@ begin
       and column_name = 'whatsapp_api_key'
   ) then
     execute 'drop trigger if exists usuarios_block_whatsapp_update on public.usuarios';
+    execute 'update public.super_admin sa set whatsapp_api_url = coalesce(nullif(sa.whatsapp_api_url, ''''), u.whatsapp_api_url), whatsapp_api_key = coalesce(nullif(sa.whatsapp_api_key, ''''), u.whatsapp_api_key) from (select whatsapp_api_url, whatsapp_api_key from public.usuarios where whatsapp_api_url is not null and whatsapp_api_key is not null and nullif(whatsapp_api_url, '''') is not null and nullif(whatsapp_api_key, '''') is not null limit 1) u where (sa.whatsapp_api_url is null or sa.whatsapp_api_url = '''') and (sa.whatsapp_api_key is null or sa.whatsapp_api_key = '''')';
     execute 'update public.usuarios set whatsapp_api_url = null, whatsapp_api_key = null';
 
     execute $sql$
