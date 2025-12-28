@@ -1191,6 +1191,14 @@ Deno.serve(async (req) => {
   const userBaseRow = userBase as unknown as UsuarioBaseRow
   const userExtra = (userExtraSafe ?? null) as unknown as UsuarioExtraRow | null
 
+  if (!serviceClient) {
+    return jsonResponse(500, {
+      error: 'whatsapp_config_requires_service_role',
+      message: 'A Edge Function precisa do SERVICE_ROLE_KEY para ler a configuração global do WhatsApp.',
+      hint: 'No Supabase: Project Settings → Edge Functions → Secrets. Defina SERVICE_ROLE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) e faça o deploy da função novamente.',
+    })
+  }
+
   const globalCfg = await loadGlobalWhatsappConfig(dbClient)
   if (!globalCfg.ok) {
     if (globalCfg.error === 'schema_incomplete') {

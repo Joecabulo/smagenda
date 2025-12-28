@@ -334,8 +334,8 @@ export function WhatsappSettingsPage() {
         setWhatsappHabilitado(typeof row?.whatsapp_habilitado === 'boolean' ? row.whatsapp_habilitado : null)
       }
       const cfg = await callWhatsappFunction({ action: 'config_status' })
-      if (!cfg.ok && cfg.body && typeof cfg.body === 'object' && (cfg.body as Record<string, unknown>).error === 'whatsapp_config_requires_service_role') {
-        const hint = getOptionalString(cfg.body, 'hint')
+      if (!cfg.ok) {
+        const hint = cfg.body && typeof cfg.body === 'object' ? getOptionalString(cfg.body, 'hint') : null
         const details = typeof cfg.body === 'string' ? cfg.body : JSON.stringify(cfg.body)
         setError(hint ? `Falha ao carregar configuração do WhatsApp: ${details} | Dica: ${hint}` : `Falha ao carregar configuração do WhatsApp: ${details}`)
         setConfigurado(false)
@@ -343,7 +343,7 @@ export function WhatsappSettingsPage() {
         return
       }
 
-      if (cfg.ok && cfg.body && typeof cfg.body === 'object') setConfigurado(Boolean((cfg.body as Record<string, unknown>).configured))
+      if (cfg.body && typeof cfg.body === 'object') setConfigurado(Boolean((cfg.body as Record<string, unknown>).configured))
       else setConfigurado(false)
       setLoading(false)
     }
