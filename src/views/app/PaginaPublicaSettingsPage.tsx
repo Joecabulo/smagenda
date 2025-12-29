@@ -34,6 +34,7 @@ export function PaginaPublicaSettingsPage() {
 
   const [primaryColor, setPrimaryColor] = useState('#0f172a')
   const [backgroundColor, setBackgroundColor] = useState('#f8fafc')
+  const [useBackgroundImage, setUseBackgroundImage] = useState(false)
   const [backgroundImageUrl, setBackgroundImageUrl] = useState('')
   const [bgFile, setBgFile] = useState<File | null>(null)
 
@@ -79,12 +80,14 @@ export function PaginaPublicaSettingsPage() {
       const nextLogo = typeof row.logo_url === 'string' ? row.logo_url : ''
       const nextPrimary = typeof row.public_primary_color === 'string' ? row.public_primary_color : '#0f172a'
       const nextBgColor = typeof row.public_background_color === 'string' ? row.public_background_color : '#f8fafc'
+      const nextUseBgImage = typeof row.public_use_background_image === 'boolean' ? row.public_use_background_image : false
       const nextBgUrl = typeof row.public_background_image_url === 'string' ? row.public_background_image_url : ''
 
       setSlug(nextSlug)
       setLogoUrl(nextLogo)
       setPrimaryColor(nextPrimary)
       setBackgroundColor(nextBgColor)
+      setUseBackgroundImage(nextUseBgImage)
       setBackgroundImageUrl(nextBgUrl)
       setLoading(false)
     }
@@ -168,6 +171,12 @@ export function PaginaPublicaSettingsPage() {
       }
     }
 
+    if (useBackgroundImage && !nextBgUrl) {
+      setError('Envie uma imagem de fundo para ativar o fundo com imagem.')
+      setSaving(false)
+      return
+    }
+
     let nextLogoUrl: string | null = logoUrl.trim() ? logoUrl.trim() : null
     if (logoFile) {
       try {
@@ -190,14 +199,23 @@ export function PaginaPublicaSettingsPage() {
       logo_url: nextLogoUrl,
       public_primary_color: primaryColor.trim() ? primaryColor.trim() : null,
       public_background_color: backgroundColor.trim() ? backgroundColor.trim() : null,
+      public_use_background_image: useBackgroundImage,
       public_background_image_url: nextBgUrl,
     }
 
     const { error: updateErr } = await supabase.from('usuarios').update(payload).eq('id', usuarioId)
     if (updateErr) {
-      const lower = updateErr.message.toLowerCase()
+      const msg = updateErr.message
+      const lower = msg.toLowerCase()
       const duplicate = lower.includes('duplicate') || lower.includes('unique')
-      setError(duplicate ? 'Esse slug já está em uso. Tente outro.' : updateErr.message)
+      const missingColumn = lower.includes('column') && lower.includes('public_use_background_image')
+      setError(
+        duplicate
+          ? 'Esse slug já está em uso. Tente outro.'
+          : missingColumn
+            ? 'Configuração do Supabase incompleta: atualize o SQL do link público (listar + agendar).'
+            : msg
+      )
       setSaving(false)
       return
     }
@@ -270,8 +288,25 @@ export function PaginaPublicaSettingsPage() {
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <Input label="Cor principal" type="color" value={primaryColor} onChange={(e) => setPrimaryColor(e.target.value)} />
-              <Input label="Cor de fundo" type="color" value={backgroundColor} onChange={(e) => setBackgroundColor(e.target.value)} />
-              <Input label="Logo (URL opcional)" value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} placeholder="https://..." />
+              <Input
+                label="Cor de fundo"
+                type="color"
+                value={backgroundColor}
+                onChange={(e) => setBackgroundColor(e.target.value)}
+                disabled={useBackgroundImage}
+              />
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  onClick={() => setUseBackgroundImage((v) => !v)}
+                  className={[
+                    'h-10 w-full rounded-lg border px-3 text-sm font-medium',
+                    useBackgroundImage ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-900',
+                  ].join(' ')}
+                >
+                  {useBackgroundImage ? 'Usar imagem de fundo: Sim' : 'Usar imagem de fundo: Não'}
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -311,13 +346,7 @@ export function PaginaPublicaSettingsPage() {
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Input
-                label="Imagem de fundo (URL opcional)"
-                value={backgroundImageUrl}
-                onChange={(e) => setBackgroundImageUrl(e.target.value)}
-                placeholder="https://..."
-              />
-              <Input
-                label="Ou enviar imagem de fundo"
+                label="Enviar imagem de fundo"
                 type="file"
                 accept="image/*"
                 onChange={(e) => {
@@ -341,9 +370,10 @@ export function PaginaPublicaSettingsPage() {
                   setBgFile(file)
                 }}
               />
+              <div />
             </div>
 
-            {(bgObjectUrl || backgroundImageUrl.trim()) && (
+            {useBackgroundImage && (bgObjectUrl || backgroundImageUrl.trim()) && (
               <div
                 className="rounded-xl border border-slate-200 overflow-hidden"
                 style={{ backgroundColor, backgroundImage: `url(${bgObjectUrl ?? backgroundImageUrl.trim()})`, backgroundSize: 'cover', backgroundPosition: 'center' }}

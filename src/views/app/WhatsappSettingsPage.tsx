@@ -3,7 +3,7 @@ import { AppShell } from '../../components/layout/AppShell'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
-import { supabase, supabaseEnv } from '../../lib/supabase'
+import { checkJwtProject, supabase, supabaseEnv } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
 
 function getOptionalString(payload: unknown, key: string) {
@@ -18,7 +18,7 @@ function isWorkerLimitResponse(args: { status: number; body: unknown }) {
   return (args.body as Record<string, unknown>).code === 'WORKER_LIMIT'
 }
 
-async function callWhatsappFunction(body: unknown) {
+async function callWhatsappFunction(body: unknown, opts?: { timeoutMs?: number }) {
   if (!supabaseEnv.ok) {
     return { ok: false as const, status: 0, body: { error: 'missing_supabase_env' } }
   }
@@ -47,10 +47,16 @@ async function callWhatsappFunction(body: unknown) {
     return { ok: false as const, status: 401, body: { error: 'session_expired' } }
   }
 
+  const tokenProject = checkJwtProject(accessToken, supabaseUrl)
+  if (!tokenProject.ok) {
+    await supabase.auth.signOut().catch(() => undefined)
+    return { ok: false as const, status: 401, body: { error: 'jwt_project_mismatch', iss: tokenProject.iss, expected: tokenProject.expectedPrefix } }
+  }
+
   const callFetch = async (token: string) => {
     const fnUrl = `${supabaseUrl}/functions/v1/whatsapp`
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 45000)
+    const timeoutId = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 45000)
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -204,11 +210,15 @@ export function WhatsappSettingsPage() {
       if (!usuarioId) return
       setLoading(true)
       setError(null)
+      setInstanceState(null)
       const isMissingColumnError = (message: string) => message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
+
+      let enabled: boolean | null = null
 
       const first = await supabase.from('usuarios').select('whatsapp_habilitado').eq('id', usuarioId).maybeSingle()
       if (first.error) {
         if (isMissingColumnError(first.error.message)) {
+          enabled = null
           setWhatsappHabilitado(null)
         } else {
           setError(first.error.message)
@@ -218,7 +228,8 @@ export function WhatsappSettingsPage() {
         }
       } else {
         const row = (first.data ?? null) as unknown as { whatsapp_habilitado?: boolean | null } | null
-        setWhatsappHabilitado(typeof row?.whatsapp_habilitado === 'boolean' ? row.whatsapp_habilitado : null)
+        enabled = typeof row?.whatsapp_habilitado === 'boolean' ? row.whatsapp_habilitado : null
+        setWhatsappHabilitado(enabled)
       }
       const cfg = await callWhatsappFunction({ action: 'config_status' })
       if (!cfg.ok) {
@@ -230,8 +241,22 @@ export function WhatsappSettingsPage() {
         return
       }
 
-      if (cfg.body && typeof cfg.body === 'object') setConfigurado(Boolean((cfg.body as Record<string, unknown>).configured))
-      else setConfigurado(false)
+      const configured = cfg.body && typeof cfg.body === 'object' ? Boolean((cfg.body as Record<string, unknown>).configured) : false
+      setConfigurado(configured)
+
+      const enabledSafe = enabled === null ? true : Boolean(enabled)
+      if (enabledSafe && configured) {
+        const quick = await callWhatsappFunction({ action: 'status' }, { timeoutMs: 6000 })
+        if (!aliveRef.current) return
+        if (quick.ok && quick.body && typeof quick.body === 'object') {
+          const s = getOptionalString(quick.body, 'state')
+          setInstanceState(s)
+          if (s === 'open') {
+            setQrBase64(null)
+            setPairingCode(null)
+          }
+        }
+      }
       setLoading(false)
     }
     run().catch((e: unknown) => {
@@ -281,7 +306,12 @@ export function WhatsappSettingsPage() {
         res.body !== null &&
         (res.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
       ) {
-        setError('A Edge Function "whatsapp" está exigindo JWT no Supabase. Refaça o deploy com verify_jwt=false e tente novamente.')
+        setError('JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).')
+        setConnecting(false)
+        return
+      }
+      if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'jwt_project_mismatch') {
+        setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
         setConnecting(false)
         return
       }
@@ -317,6 +347,8 @@ export function WhatsappSettingsPage() {
 
     for (let i = 0; i < 30; i += 1) {
       if (currentState === 'open') {
+        setQrBase64(null)
+        setPairingCode(null)
         setConnecting(false)
         return
       }
@@ -346,6 +378,8 @@ export function WhatsappSettingsPage() {
         setInstanceState(nextState)
       }
       if (currentState === 'open') {
+        setQrBase64(null)
+        setPairingCode(null)
         setConnecting(false)
         return
       }
@@ -425,7 +459,12 @@ export function WhatsappSettingsPage() {
         res.body !== null &&
         (res.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
       ) {
-        setError('A Edge Function "whatsapp" está exigindo JWT no Supabase. Refaça o deploy com verify_jwt=false e tente novamente.')
+        setError('JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).')
+        setCheckingStatus(false)
+        return
+      }
+      if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'jwt_project_mismatch') {
+        setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
         setCheckingStatus(false)
         return
       }
@@ -444,7 +483,12 @@ export function WhatsappSettingsPage() {
       setCheckingStatus(false)
       return
     }
-    setInstanceState(getOptionalString(res.body, 'state'))
+    const nextState = getOptionalString(res.body, 'state')
+    setInstanceState(nextState)
+    if (nextState === 'open') {
+      setQrBase64(null)
+      setPairingCode(null)
+    }
     setCheckingStatus(false)
   }
 
@@ -484,8 +528,22 @@ export function WhatsappSettingsPage() {
         setSendingTest(false)
         return
       }
+      const hint = getOptionalString(res.body, 'hint')
       const details = typeof res.body === 'string' ? res.body : JSON.stringify(res.body)
-      setError(`Falha ao enviar teste (HTTP ${res.status}): ${details}`)
+      const attemptsText = (() => {
+        const raw = (res.body as Record<string, unknown> | null)?.attempts
+        if (!raw) return null
+        try {
+          return JSON.stringify(raw)
+        } catch {
+          return null
+        }
+      })()
+      setError(
+        hint
+          ? `Falha ao enviar teste (HTTP ${res.status}): ${details}\n\nDica: ${hint}${attemptsText ? `\n\nTentativas: ${attemptsText}` : ''}`
+          : `Falha ao enviar teste (HTTP ${res.status}): ${details}${attemptsText ? `\n\nTentativas: ${attemptsText}` : ''}`
+      )
       setSendingTest(false)
       return
     }
@@ -493,6 +551,18 @@ export function WhatsappSettingsPage() {
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
   }
+
+  const isConnected = instanceState?.toLowerCase() === 'open'
+  const connectionLabel = (() => {
+    if (!habilitado || !configurado) return '—'
+    if (checkingStatus) return 'verificando…'
+    if (isConnected) return 'Conectado'
+    if (!instanceState) return 'Desconectado'
+    const s = instanceState.toLowerCase()
+    if (s === 'close' || s === 'closed') return 'Desconectado'
+    if (s === 'connecting') return 'Conectando…'
+    return instanceState
+  })()
 
   return (
     <AppShell>
@@ -514,13 +584,13 @@ export function WhatsappSettingsPage() {
               <div className="space-y-2">
                 <div className="text-sm text-slate-700">Recurso: {habilitado ? '🟢 Habilitado' : '🔴 Desabilitado'}</div>
                 <div className="text-sm text-slate-700">Configuração: {configurado ? '🟢 OK' : '🟡 Pendente'}</div>
-                <div className="text-sm text-slate-700">Conexão: {habilitado && configurado ? (checkingStatus ? 'verificando…' : instanceState ?? '—') : '—'}</div>
+                <div className="text-sm text-slate-700">Conexão: {connectionLabel}</div>
                 <div className="flex flex-wrap gap-2">
                   <Button variant="secondary" onClick={checkStatus} disabled={!habilitado || !configurado || checkingStatus || connecting || disconnecting}>
-                    Atualizar status
+                    {isConnected ? 'Atualizar status' : 'Verificar status'}
                   </Button>
-                  <Button onClick={connect} disabled={!habilitado || !configurado || connecting || disconnecting}>
-                    Gerar QR Code
+                  <Button onClick={isConnected ? checkStatus : connect} disabled={!habilitado || !configurado || checkingStatus || connecting || disconnecting}>
+                    {isConnected ? 'Testar conexão' : 'Gerar QR Code'}
                   </Button>
                   <Button variant="danger" onClick={disconnect} disabled={!habilitado || !configurado || disconnecting || connecting}>
                     Desconectar

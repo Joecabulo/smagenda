@@ -3,7 +3,6 @@ import { useParams } from 'react-router-dom'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
-import { minutesToTime, parseTimeToMinutes, toISODate } from '../../lib/dates'
 import { supabase } from '../../lib/supabase'
 
 type UsuarioPublico = {
@@ -21,6 +20,7 @@ type UsuarioPublico = {
   tipo_conta: 'master' | 'individual'
   public_primary_color: string | null
   public_background_color: string | null
+  public_use_background_image: boolean | null
   public_background_image_url: string | null
 }
 
@@ -49,32 +49,37 @@ type Funcionario = {
   intervalo_fim: string | null
 }
 
-function buildCandidateStarts(
-  start: string,
-  end: string,
-  intervalStart: string | null,
-  intervalEnd: string | null,
-  serviceMinutes: number,
-  stepMinutes: number
-): string[] {
-  const startMin = parseTimeToMinutes(start)
-  const endMin = parseTimeToMinutes(end)
-  const ivStart = intervalStart ? parseTimeToMinutes(intervalStart) : null
-  const ivEnd = intervalEnd ? parseTimeToMinutes(intervalEnd) : null
-  const slots: string[] = []
-  for (let m = startMin; m + serviceMinutes <= endMin; m += stepMinutes) {
-    if (ivStart !== null && ivEnd !== null) {
-      if (m >= ivStart && m < ivEnd) continue
-      if (m + serviceMinutes > ivStart && m < ivEnd) continue
-    }
-    slots.push(minutesToTime(m))
-  }
-  return slots
+function normalizePhone(value: string) {
+  return value.replace(/[^0-9+]/g, '').trim()
 }
 
-function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number) {
-  return aStart < bEnd && bStart < aEnd
+function monthLabel(d: Date) {
+  const months = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
+  return `${months[d.getMonth()]} ${d.getFullYear()}`
 }
+
+function addDays(d: Date, days: number) {
+  const x = new Date(d)
+  x.setDate(x.getDate() + days)
+  return x
+}
+
+function toIsoDateLocal(d: Date) {
+  const x = new Date(d)
+  x.setHours(0, 0, 0, 0)
+  const yyyy = x.getFullYear()
+  const mm = String(x.getMonth() + 1).padStart(2, '0')
+  const dd = String(x.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
+
+function formatIsoDateBR(iso: string) {
+  const [yyyy, mm, dd] = iso.split('-')
+  if (!yyyy || !mm || !dd) return iso
+  return `${dd}/${mm}/${yyyy}`
+}
+
+type ModalStep = 'hora' | 'servico' | 'profissional' | 'confirmar'
 
 export function PublicBookingPage() {
   const { slug } = useParams()
@@ -87,13 +92,23 @@ export function PublicBookingPage() {
 
   const [servicoId, setServicoId] = useState('')
   const [funcionarioId, setFuncionarioId] = useState('')
-  const [data, setData] = useState(() => toISODate(new Date()))
+  const [data, setData] = useState(() => toIsoDateLocal(new Date()))
   const [hora, setHora] = useState('')
   const [clienteNome, setClienteNome] = useState('')
   const [clienteTelefone, setClienteTelefone] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [successId, setSuccessId] = useState<string | null>(null)
   const [logoFailed, setLogoFailed] = useState(false)
+
+  const [modalOpen, setModalOpen] = useState(false)
+  const [modalStep, setModalStep] = useState<ModalStep>('hora')
+
+  const [monthCursor, setMonthCursor] = useState(() => {
+    const d = new Date()
+    d.setDate(1)
+    d.setHours(0, 0, 0, 0)
+    return d
+  })
 
   const hasStaff = useMemo(() => funcionarios.length > 0, [funcionarios.length])
 
@@ -103,7 +118,8 @@ export function PublicBookingPage() {
     [usuario?.public_background_color]
   )
   const backgroundImageUrl = (usuario?.public_background_image_url ?? '').trim()
-  const hasBgImage = Boolean(backgroundImageUrl)
+  const shouldUseBgImage = Boolean(usuario?.public_use_background_image) && Boolean(backgroundImageUrl)
+  const hasBgImage = Boolean(shouldUseBgImage)
 
   useEffect(() => {
     const run = async () => {
@@ -171,27 +187,52 @@ export function PublicBookingPage() {
   const selectedFuncionario = useMemo(() => funcionarios.find((f) => f.id === funcionarioId) ?? null, [funcionarios, funcionarioId])
 
   const usuarioId = usuario?.id ?? null
-  const servicoMinutes = selectedServico?.duracao_minutos ?? null
 
-  const schedule = useMemo(() => {
-    const base = usuario
-    if (!base) return null
-    const useStaff = selectedFuncionario
-    return {
-      horario_inicio: useStaff?.horario_inicio ?? base.horario_inicio,
-      horario_fim: useStaff?.horario_fim ?? base.horario_fim,
-      dias_trabalho: useStaff?.dias_trabalho ?? base.dias_trabalho,
-      intervalo_inicio: useStaff?.intervalo_inicio ?? base.intervalo_inicio,
-      intervalo_fim: useStaff?.intervalo_fim ?? base.intervalo_fim,
-    }
-  }, [usuario, selectedFuncionario])
+  const maxDays = 60
+  const minLeadMinutes = 120
 
   const [availableSlots, setAvailableSlots] = useState<string[]>([])
   const [slotsLoading, setSlotsLoading] = useState(false)
 
+  const today = useMemo(() => {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    return d
+  }, [])
+  const maxDate = useMemo(() => addDays(today, maxDays), [maxDays, today])
+
+  const allowedWeekdays = useMemo(() => {
+    const base = usuario?.dias_trabalho ?? null
+    if (!base || base.length === 0) return null
+    return new Set(base)
+  }, [usuario?.dias_trabalho])
+
+  const calendarDays = useMemo(() => {
+    const first = new Date(monthCursor)
+    first.setDate(1)
+    first.setHours(0, 0, 0, 0)
+    const startOffset = first.getDay()
+    const start = new Date(first)
+    start.setDate(first.getDate() - startOffset)
+    const days: Date[] = []
+    for (let i = 0; i < 42; i += 1) {
+      days.push(addDays(start, i))
+    }
+    return { first, days }
+  }, [monthCursor])
+
+  const isDayDisabled = (d: Date) => {
+    const x = new Date(d)
+    x.setHours(0, 0, 0, 0)
+    if (x < today) return true
+    if (x > maxDate) return true
+    if (allowedWeekdays && !allowedWeekdays.has(x.getDay())) return true
+    return false
+  }
+
   useEffect(() => {
     const run = async () => {
-      if (!usuarioId || !servicoMinutes || !schedule?.horario_inicio || !schedule?.horario_fim) {
+      if (!usuarioId || !selectedServico || !data) {
         setAvailableSlots([])
         return
       }
@@ -204,56 +245,44 @@ export function PublicBookingPage() {
       setError(null)
       setHora('')
 
-      const day = new Date(data)
-      const weekday = day.getDay()
-      const days = schedule.dias_trabalho ?? []
-      if (days.length > 0 && !days.includes(weekday)) {
-        setAvailableSlots([])
-        setSlotsLoading(false)
-        return
-      }
+      type SlotRow = { hora_inicio: string }
 
-      type OcupacaoRow = { start_min: number; end_min: number }
-
-      const { data: ocupacoesData, error: ocupacoesErr } = await supabase.rpc('public_get_ocupacoes', {
+      const { data: slotsData, error: slotsErr } = await supabase.rpc('public_get_slots_publicos', {
         p_usuario_id: usuarioId,
         p_data: data,
-        p_funcionario_id: funcionarioId || null,
+        p_servico_id: selectedServico.id,
+        p_funcionario_id: hasStaff ? funcionarioId : null,
       })
-      if (ocupacoesErr) {
-        const msg = ocupacoesErr.message
+      if (slotsErr) {
+        const msg = slotsErr.message
         const lower = msg.toLowerCase()
-        const missingFn = lower.includes('public_get_ocupacoes') && (lower.includes('function') || lower.includes('rpc'))
-        setError(missingFn ? 'Configuração do Supabase incompleta: crie a função public_get_ocupacoes para calcular horários.' : msg)
+        const missingFn = lower.includes('public_get_slots_publicos') && (lower.includes('function') || lower.includes('rpc'))
+        if (missingFn) {
+          setError('Configuração do Supabase incompleta: atualize o SQL do link público (listar + agendar).')
+        } else if (lower.includes('data_passada')) {
+          setError('Selecione uma data futura.')
+        } else if (lower.includes('data_muito_futura')) {
+          setError(`Selecione uma data dentro de ${maxDays} dias.`)
+        } else if (lower.includes('fora_do_dia_de_trabalho')) {
+          setError('Esse dia não está disponível para agendamento.')
+        } else if (lower.includes('horarios_nao_configurados')) {
+          setError('Horários de trabalho não configurados.')
+        } else {
+          setError(msg)
+        }
         setSlotsLoading(false)
         return
       }
 
-      const candidates = buildCandidateStarts(
-        schedule.horario_inicio,
-        schedule.horario_fim,
-        schedule.intervalo_inicio,
-        schedule.intervalo_fim,
-        servicoMinutes,
-        15
-      )
-
-      const occupiedRanges = ((ocupacoesData ?? []) as unknown as OcupacaoRow[]).map((r) => ({ start: r.start_min, end: r.end_min }))
-
-      const available = candidates.filter((t) => {
-        const s = parseTimeToMinutes(t)
-        const e = s + servicoMinutes
-        return !occupiedRanges.some((r) => overlaps(s, e, r.start, r.end))
-      })
-
-      setAvailableSlots(available)
+      const list = ((slotsData ?? []) as unknown as SlotRow[]).map((r) => String(r.hora_inicio ?? '').trim()).filter(Boolean)
+      setAvailableSlots(list)
       setSlotsLoading(false)
     }
     run().catch((e: unknown) => {
       setError(e instanceof Error ? e.message : 'Erro ao calcular horários')
       setSlotsLoading(false)
     })
-  }, [usuarioId, servicoMinutes, data, funcionarioId, hasStaff, schedule])
+  }, [data, funcionarioId, hasStaff, maxDays, selectedServico, usuarioId])
 
   const submit = async () => {
     if (!usuarioId || !selectedServico || !hora || !clienteNome.trim() || !clienteTelefone.trim()) return
@@ -261,13 +290,20 @@ export function PublicBookingPage() {
     setError(null)
     setSuccessId(null)
 
+    const telefone = normalizePhone(clienteTelefone)
+    if (telefone.length < 8) {
+      setError('Telefone inválido.')
+      setSubmitting(false)
+      return
+    }
+
     const { data: createdId, error: err } = await supabase.rpc('public_create_agendamento_publico', {
       p_usuario_id: usuarioId,
       p_data: data,
       p_hora_inicio: hora,
       p_servico_id: selectedServico.id,
       p_cliente_nome: clienteNome.trim(),
-      p_cliente_telefone: clienteTelefone.trim(),
+      p_cliente_telefone: telefone,
       p_funcionario_id: hasStaff ? funcionarioId : null,
     })
     if (err) {
@@ -276,6 +312,12 @@ export function PublicBookingPage() {
       const missingFn = lower.includes('public_create_agendamento_publico') && (lower.includes('function') || lower.includes('rpc'))
       if (missingFn) {
         setError('Configuração do Supabase incompleta: crie o SQL do link público (listar + agendar).')
+      } else if (lower.includes('data_passada')) {
+        setError('Selecione uma data futura.')
+      } else if (lower.includes('data_muito_futura')) {
+        setError(`Selecione uma data dentro de ${maxDays} dias.`)
+      } else if (lower.includes('antecedencia_minima')) {
+        setError(`Selecione um horário com no mínimo ${Math.round(minLeadMinutes / 60)}h de antecedência.`)
       } else if (lower.includes('ocupado')) {
         setError('Esse horário acabou de ser ocupado. Selecione outro horário.')
       } else {
@@ -286,21 +328,32 @@ export function PublicBookingPage() {
     }
     setSuccessId(createdId ? String(createdId) : 'ok')
     setSubmitting(false)
+    setModalOpen(false)
+    setModalStep('hora')
   }
 
   const canSubmit = Boolean(usuarioId && selectedServico && hora && clienteNome.trim() && clienteTelefone.trim() && (!hasStaff || funcionarioId))
+
+  const closeModal = () => {
+    setModalOpen(false)
+    setModalStep('hora')
+    setClienteNome('')
+    setClienteTelefone('')
+    setHora('')
+    setError(null)
+  }
 
   return (
     <div
       className="min-h-screen"
       style={{
-        backgroundColor,
-        backgroundImage: backgroundImageUrl ? `url(${backgroundImageUrl})` : undefined,
-        backgroundSize: backgroundImageUrl ? 'cover' : undefined,
-        backgroundPosition: backgroundImageUrl ? 'center' : undefined,
+        backgroundColor: shouldUseBgImage ? 'transparent' : backgroundColor,
+        backgroundImage: shouldUseBgImage ? `url(${backgroundImageUrl})` : undefined,
+        backgroundSize: shouldUseBgImage ? 'cover' : undefined,
+        backgroundPosition: shouldUseBgImage ? 'center' : undefined,
       }}
     >
-      <div className="min-h-screen" style={hasBgImage ? { backgroundColor: 'rgba(255,255,255,0.84)' } : undefined}>
+      <div className="min-h-screen" style={hasBgImage ? { backgroundColor: 'transparent' } : undefined}>
         <div className="mx-auto max-w-xl px-4 py-8 space-y-6">
           <div>
             <div className="text-xs font-semibold tracking-wide text-slate-500">SMagenda</div>
@@ -321,7 +374,7 @@ export function PublicBookingPage() {
                     <img
                       src={usuario.logo_url}
                       alt={usuario.nome_negocio}
-                      className="h-20 w-20 rounded-2xl object-cover border border-slate-200"
+                      className="h-24 w-auto max-w-full rounded-2xl object-contain border border-slate-200"
                       onError={() => setLogoFailed(true)}
                     />
                   </div>
@@ -336,89 +389,306 @@ export function PublicBookingPage() {
           {usuario ? (
             <Card>
               <div className="p-6 space-y-4">
-                <div className="text-sm font-semibold text-slate-900">1) Serviço</div>
-                <select
-                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
-                  value={servicoId}
-                  onChange={(e) => setServicoId(e.target.value)}
-                >
-                  {servicos.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.nome} • {s.duracao_minutos} min
-                    </option>
-                  ))}
-                </select>
+                <div className="text-sm font-semibold text-slate-900">Escolha o dia</div>
 
-                {funcionarios.length > 0 ? (
-                  <>
-                    <div className="text-sm font-semibold text-slate-900">2) Profissional</div>
-                    <select
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
-                      value={funcionarioId}
-                      onChange={(e) => setFuncionarioId(e.target.value)}
+                <div className="rounded-xl border border-slate-200 bg-white">
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-slate-100">
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        const prev = new Date(monthCursor)
+                        prev.setMonth(prev.getMonth() - 1)
+                        prev.setDate(1)
+                        prev.setHours(0, 0, 0, 0)
+                        setMonthCursor(prev)
+                      }}
                     >
-                      {funcionarios.map((f) => (
-                        <option key={f.id} value={f.id}>
-                          {f.nome_completo}
-                        </option>
-                      ))}
-                    </select>
-                  </>
-                ) : null}
+                      ‹
+                    </Button>
+                    <div className="text-sm font-semibold text-slate-900">{monthLabel(monthCursor)}</div>
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        const next = new Date(monthCursor)
+                        next.setMonth(next.getMonth() + 1)
+                        next.setDate(1)
+                        next.setHours(0, 0, 0, 0)
+                        setMonthCursor(next)
+                      }}
+                    >
+                      ›
+                    </Button>
+                  </div>
 
-                <div className="text-sm font-semibold text-slate-900">{funcionarios.length > 0 ? '3' : '2'}) Data</div>
-                <Input type="date" value={data} onChange={(e) => setData(e.target.value)} />
+                  <div className="grid grid-cols-7 gap-1 p-2 text-xs text-slate-600">
+                    {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map((w) => (
+                      <div key={w} className="text-center py-1">
+                        {w}
+                      </div>
+                    ))}
+                  </div>
 
-                <div className="text-sm font-semibold text-slate-900">{funcionarios.length > 0 ? '4' : '3'}) Horário</div>
-                {slotsLoading ? (
-                  <div className="text-sm text-slate-600">Calculando horários…</div>
-                ) : availableSlots.length === 0 ? (
-                  <div className="text-sm text-slate-600">Sem horários disponíveis.</div>
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {availableSlots.map((t) => {
-                      const selected = hora === t
+                  <div className="grid grid-cols-7 gap-1 px-2 pb-2">
+                    {calendarDays.days.map((dObj) => {
+                      const inMonth = dObj.getMonth() === calendarDays.first.getMonth()
+                      const disabled = isDayDisabled(dObj)
+                      const iso = toIsoDateLocal(dObj)
                       return (
                         <button
-                          key={t}
+                          key={iso}
                           type="button"
-                          onClick={() => setHora(t)}
+                          disabled={disabled}
+                          onClick={() => {
+                            setError(null)
+                            setSuccessId(null)
+                            setHora('')
+                            setData(iso)
+                            setModalOpen(true)
+                            setModalStep('hora')
+                          }}
                           className={[
-                            'rounded-lg px-3 py-2 text-sm font-medium border',
-                            selected ? '' : 'bg-white text-slate-700 border-slate-200',
+                            'h-10 rounded-lg border text-sm font-medium',
+                            disabled
+                              ? 'opacity-40 cursor-not-allowed bg-white border-slate-200 text-slate-500'
+                              : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
                           ].join(' ')}
-                          style={
-                            selected
-                              ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' }
-                              : { backgroundColor: '#fff' }
-                          }
+                          style={data === iso && !disabled ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : undefined}
                         >
-                          {t}
+                          <span className={inMonth ? '' : 'text-slate-400'}>{dObj.getDate()}</span>
                         </button>
                       )
                     })}
                   </div>
-                )}
-              </div>
-            </Card>
-          ) : null}
+                </div>
 
-          {usuario ? (
-            <Card>
-              <div className="p-6 space-y-4">
-                <div className="text-sm font-semibold text-slate-900">Seus dados</div>
-                <Input label="Nome" value={clienteNome} onChange={(e) => setClienteNome(e.target.value)} />
-                <Input label="Telefone" value={clienteTelefone} onChange={(e) => setClienteTelefone(e.target.value)} />
-                <div className="flex justify-end">
-                  <Button onClick={submit} disabled={!canSubmit || submitting} style={{ backgroundColor: primaryColor, borderColor: primaryColor }}>
-                    Confirmar agendamento
-                  </Button>
+                <div className="text-xs text-slate-600">
+                  Janela de agendamento: hoje até {maxDays} dias. Antecedência mínima: {Math.round(minLeadMinutes / 60)}h.
                 </div>
               </div>
             </Card>
           ) : null}
         </div>
       </div>
+
+      {modalOpen && usuario ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button type="button" className="absolute inset-0 bg-slate-900/40" onClick={closeModal} aria-label="Fechar" />
+          <div className="relative w-full max-w-lg">
+            <Card>
+              <div className="p-6 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Agendar em {formatIsoDateBR(data)}</div>
+                    <div className="text-xs text-slate-600">{usuario.nome_negocio}</div>
+                  </div>
+                  <Button variant="secondary" onClick={closeModal}>
+                    Fechar
+                  </Button>
+                </div>
+
+                {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
+
+                {modalStep === 'hora' ? (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-semibold text-slate-900">1) Horário</div>
+                      <div className="flex gap-2">
+                        <Button variant="secondary" onClick={() => setModalStep('servico')}>
+                          Serviço
+                        </Button>
+                        {hasStaff ? (
+                          <Button variant="secondary" onClick={() => setModalStep('profissional')}>
+                            Profissional
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    {!selectedServico ? (
+                      <div className="text-sm text-slate-600">Sem serviços disponíveis.</div>
+                    ) : hasStaff && !selectedFuncionario ? (
+                      <div className="text-sm text-slate-600">Selecione um profissional.</div>
+                    ) : slotsLoading ? (
+                      <div className="text-sm text-slate-600">Buscando horários…</div>
+                    ) : availableSlots.length === 0 ? (
+                      <div className="text-sm text-slate-600">Sem horários disponíveis.</div>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {availableSlots.map((t) => {
+                          const selected = hora === t
+                          return (
+                            <button
+                              key={t}
+                              type="button"
+                              onClick={() => setHora(t)}
+                              className={['rounded-lg px-3 py-2 text-sm font-medium border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(
+                                ' '
+                              )}
+                              style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
+                            >
+                              {t}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+
+                    <div className="flex justify-end">
+                      <Button
+                        onClick={() => setModalStep('servico')}
+                        disabled={!hora}
+                        style={{ backgroundColor: primaryColor, borderColor: primaryColor }}
+                      >
+                        Avançar
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {modalStep === 'servico' ? (
+                  <div className="space-y-4">
+                    <div className="text-sm font-semibold text-slate-900">2) Serviço</div>
+                    {servicos.length === 0 ? (
+                      <div className="text-sm text-slate-600">Sem serviços disponíveis.</div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-2">
+                        {servicos.map((s) => {
+                          const selected = servicoId === s.id
+                          return (
+                            <button
+                              key={s.id}
+                              type="button"
+                              onClick={() => {
+                                setError(null)
+                                setSuccessId(null)
+                                setHora('')
+                                setServicoId(s.id)
+                                setModalStep('hora')
+                              }}
+                              className={[
+                                'rounded-xl border p-3 text-left',
+                                selected ? 'text-white' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
+                              ].join(' ')}
+                              style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor } : undefined}
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-sm font-semibold truncate">{s.nome}</div>
+                                  <div className={selected ? 'text-xs text-white/90' : 'text-xs text-slate-600'}>{s.duracao_minutos} min</div>
+                                </div>
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+
+                    <div className="flex justify-between">
+                      <Button variant="secondary" onClick={() => setModalStep('hora')}>
+                        Voltar
+                      </Button>
+                      <Button
+                        onClick={() => setModalStep(hasStaff ? 'profissional' : 'confirmar')}
+                        disabled={!hora || !selectedServico}
+                        style={{ backgroundColor: primaryColor, borderColor: primaryColor }}
+                      >
+                        Avançar
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {modalStep === 'profissional' ? (
+                  <div className="space-y-4">
+                    <div className="text-sm font-semibold text-slate-900">3) Profissional</div>
+                    {funcionarios.length === 0 ? (
+                      <div className="text-sm text-slate-600">Sem profissionais disponíveis.</div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-2">
+                        {funcionarios.map((f) => {
+                          const selected = funcionarioId === f.id
+                          return (
+                            <button
+                              key={f.id}
+                              type="button"
+                              onClick={() => {
+                                setError(null)
+                                setSuccessId(null)
+                                setHora('')
+                                setFuncionarioId(f.id)
+                                setModalStep('hora')
+                              }}
+                              className={[
+                                'rounded-xl border p-3 text-left',
+                                selected ? 'text-white' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
+                              ].join(' ')}
+                              style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor } : undefined}
+                            >
+                              <div className="text-sm font-semibold">{f.nome_completo}</div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+
+                    <div className="flex justify-between">
+                      <Button variant="secondary" onClick={() => setModalStep('servico')}>
+                        Voltar
+                      </Button>
+                      <Button
+                        onClick={() => setModalStep('confirmar')}
+                        disabled={!hora || (hasStaff && !funcionarioId)}
+                        style={{ backgroundColor: primaryColor, borderColor: primaryColor }}
+                      >
+                        Avançar
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {modalStep === 'confirmar' ? (
+                  <div className="space-y-4">
+                    <div className="text-sm font-semibold text-slate-900">{hasStaff ? '4' : '3'}) Confirmação</div>
+
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>Dia</div>
+                        <div className="font-semibold">{formatIsoDateBR(data)}</div>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <div>Hora</div>
+                        <div className="font-semibold">{hora || '—'}</div>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <div>Serviço</div>
+                        <div className="font-semibold">{selectedServico?.nome ?? '—'}</div>
+                      </div>
+                      {hasStaff ? (
+                        <div className="flex items-center justify-between gap-2">
+                          <div>Profissional</div>
+                          <div className="font-semibold">{selectedFuncionario?.nome_completo ?? '—'}</div>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <Input label="Nome" value={clienteNome} onChange={(e) => setClienteNome(e.target.value)} />
+                    <Input label="WhatsApp" value={clienteTelefone} onChange={(e) => setClienteTelefone(e.target.value)} />
+
+                    <div className="flex justify-between">
+                      <Button variant="secondary" onClick={() => setModalStep(hasStaff ? 'profissional' : 'servico')}>
+                        Voltar
+                      </Button>
+                      <Button onClick={submit} disabled={!canSubmit || submitting} style={{ backgroundColor: primaryColor, borderColor: primaryColor }}>
+                        Confirmar
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </Card>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

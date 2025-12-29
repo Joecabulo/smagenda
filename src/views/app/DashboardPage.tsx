@@ -4,8 +4,8 @@ import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
-import { formatBRMoney, minutesToTime, parseTimeToMinutes, toISODate } from '../../lib/dates'
-import { supabase, supabaseEnv } from '../../lib/supabase'
+import { formatBRMoney, minutesToTime, normalizeTimeHHMM, parseTimeToMinutes, toISODate } from '../../lib/dates'
+import { checkJwtProject, supabase, supabaseEnv } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
 
 type Agendamento = {
@@ -25,6 +25,14 @@ type Funcionario = { id: string; nome_completo: string; ativo: boolean }
 type ServicoOption = { id: string; nome: string; cor: string | null }
 
 type Bloqueio = { id: string; data: string; hora_inicio: string; hora_fim: string; motivo: string | null; funcionario_id: string | null }
+
+function formatSupabaseError(err: { message: string; details?: string | null; hint?: string | null; code?: string | null }) {
+  const parts = [err.message]
+  if (err.code) parts.push(`code=${err.code}`)
+  if (err.details) parts.push(err.details)
+  if (err.hint) parts.push(err.hint)
+  return parts.filter((p) => typeof p === 'string' && p.trim()).join(' • ')
+}
 
 function buildSlots(
   start: string,
@@ -152,6 +160,12 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
     return { ok: false as const, status: 401, body: { error: 'session_expired' } }
   }
 
+  const tokenProject = checkJwtProject(token, supabaseUrl)
+  if (!tokenProject.ok) {
+    await supabase.auth.signOut().catch(() => undefined)
+    return { ok: false as const, status: 401, body: { error: 'jwt_project_mismatch', iss: tokenProject.iss, expected: tokenProject.expectedPrefix } }
+  }
+
   const callFetch = async (jwt: string) => {
     const fnUrl = `${supabaseUrl}/functions/v1/whatsapp`
     let res: Response
@@ -211,7 +225,18 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
     first.body !== null &&
     (first.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
   ) {
-    return first
+    const refreshed = await tryRefresh()
+    const nextToken = refreshed?.access_token ?? null
+    if (!nextToken) {
+      await supabase.auth.signOut().catch(() => undefined)
+      return { ok: false as const, status: 401, body: { error: 'invalid_jwt' } }
+    }
+    const nextProject = checkJwtProject(nextToken, supabaseUrl)
+    if (!nextProject.ok) {
+      await supabase.auth.signOut().catch(() => undefined)
+      return { ok: false as const, status: 401, body: { error: 'jwt_project_mismatch', iss: nextProject.iss, expected: nextProject.expectedPrefix } }
+    }
+    return callFetch(nextToken)
   }
 
   if (!first.ok && first.status === 401 && isInvalidJwtPayload(first.body)) {
@@ -314,7 +339,9 @@ export function DashboardPage() {
     const statusNorm = statusFilter.trim().toLowerCase()
     const servicoId = servicoFilterId.trim()
     return (a: Agendamento) => {
-      if (statusNorm && a.status?.toLowerCase() !== statusNorm) return false
+      const aStatus = (a.status ?? '').trim().toLowerCase()
+      if (!statusNorm && aStatus === 'cancelado') return false
+      if (statusNorm && aStatus !== statusNorm) return false
       if (servicoId && a.servico?.id !== servicoId) return false
       if (!searchNorm) return true
       const hay = normalizeText([a.cliente_nome, a.cliente_telefone, a.servico?.nome ?? '', a.hora_inicio].filter(Boolean).join(' '))
@@ -322,10 +349,14 @@ export function DashboardPage() {
     }
   }, [searchNorm, servicoFilterId, statusFilter])
 
+  const hasAnyFilter = useMemo(() => Boolean(statusFilter.trim() || servicoFilterId.trim() || searchNorm.trim()), [searchNorm, servicoFilterId, statusFilter])
+
+  const slotStepMinutes = 30
+
   const slots = useMemo(() => {
     if (!usuario?.horario_inicio || !usuario?.horario_fim) return []
-    return buildSlots(usuario.horario_inicio, usuario.horario_fim, usuario.intervalo_inicio, usuario.intervalo_fim, 60)
-  }, [usuario])
+    return buildSlots(usuario.horario_inicio, usuario.horario_fim, usuario.intervalo_inicio, usuario.intervalo_fim, slotStepMinutes)
+  }, [slotStepMinutes, usuario])
 
   const totalDia = useMemo(() => {
     return agendamentos
@@ -404,7 +435,14 @@ export function DashboardPage() {
         setLoading(false)
         return
       }
-      setAgendamentos((agData ?? []) as unknown as Agendamento[])
+      const normalizedAgs = (agData ?? []).map((row) => {
+        const r = row as unknown as Record<string, unknown>
+        const horaInicio = normalizeTimeHHMM(String(r.hora_inicio ?? ''))
+        const horaFimRaw = r.hora_fim
+        const horaFim = horaFimRaw ? normalizeTimeHHMM(String(horaFimRaw)) : null
+        return { ...r, hora_inicio: horaInicio, hora_fim: horaFim } as unknown as Agendamento
+      })
+      setAgendamentos(normalizedAgs)
 
       let bloqueiosQuery = supabase
         .from('bloqueios')
@@ -425,7 +463,13 @@ export function DashboardPage() {
         setLoading(false)
         return
       }
-      setBloqueios((bloqueiosData ?? []) as unknown as Bloqueio[])
+      const normalizedBlocks = (bloqueiosData ?? []).map((row) => {
+        const r = row as unknown as Record<string, unknown>
+        const horaInicio = normalizeTimeHHMM(String(r.hora_inicio ?? ''))
+        const horaFim = normalizeTimeHHMM(String(r.hora_fim ?? ''))
+        return { ...r, hora_inicio: horaInicio, hora_fim: horaFim } as unknown as Bloqueio
+      })
+      setBloqueios(normalizedBlocks)
       setLoading(false)
     }
     run().catch((e: unknown) => {
@@ -461,7 +505,59 @@ export function DashboardPage() {
     setDate((prev) => addDays(prev, 1))
   }
 
-  const findAgendamentoAt = (time: string) => agendamentos.find((a) => a.hora_inicio === time)
+  const findAgendamentoAt = (time: string) => {
+    const t = parseTimeToMinutes(time)
+    const overlap = (a: Agendamento) => {
+      const start = parseTimeToMinutes(a.hora_inicio)
+      if (!Number.isFinite(start)) return false
+      const end = (() => {
+        if (a.hora_fim) {
+          const v = parseTimeToMinutes(a.hora_fim)
+          if (Number.isFinite(v)) return v
+        }
+        const dur = a.servico?.duracao_minutos != null ? Number(a.servico.duracao_minutos) : 0
+        if (Number.isFinite(dur) && dur > 0) return start + dur
+        return start + 1
+      })()
+      return t >= start && t < end
+    }
+
+    const candidates = agendamentos.filter(overlap)
+    if (candidates.length === 0) return null
+
+    if (hasAnyFilter) {
+      const filtered = candidates.filter(matchesFilters)
+      return filtered[0] ?? null
+    }
+
+    const active = candidates.filter((a) => (a.status ?? '').trim().toLowerCase() !== 'cancelado')
+    return active[0] ?? null
+  }
+
+  const findAgendamentoStartInSlot = (time: string) => {
+    const t = parseTimeToMinutes(time)
+    if (!Number.isFinite(t)) return null
+    const end = t + slotStepMinutes
+
+    const candidates = agendamentos
+      .filter((a) => {
+        const start = parseTimeToMinutes(a.hora_inicio)
+        return Number.isFinite(start) && start >= t && start < end
+      })
+      .slice()
+      .sort((x, y) => parseTimeToMinutes(x.hora_inicio) - parseTimeToMinutes(y.hora_inicio))
+
+    if (candidates.length === 0) return null
+
+    if (hasAnyFilter) {
+      const filtered = candidates.filter(matchesFilters)
+      return filtered[0] ?? null
+    }
+
+    const active = candidates.filter((a) => (a.status ?? '').trim().toLowerCase() !== 'cancelado')
+    return active[0] ?? candidates[0] ?? null
+  }
+
   const findBloqueioAt = (time: string) => {
     const t = parseTimeToMinutes(time)
     return bloqueios.find((b) => {
@@ -469,6 +565,22 @@ export function DashboardPage() {
       const e = parseTimeToMinutes(b.hora_fim)
       return t >= s && t < e
     })
+  }
+
+  const findBloqueioStartInSlot = (time: string) => {
+    const t = parseTimeToMinutes(time)
+    if (!Number.isFinite(t)) return null
+    const end = t + slotStepMinutes
+
+    const candidates = bloqueios
+      .filter((b) => {
+        const start = parseTimeToMinutes(b.hora_inicio)
+        return Number.isFinite(start) && start >= t && start < end
+      })
+      .slice()
+      .sort((x, y) => parseTimeToMinutes(x.hora_inicio) - parseTimeToMinutes(y.hora_inicio))
+
+    return candidates[0] ?? null
   }
 
   const repeatPreview = useMemo(() => {
@@ -882,55 +994,107 @@ export function DashboardPage() {
             {loading ? (
               <div className="p-6 text-sm text-slate-600">Carregando agenda…</div>
             ) : slots.length === 0 ? (
-              <div className="p-6 text-sm text-slate-600">Configure seu horário em /onboarding.</div>
+              <div className="p-6 space-y-3">
+                <div className="text-sm text-slate-600">Configure seu horário em /onboarding.</div>
+                {agendamentos.length > 0 ? (
+                  <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
+                    {agendamentos.map((ag) => {
+                      const statusUi = resolveStatusUi(ag.status)
+                      return (
+                        <div key={ag.id} className="p-3 flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-slate-900 truncate">
+                              {normalizeTimeHHMM(ag.hora_inicio)} — {ag.cliente_nome}
+                            </div>
+                            <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
+                            <div className="text-sm text-slate-700">
+                              ✂️ {ag.servico?.nome} {ag.servico?.preco ? `- ${formatBRMoney(Number(ag.servico.preco))}` : ''}
+                            </div>
+                          </div>
+                          <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : null}
+              </div>
             ) : viewMode === 'dia' ? (
               slots.map((time) => {
-                const ag = findAgendamentoAt(time)
-                const block = findBloqueioAt(time)
-                if (ag) {
-                  const visible = matchesFilters(ag)
-                  const statusUi = resolveStatusUi(ag.status)
+                const agStart = findAgendamentoStartInSlot(time)
+                const agCover = agStart ?? findAgendamentoAt(time)
+                const blockStart = findBloqueioStartInSlot(time)
+                const blockCover = blockStart ?? findBloqueioAt(time)
+
+                if (agCover) {
+                  const isStart = Boolean(agStart)
+                  const visible = isStart && matchesFilters(agCover)
+                  const statusUi = resolveStatusUi(agCover.status)
+                  const timeLabel = isStart ? normalizeTimeHHMM(agCover.hora_inicio) : time
                   return (
                     <div key={time} className="p-4 flex items-start justify-between gap-3">
                       <div>
                         <div className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-                          {ag.servico?.cor ? (
-                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: ag.servico.cor }} />
+                          {agCover.servico?.cor ? (
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: agCover.servico.cor }} />
                           ) : null}
                           <span>
-                            {time} - {visible ? ag.cliente_nome : 'Ocupado'}
+                            {timeLabel} - {visible ? agCover.cliente_nome : 'Ocupado'}
                           </span>
                         </div>
-                        {visible ? <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div> : null}
+                        {visible ? <div className="text-sm text-slate-600">📱 {agCover.cliente_telefone}</div> : null}
                         {visible ? (
                           <div className="text-sm text-slate-700">
-                            ✂️ {ag.servico?.nome} {ag.servico?.preco ? `- ${formatBRMoney(Number(ag.servico.preco))}` : ''}
+                            ✂️ {agCover.servico?.nome} {agCover.servico?.preco ? `- ${formatBRMoney(Number(agCover.servico.preco))}` : ''}
                           </div>
                         ) : null}
                       </div>
                       <div className="flex flex-col items-end gap-2">
                         <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
-                        {ag.status !== 'cancelado' && visible ? (
+                        {agCover.status !== 'cancelado' && visible ? (
                           <div className="flex gap-2">
                             <Button
                               variant="secondary"
                               onClick={async () => {
                                 setError(null)
-                                const { error: updErr } = await supabase.from('agendamentos').update({ status: 'confirmado' }).eq('id', ag.id)
+                                const { error: updErr } = await supabase.from('agendamentos').update({ status: 'confirmado' }).eq('id', agCover.id)
                                 if (updErr) {
-                                  setError(updErr.message)
+                                  const formatted = formatSupabaseError(updErr)
+                                  const lower = formatted.toLowerCase()
+                                  if (lower.includes('internal server error') || lower.includes('500')) {
+                                    setError(
+                                      `${formatted} • Provável trigger/função no Postgres falhando. Reexecute no Supabase o “SQL do WhatsApp (trigger confirmação imediata)” e o “SQL de Logs de Auditoria”.`
+                                    )
+                                    return
+                                  }
+                                  setError(formatted)
                                   return
                                 }
-                                setAgendamentos((prev) => prev.map((x) => (x.id === ag.id ? { ...x, status: 'confirmado' } : x)))
-                                const sendRes = await sendConfirmacaoWhatsapp(ag.id)
+                                setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'confirmado' } : x)))
+                                const sendRes = await sendConfirmacaoWhatsapp(agCover.id)
                                 if (!sendRes.ok) {
                                   if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt') {
-                                    setError('A Edge Function "whatsapp" está exigindo JWT no Supabase. Refaça o deploy com verify_jwt=false e tente novamente.')
+                                    setError('JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).')
+                                    return
+                                  }
+                                  if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'jwt_project_mismatch') {
+                                    setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
                                     return
                                   }
                                   if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'invalid_jwt') {
                                     setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
                                     return
+                                  }
+                                  if (typeof sendRes.body === 'object' && sendRes.body !== null) {
+                                    const hint = (sendRes.body as Record<string, unknown>).hint
+                                    if (typeof hint === 'string' && hint.trim()) {
+                                      setError(hint)
+                                      return
+                                    }
+                                    const code = (sendRes.body as Record<string, unknown>).error
+                                    if (code === 'instance_not_connected') {
+                                      setError('WhatsApp não conectado. Vá em Configurações > WhatsApp e conecte a instância (QR Code).')
+                                      return
+                                    }
                                   }
                                   const details = typeof sendRes.body === 'string' ? sendRes.body : JSON.stringify(sendRes.body)
                                   setError(`Falha ao enviar confirmação (HTTP ${sendRes.status}): ${details}`)
@@ -948,12 +1112,12 @@ export function DashboardPage() {
                                 const { error: updErr } = await supabase
                                   .from('agendamentos')
                                   .update({ status: 'nao_compareceu' })
-                                  .eq('id', ag.id)
+                                  .eq('id', agCover.id)
                                 if (updErr) {
-                                  setError(updErr.message)
+                                  setError(formatSupabaseError(updErr))
                                   return
                                 }
-                                setAgendamentos((prev) => prev.map((x) => (x.id === ag.id ? { ...x, status: 'nao_compareceu' } : x)))
+                                setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'nao_compareceu' } : x)))
                               }}
                             >
                               No-show
@@ -961,10 +1125,16 @@ export function DashboardPage() {
                             <Button
                               variant="danger"
                               onClick={async () => {
-                                await supabase
+                                setError(null)
+                                const { error: updErr } = await supabase
                                   .from('agendamentos')
                                   .update({ status: 'cancelado', cancelado_em: new Date().toISOString() })
-                                  .eq('id', ag.id)
+                                  .eq('id', agCover.id)
+                                if (updErr) {
+                                  setError(formatSupabaseError(updErr))
+                                  return
+                                }
+                                setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'cancelado' } : x)))
                               }}
                             >
                               ✗ Cancelar
@@ -975,15 +1145,16 @@ export function DashboardPage() {
                     </div>
                   )
                 }
-                if (block) {
-                  const isStart = time === block.hora_inicio
+                if (blockCover) {
+                  const isStart = Boolean(blockStart)
+                  const timeLabel = isStart ? blockCover.hora_inicio : time
                   return (
                     <div key={time} className="p-4 flex items-center justify-between">
                       <div className="text-sm font-semibold text-slate-900">
-                        {time} - 🔒 BLOQUEADO {isStart && block.motivo ? `(${block.motivo})` : ''}
+                        {timeLabel} - 🔒 BLOQUEADO {isStart && blockCover.motivo ? `(${blockCover.motivo})` : ''}
                       </div>
                       <div className="flex items-center gap-2">
-                        {isStart && block.funcionario_id ? <Badge>{resolveFuncionarioLabel(block.funcionario_id)}</Badge> : null}
+                        {isStart && blockCover.funcionario_id ? <Badge>{resolveFuncionarioLabel(blockCover.funcionario_id)}</Badge> : null}
                         <Badge tone="yellow">Bloqueado</Badge>
                       </div>
                     </div>
@@ -1002,7 +1173,8 @@ export function DashboardPage() {
                     {weekDays.map((d) => {
                       const ags = agendamentosByDay[d.key] ?? []
                       const bls = bloqueiosByDay[d.key] ?? []
-                      const visibleAgCount = ags.filter((a) => a.status !== 'cancelado').length
+                      const visibleAgs = ags.filter(matchesFilters)
+                      const visibleAgCount = visibleAgs.length
                       const label = d.date.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })
                       return (
                         <div key={d.key} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
@@ -1013,10 +1185,10 @@ export function DashboardPage() {
                             </div>
                           </div>
                           <div className="divide-y divide-slate-100">
-                            {ags.length === 0 && bls.length === 0 ? (
+                            {visibleAgs.length === 0 && bls.length === 0 ? (
                               <div className="px-3 py-3 text-sm text-slate-600">Sem itens</div>
                             ) : (
-                              [...ags.map((a) => ({ kind: 'ag' as const, time: a.hora_inicio, ag: a })), ...bls.map((b) => ({ kind: 'b' as const, time: b.hora_inicio, b }))]
+                              [...visibleAgs.map((a) => ({ kind: 'ag' as const, time: a.hora_inicio, ag: a })), ...bls.map((b) => ({ kind: 'b' as const, time: b.hora_inicio, b }))]
                                 .sort((x, y) => parseTimeToMinutes(x.time) - parseTimeToMinutes(y.time))
                                 .map((item) => {
                                   if (item.kind === 'b') {
@@ -1033,7 +1205,7 @@ export function DashboardPage() {
                                     )
                                   }
                                   const a = item.ag
-                                  const visible = matchesFilters(a)
+                                  const visible = true
                                   const statusUi = resolveStatusUi(a.status)
                                   return (
                                     <div key={`ag:${a.id}`} className="px-3 py-2 flex items-start justify-between gap-2">

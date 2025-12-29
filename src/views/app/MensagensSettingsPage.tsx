@@ -2,17 +2,135 @@ import { useEffect, useMemo, useState } from 'react'
 import { AppShell } from '../../components/layout/AppShell'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
-import { supabase } from '../../lib/supabase'
+import { checkJwtProject, supabase, supabaseEnv } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
 
 const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nLocal: {endereco}\n\nNos vemos em breve!\n{nome_negocio}`
 const defaultLembrete = `Oi {nome}!\n\nLembrete: você tem agendamento amanhã às {hora}.\n\nSe não puder comparecer, me avise!\n{telefone_profissional}`
 
+type AgendamentoConfirmadoRow = {
+  id: string
+  data: string
+  hora_inicio: string | null
+  cliente_nome: string | null
+  cliente_telefone: string | null
+  status?: string | null
+  confirmacao_enviada?: boolean | null
+}
+
+async function sendConfirmacaoWhatsapp(agendamentoId: string) {
+  if (!supabaseEnv.ok) {
+    return { ok: false as const, status: 0, body: { error: 'missing_supabase_env' } }
+  }
+
+  const supabaseUrl = supabaseEnv.values.VITE_SUPABASE_URL
+  const supabaseAnonKey = supabaseEnv.values.VITE_SUPABASE_ANON_KEY
+
+  const tryRefresh = async () => {
+    const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession()
+    if (refreshErr) return null
+    return refreshed.session ?? null
+  }
+
+  const { data: sessionData } = await supabase.auth.getSession()
+  let session = sessionData.session
+  const now = Math.floor(Date.now() / 1000)
+  const expiresAt = session?.expires_at ?? null
+
+  if (session && expiresAt && expiresAt <= now + 60) {
+    const refreshed = await tryRefresh()
+    if (refreshed) session = refreshed
+  }
+
+  const token = session?.access_token ?? null
+  if (!token) {
+    return { ok: false as const, status: 401, body: { error: 'session_expired' } }
+  }
+
+  const tokenProject = checkJwtProject(token, supabaseUrl)
+  if (!tokenProject.ok) {
+    await supabase.auth.signOut().catch(() => undefined)
+    return { ok: false as const, status: 401, body: { error: 'jwt_project_mismatch', iss: tokenProject.iss, expected: tokenProject.expectedPrefix } }
+  }
+
+  const callFetch = async (jwt: string) => {
+    const fnUrl = `${supabaseUrl}/functions/v1/whatsapp`
+    let res: Response
+    try {
+      res = await fetch(fnUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: supabaseAnonKey,
+          Authorization: `Bearer ${jwt}`,
+          'x-user-jwt': jwt,
+        },
+        body: JSON.stringify({ action: 'send_confirmacao', agendamento_id: agendamentoId }),
+      })
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Falha de rede'
+      return { ok: false as const, status: 0, body: { error: 'network_error', message: msg } }
+    }
+
+    const fnVersion = res.headers.get('x-smagenda-fn')
+
+    const text = await res.text()
+    let parsed: unknown = null
+    try {
+      parsed = text ? JSON.parse(text) : null
+    } catch {
+      parsed = text
+    }
+
+    if (!res.ok && res.status === 401 && !fnVersion) {
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        (parsed as Record<string, unknown>).message === 'Invalid JWT' &&
+        (parsed as Record<string, unknown>).code === 401
+      ) {
+        return { ok: false as const, status: 401, body: { error: 'supabase_gateway_invalid_jwt' } }
+      }
+    }
+
+    if (!res.ok) return { ok: false as const, status: res.status, body: parsed }
+    return { ok: true as const, status: res.status, body: parsed }
+  }
+
+  const isInvalidJwtPayload = (payload: unknown) => {
+    if (typeof payload === 'string') return payload.includes('Invalid JWT')
+    if (!payload || typeof payload !== 'object') return false
+    const obj = payload as Record<string, unknown>
+    return obj.message === 'Invalid JWT' || obj.error === 'invalid_jwt'
+  }
+
+  const first = await callFetch(token)
+  if (
+    !first.ok &&
+    first.status === 401 &&
+    typeof first.body === 'object' &&
+    first.body !== null &&
+    (first.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
+  ) {
+    return first
+  }
+
+  if (!first.ok && first.status === 401 && isInvalidJwtPayload(first.body)) {
+    const refreshed = await tryRefresh()
+    const nextToken = refreshed?.access_token ?? null
+    if (!nextToken) return { ok: false as const, status: 401, body: { error: 'invalid_jwt' } }
+    return callFetch(nextToken)
+  }
+
+  return first
+}
+
 export function MensagensSettingsPage() {
   const { appPrincipal } = useAuth()
   const usuarioId =
     appPrincipal?.kind === 'usuario' ? appPrincipal.profile.id : appPrincipal?.kind === 'funcionario' ? appPrincipal.profile.usuario_master_id : null
-  const canEdit = useMemo(() => appPrincipal?.kind === 'usuario' && Boolean(usuarioId), [appPrincipal?.kind, usuarioId])
+  const canEditTemplates = useMemo(() => appPrincipal?.kind === 'usuario' && Boolean(usuarioId), [appPrincipal?.kind, usuarioId])
+  const canTestConfirmacao = Boolean(usuarioId)
 
   const [mensagemConfirmacao, setMensagemConfirmacao] = useState(defaultConfirmacao)
   const [mensagemLembrete, setMensagemLembrete] = useState(defaultLembrete)
@@ -24,6 +142,13 @@ export function MensagensSettingsPage() {
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const [schemaIncompleto, setSchemaIncompleto] = useState(false)
+
+  const [agLoading, setAgLoading] = useState(false)
+  const [agendamentosConfirmados, setAgendamentosConfirmados] = useState<AgendamentoConfirmadoRow[]>([])
+  const [agendamentoSelecionadoId, setAgendamentoSelecionadoId] = useState('')
+  const [sendingConfirmacao, setSendingConfirmacao] = useState(false)
+  const [sendConfirmacaoResult, setSendConfirmacaoResult] = useState<string | null>(null)
+  const [agError, setAgError] = useState<string | null>(null)
 
   const isMissingColumnError = (message: string) => message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
 
@@ -89,6 +214,72 @@ export function MensagensSettingsPage() {
     })
   }, [usuarioId])
 
+  useEffect(() => {
+    const run = async () => {
+      if (!usuarioId) return
+      setAgLoading(true)
+      setSendConfirmacaoResult(null)
+      setAgError(null)
+
+      const baseSelect = 'id,data,hora_inicio,cliente_nome,cliente_telefone,status,confirmacao_enviada'
+      const fallbackSelect = 'id,data,hora_inicio,cliente_nome,cliente_telefone,status'
+      const isMissingColumnError = (message: string) => message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
+
+      const first = await supabase
+        .from('agendamentos')
+        .select(baseSelect)
+        .eq('usuario_id', usuarioId)
+        .order('data', { ascending: false })
+        .order('hora_inicio', { ascending: false })
+        .limit(30)
+
+      if (first.error) {
+        if (!isMissingColumnError(first.error.message)) {
+          setAgendamentosConfirmados([])
+          setAgError(first.error.message)
+          setAgLoading(false)
+          return
+        }
+
+        const second = await supabase
+          .from('agendamentos')
+          .select(fallbackSelect)
+          .eq('usuario_id', usuarioId)
+          .order('data', { ascending: false })
+          .order('hora_inicio', { ascending: false })
+          .limit(30)
+
+        if (second.error) {
+          setAgendamentosConfirmados([])
+          setAgError(second.error.message)
+          setAgLoading(false)
+          return
+        }
+
+        const list = (second.data ?? []) as unknown as AgendamentoConfirmadoRow[]
+        setAgendamentosConfirmados(list)
+        setAgendamentoSelecionadoId((prev) => prev || (list[0]?.id ?? ''))
+        setAgLoading(false)
+        return
+      }
+
+      const list = (first.data ?? []) as unknown as AgendamentoConfirmadoRow[]
+      setAgendamentosConfirmados(list)
+      setAgendamentoSelecionadoId((prev) => prev || (list[0]?.id ?? ''))
+      setAgLoading(false)
+    }
+
+    run().catch(() => {
+      setAgError('Erro ao carregar agendamentos')
+      setAgLoading(false)
+    })
+  }, [usuarioId])
+
+  const selectedAgendamento = useMemo(() => {
+    if (!agendamentoSelecionadoId) return null
+    return agendamentosConfirmados.find((a) => a.id === agendamentoSelecionadoId) ?? null
+  }, [agendamentoSelecionadoId, agendamentosConfirmados])
+
   const save = async () => {
     if (!usuarioId) return
     setSaving(true)
@@ -153,11 +344,16 @@ export function MensagensSettingsPage() {
             ) : (
               <div className="space-y-4">
                 <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={enviarConfirmacao} onChange={(e) => setEnviarConfirmacao(e.target.checked)} disabled={!canEdit || saving} />
+                  <input
+                    type="checkbox"
+                    checked={enviarConfirmacao}
+                    onChange={(e) => setEnviarConfirmacao(e.target.checked)}
+                    disabled={!canEditTemplates || saving}
+                  />
                   Enviar confirmação ao confirmar agendamento
                 </label>
                 <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={enviarLembrete} onChange={(e) => setEnviarLembrete(e.target.checked)} disabled={!canEdit || saving} />
+                  <input type="checkbox" checked={enviarLembrete} onChange={(e) => setEnviarLembrete(e.target.checked)} disabled={!canEditTemplates || saving} />
                   Enviar lembrete automático
                 </label>
                 <div className="space-y-2">
@@ -170,7 +366,7 @@ export function MensagensSettingsPage() {
                       step={1}
                       value={lembreteHorasAntes}
                       onChange={(e) => setLembreteHorasAntes(Number(e.target.value))}
-                      disabled={!canEdit || saving || !enviarLembrete}
+                      disabled={!canEditTemplates || saving || !enviarLembrete}
                       className="w-full"
                     />
                     <div className="text-sm font-semibold text-slate-900 w-12 text-right">{lembreteHorasAntes}h</div>
@@ -178,6 +374,124 @@ export function MensagensSettingsPage() {
                 </div>
               </div>
             )}
+          </div>
+        </Card>
+
+        <Card>
+          <div className="p-6 space-y-4">
+            <div className="text-sm font-semibold text-slate-900">Validar confirmação automática</div>
+            <div className="text-sm text-slate-600">Salve o template antes de testar o envio.</div>
+
+            {agLoading ? <div className="text-sm text-slate-600">Carregando agendamentos…</div> : null}
+
+            {!agLoading && agError ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{agError}</div> : null}
+
+            {!agLoading && agendamentosConfirmados.length === 0 ? <div className="text-sm text-slate-600">Nenhum agendamento encontrado.</div> : null}
+
+            {!agLoading && agendamentosConfirmados.length > 0 ? (
+              <div className="space-y-2">
+                <div className="text-sm font-medium text-slate-700">Agendamento</div>
+                <select
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                  value={agendamentoSelecionadoId}
+                  onChange={(e) => setAgendamentoSelecionadoId(e.target.value)}
+                  disabled={!canTestConfirmacao || saving || sendingConfirmacao}
+                >
+                  <option value="">Selecione…</option>
+                  {agendamentosConfirmados.map((a) => {
+                    const data = a.data ? a.data.split('-').reverse().join('/') : ''
+                    const hora = a.hora_inicio ?? ''
+                    const nome = a.cliente_nome ?? 'Cliente'
+                    const tel = a.cliente_telefone ? ` • ${a.cliente_telefone}` : ''
+                    const flag = a.confirmacao_enviada ? ' • já enviada' : ''
+                    const status = (a.status ?? '').trim() ? ` • ${(a.status ?? '').trim()}` : ''
+                    return (
+                      <option key={a.id} value={a.id}>
+                        {data} {hora} • {nome}
+                        {tel}
+                        {status}
+                        {flag}
+                      </option>
+                    )
+                  })}
+                </select>
+              </div>
+            ) : null}
+
+            {!agLoading && selectedAgendamento && (selectedAgendamento.status ?? '').trim().toLowerCase() !== 'confirmado' ? (
+              <div className="text-sm text-amber-800 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                Esse agendamento ainda não está como “confirmado”. A confirmação automática só envia após confirmar.
+              </div>
+            ) : null}
+
+            <div className="flex justify-end">
+              <Button
+                onClick={async () => {
+                  if (!agendamentoSelecionadoId) return
+                  if ((selectedAgendamento?.status ?? '').trim().toLowerCase() !== 'confirmado') return
+                  setSendConfirmacaoResult(null)
+                  setSendingConfirmacao(true)
+                  const res = await sendConfirmacaoWhatsapp(agendamentoSelecionadoId)
+                  if (!res.ok) {
+                    if (
+                      typeof res.body === 'object' &&
+                      res.body !== null &&
+                      (res.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
+                    ) {
+                      setSendConfirmacaoResult('JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).')
+                      setSendingConfirmacao(false)
+                      return
+                    }
+                    if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'jwt_project_mismatch') {
+                      setSendConfirmacaoResult('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
+                      setSendingConfirmacao(false)
+                      return
+                    }
+                    if (typeof res.body === 'object' && res.body !== null && (res.body as Record<string, unknown>).error === 'invalid_jwt') {
+                      setSendConfirmacaoResult('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
+                      setSendingConfirmacao(false)
+                      return
+                    }
+                    if (typeof res.body === 'object' && res.body !== null) {
+                      const hint = (res.body as Record<string, unknown>).hint
+                      if (typeof hint === 'string' && hint.trim()) {
+                        setSendConfirmacaoResult(hint)
+                        setSendingConfirmacao(false)
+                        return
+                      }
+                      const code = (res.body as Record<string, unknown>).error
+                      if (code === 'instance_not_connected') {
+                        setSendConfirmacaoResult('WhatsApp não conectado. Vá em Configurações > WhatsApp e conecte a instância (QR Code).')
+                        setSendingConfirmacao(false)
+                        return
+                      }
+                    }
+                    const details = typeof res.body === 'string' ? res.body : JSON.stringify(res.body)
+                    setSendConfirmacaoResult(`Falha ao enviar confirmação (HTTP ${res.status}): ${details}`)
+                    setSendingConfirmacao(false)
+                    return
+                  }
+
+                  const details = typeof res.body === 'string' ? res.body : JSON.stringify(res.body)
+                  setSendConfirmacaoResult(details || 'Enviado.')
+                  setSendingConfirmacao(false)
+                }}
+                disabled={
+                  !canTestConfirmacao ||
+                  saving ||
+                  loading ||
+                  sendingConfirmacao ||
+                  !agendamentoSelecionadoId ||
+                  (selectedAgendamento?.status ?? '').trim().toLowerCase() !== 'confirmado'
+                }
+              >
+                {sendingConfirmacao ? 'Enviando…' : 'Enviar confirmação agora'}
+              </Button>
+            </div>
+
+            {sendConfirmacaoResult ? (
+              <pre className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800 overflow-auto whitespace-pre-wrap">{sendConfirmacaoResult}</pre>
+            ) : null}
           </div>
         </Card>
 
@@ -191,7 +505,7 @@ export function MensagensSettingsPage() {
                 className="w-full min-h-[160px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
                 value={mensagemConfirmacao}
                 onChange={(e) => setMensagemConfirmacao(e.target.value)}
-                disabled={!canEdit || saving}
+                disabled={!canEditTemplates || saving}
               />
             )}
           </div>
@@ -207,13 +521,13 @@ export function MensagensSettingsPage() {
                 className="w-full min-h-[160px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
                 value={mensagemLembrete}
                 onChange={(e) => setMensagemLembrete(e.target.value)}
-                disabled={!canEdit || saving}
+                disabled={!canEditTemplates || saving}
               />
             )}
           </div>
         </Card>
 
-        {canEdit ? (
+        {canEditTemplates ? (
           <div className="flex justify-end">
             <Button onClick={save} disabled={saving || loading}>
               Salvar

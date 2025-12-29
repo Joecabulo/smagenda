@@ -63,6 +63,8 @@ type AgendamentoRow = {
 
 type AgendamentoConfirmacaoRow = { confirmacao_enviada: boolean | null }
 
+const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nLocal: {endereco}\n\nNos vemos em breve!\n{nome_negocio}`
+
 const FN_VERSION = 'whatsapp@2025-12-27'
 
 function jsonResponse(status: number, body: unknown) {
@@ -227,11 +229,118 @@ function sanitizeInstanceName(input: string) {
 }
 
 function sanitizePhone(input: string) {
+  return String(input ?? '').replace(/\D/g, '')
+}
+
+function buildRecipientCandidates(raw: string) {
+  const digits = sanitizePhone(raw)
+  if (!digits) return []
+
+  const bases: string[] = [digits]
+  if (!digits.startsWith('55') && (digits.length === 10 || digits.length === 11)) {
+    bases.push(`55${digits}`)
+  }
+
+  const candidates: string[] = []
+  for (const b of bases) {
+    candidates.push(b)
+    candidates.push(`+${b}`)
+    candidates.push(`${b}@s.whatsapp.net`)
+    candidates.push(`${b}@c.us`)
+  }
+
+  return Array.from(new Set(candidates.map((v) => v.trim()).filter(Boolean)))
+}
+
+function maskRecipient(input: string) {
   const digits = String(input ?? '').replace(/\D/g, '')
   if (!digits) return ''
-  if (digits.startsWith('55')) return digits
-  if (digits.length === 10 || digits.length === 11) return `55${digits}`
-  return digits
+  const last4 = digits.slice(-4)
+  return `${'*'.repeat(Math.max(0, digits.length - 4))}${last4}`
+}
+
+function isRecipientFormatError(details: unknown) {
+  const unwrapped = unwrapNotFoundLast(details)
+  const text = extractTextFragments(unwrapped).join(' | ').toLowerCase()
+
+  const hasExistsFalse = (input: unknown): boolean => {
+    if (!input || typeof input !== 'object') return false
+    if (Array.isArray(input)) return input.some((v) => hasExistsFalse(v))
+    const obj = input as Record<string, unknown>
+    if (obj.exists === false) return true
+    return Object.values(obj).some((v) => hasExistsFalse(v))
+  }
+
+  if (hasExistsFalse(unwrapped)) return true
+  if (!text) return false
+
+  if (text.includes('quote command returned error')) return true
+  if (text.includes('invalid jid') || text.includes('jid')) return true
+  if (text.includes('not a whatsapp user') || text.includes('is not on whatsapp')) return true
+  if (text.includes('invalid number') || text.includes('number invalid')) return true
+  return false
+}
+
+function normalizeEvolutionText(input: string) {
+  return String(input ?? '').replace(/\r\n/g, '\n')
+}
+
+function stripUnsupportedEvolutionChars(input: string) {
+  const s = normalizeEvolutionText(input)
+  const withoutSurrogates = s.replace(/[\uD800-\uDFFF]/g, '')
+  const withoutVariationSelectors = withoutSurrogates.replace(/[\uFE0E\uFE0F]/g, '')
+  return withoutVariationSelectors.replace(/[^\t\n\r\u0020-\u007E\u00A0-\u00FF]/g, '')
+}
+
+function buildTextCandidates(input: string) {
+  const raw = normalizeEvolutionText(input)
+  const stripped = stripUnsupportedEvolutionChars(raw)
+  const candidates = raw === stripped ? [raw] : [raw, stripped]
+  return Array.from(new Set(candidates.map((v) => v.trim()).filter(Boolean)))
+}
+
+async function evolutionSendTextWithFallback(opts: {
+  apiUrl: string
+  apiKey: string
+  instanceName: string
+  phoneRaw: string
+  text: string
+  stopOn404?: (args: { body: unknown; url: string; baseUrlUsed: string }) => boolean
+}) {
+  const recipients = buildRecipientCandidates(opts.phoneRaw)
+  const texts = buildTextCandidates(opts.text)
+  const attempts: Array<{ recipient: string; text_variant: string; status: number; ok: boolean }> = []
+
+  let last: Awaited<ReturnType<typeof evolutionRequestAuto>> | null = null
+
+  for (const recipient of recipients) {
+    for (let i = 0; i < texts.length; i += 1) {
+      const text = texts[i]!
+      const variant = i === 0 ? 'raw' : 'stripped'
+      const res = await evolutionRequestAuto({
+        baseUrl: opts.apiUrl,
+        apiKey: opts.apiKey,
+        path: `/message/sendText/${opts.instanceName}`,
+        method: 'POST',
+        body: { number: recipient, text },
+        stopOn404: opts.stopOn404,
+      })
+
+      attempts.push({ recipient: maskRecipient(recipient), text_variant: variant, status: res.status, ok: res.ok })
+      last = res
+      if (res.ok) return { ...res, attempts }
+
+      if (res.status === 401 || res.status === 403 || res.status === 404) {
+        return { ...res, attempts }
+      }
+
+      if (!isRecipientFormatError(res.body)) {
+        return { ...res, attempts }
+      }
+    }
+  }
+
+  return { ...(last ?? { ok: false, status: 502, body: { error: 'evolution_send_failed' } }), attempts }
 }
 
 function formatBRL(value: number) {
@@ -603,8 +712,43 @@ function evolutionNetworkHint(details: unknown) {
   return 'Falha de rede ao chamar a Evolution API. Confirme que a URL é pública e responde rápido (teste no navegador/curl). Se estiver usando IP:porta (ex.: 8080), libere a porta no firewall e considere expor via HTTPS/443 (proxy/tunnel) para maior estabilidade.'
 }
 
+function isEvolutionQuoteCommandError(details: unknown) {
+  const unwrapped = unwrapNotFoundLast(details)
+  const text = extractTextFragments(unwrapped).join(' | ').toLowerCase()
+  if (!text) return false
+  return text.includes('quote command returned error')
+}
+
+function evolutionQuoteCommandHint(details: unknown) {
+  if (!isEvolutionQuoteCommandError(details)) return null
+  return 'A Evolution retornou "Quote command returned error" ao enviar. O sistema tenta automaticamente variações de formato do número e também remove emojis/caracteres incompatíveis; se persistir, confirme o telefone do cliente com DDD + 55 (ex: 5511999999999) e verifique os logs do container da Evolution.'
+}
+
+function isEvolutionNumberNotFound(details: unknown) {
+  const unwrapped = unwrapNotFoundLast(details)
+  const hasExistsFalse = (input: unknown): boolean => {
+    if (!input || typeof input !== 'object') return false
+    if (Array.isArray(input)) return input.some((v) => hasExistsFalse(v))
+    const obj = input as Record<string, unknown>
+    if (obj.exists === false) return true
+    return Object.values(obj).some((v) => hasExistsFalse(v))
+  }
+  return hasExistsFalse(unwrapped)
+}
+
+function evolutionNumberNotFoundHint(details: unknown) {
+  if (!isEvolutionNumberNotFound(details)) return null
+  return 'A Evolution indicou que o número não existe no WhatsApp (exists=false). Confirme se o telefone está correto e tente com DDD + 55 (ex.: 5531999999999).'
+}
+
 function evolutionHint(details: unknown) {
-  return evolutionUrlHint(details) ?? evolutionAuthHint(details) ?? evolutionNetworkHint(details)
+  return (
+    evolutionUrlHint(details) ??
+    evolutionAuthHint(details) ??
+    evolutionNetworkHint(details) ??
+    evolutionNumberNotFoundHint(details) ??
+    evolutionQuoteCommandHint(details)
+  )
 }
 
 async function createEvolutionInstance(opts: { apiUrl: string; apiKey: string; instanceName: string }) {
@@ -1143,21 +1287,14 @@ Deno.serve(async (req) => {
           continue
         }
 
-        const number = sanitizePhone(rawPhone)
-        if (!number) {
+        const phoneRaw = rawPhone
+        if (!sanitizePhone(rawPhone)) {
           skippedInvalidPhone += 1
           results.push({ id: row.id, nome_negocio: row.nome_negocio ?? null, status: 'skipped_invalid_phone', details: { telefone: rawPhone } })
           continue
         }
 
-        let sendRes = await evolutionRequestAuto({
-          baseUrl: apiUrl,
-          apiKey,
-          path: `/message/sendText/${instanceName}`,
-          method: 'POST',
-          body: { number, text },
-          stopOn404,
-        })
+        let sendRes = await evolutionSendTextWithFallback({ apiUrl, apiKey, instanceName, phoneRaw, text, stopOn404 })
 
         if (!sendRes.ok && sendRes.status === 404 && isEvolutionInstanceNotFound(sendRes.body, instanceName)) {
           const createRes = await createEvolutionInstance({ apiUrl, apiKey, instanceName })
@@ -1167,20 +1304,18 @@ Deno.serve(async (req) => {
             results.push({ id: row.id, nome_negocio: row.nome_negocio ?? null, status: 'failed', details: { error: 'evolution_error', details: createRes.body, hint } })
             continue
           }
-          sendRes = await evolutionRequestAuto({
-            baseUrl: apiUrl,
-            apiKey,
-            path: `/message/sendText/${instanceName}`,
-            method: 'POST',
-            body: { number, text },
-            stopOn404,
-          })
+          sendRes = await evolutionSendTextWithFallback({ apiUrl, apiKey, instanceName, phoneRaw, text, stopOn404 })
         }
 
         if (!sendRes.ok) {
           const hint = evolutionHint(sendRes.body)
           failed += 1
-          results.push({ id: row.id, nome_negocio: row.nome_negocio ?? null, status: 'failed', details: { status: sendRes.status, body: sendRes.body, hint } })
+          results.push({
+            id: row.id,
+            nome_negocio: row.nome_negocio ?? null,
+            status: 'failed',
+            details: { status: sendRes.status, body: sendRes.body, hint, attempts: (sendRes as unknown as { attempts?: unknown }).attempts ?? null },
+          })
           continue
         }
 
@@ -1481,19 +1616,12 @@ Deno.serve(async (req) => {
   }
 
   if (payload.action === 'send_test') {
-    const number = sanitizePhone(payload.number)
+    const phoneRaw = String(payload.number ?? '')
     const text = String(payload.text ?? '').trim()
-    if (!number || !text) return jsonResponse(400, { error: 'invalid_payload' })
+    if (!sanitizePhone(phoneRaw) || !text) return jsonResponse(400, { error: 'invalid_payload' })
 
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
-    let sendRes = await evolutionRequestAuto({
-      baseUrl: apiUrl!,
-      apiKey: apiKey!,
-      path: `/message/sendText/${instanceName}`,
-      method: 'POST',
-      body: { number, text },
-      stopOn404,
-    })
+    let sendRes = await evolutionSendTextWithFallback({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName, phoneRaw, text, stopOn404 })
 
     if (!sendRes.ok && sendRes.status === 404 && isEvolutionInstanceNotFound(sendRes.body, instanceName)) {
       const createRes = await createEvolutionInstance({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName })
@@ -1501,19 +1629,17 @@ Deno.serve(async (req) => {
         const hint = evolutionHint(createRes.body)
         return jsonResponse(createRes.status, { error: 'evolution_error', details: createRes.body, hint })
       }
-      sendRes = await evolutionRequestAuto({
-        baseUrl: apiUrl!,
-        apiKey: apiKey!,
-        path: `/message/sendText/${instanceName}`,
-        method: 'POST',
-        body: { number, text },
-        stopOn404,
-      })
+      sendRes = await evolutionSendTextWithFallback({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName, phoneRaw, text, stopOn404 })
     }
 
     if (!sendRes.ok) {
       const hint = evolutionHint(sendRes.body)
-      return jsonResponse(sendRes.status, { error: 'evolution_error', details: sendRes.body, hint })
+      return jsonResponse(sendRes.status, {
+        error: 'evolution_error',
+        details: sendRes.body,
+        hint,
+        attempts: (sendRes as unknown as { attempts?: unknown }).attempts ?? null,
+      })
     }
     return jsonResponse(200, { ok: true })
   }
@@ -1551,7 +1677,8 @@ Deno.serve(async (req) => {
 
     if (!apiUrl || !apiKey) return jsonResponse(200, { ok: true, skipped: 'not_configured' })
 
-    const tmpl = userExtra?.mensagem_confirmacao ?? ''
+    const tmplCandidate = (userExtra?.mensagem_confirmacao ?? '').trim()
+    const tmpl = tmplCandidate ? (userExtra?.mensagem_confirmacao ?? '') : defaultConfirmacao
     const vars = {
       nome: agRow.cliente_nome ?? '',
       data: formatBRDate(agRow.data),
@@ -1563,18 +1690,26 @@ Deno.serve(async (req) => {
       telefone_profissional: userBaseRow.telefone ?? '',
     }
     const message = interpolateTemplate(tmpl, vars).trim()
-    const number = sanitizePhone(agRow.cliente_telefone ?? '')
-    if (!number || !message) return jsonResponse(400, { error: 'missing_message_data' })
+    const phoneRaw = String(agRow.cliente_telefone ?? '')
+    if (!sanitizePhone(phoneRaw) || !message) return jsonResponse(400, { error: 'missing_message_data' })
 
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
-    let sendRes = await evolutionRequestAuto({
-      baseUrl: apiUrl,
-      apiKey,
-      path: `/message/sendText/${instanceName}`,
-      method: 'POST',
-      body: { number, text: message },
-      stopOn404,
-    })
+
+    const stateRes = await evolutionRequestAuto({ baseUrl: apiUrl, apiKey, path: `/instance/connectionState/${instanceName}`, method: 'GET', stopOn404 })
+    if (stateRes.ok) {
+      const state = extractInstanceState(stateRes.body)
+      const normalized = (state ?? '').trim().toLowerCase()
+      if (normalized && normalized !== 'open' && normalized !== 'connected') {
+        return jsonResponse(409, {
+          error: 'instance_not_connected',
+          state,
+          instanceName,
+          hint: 'WhatsApp ainda não está conectado nessa instância. Vá em Configurações > WhatsApp e clique em Conectar (QR Code) e depois tente novamente.',
+        })
+      }
+    }
+
+    let sendRes = await evolutionSendTextWithFallback({ apiUrl, apiKey, instanceName, phoneRaw, text: message, stopOn404 })
 
     if (!sendRes.ok && sendRes.status === 404 && isEvolutionInstanceNotFound(sendRes.body, instanceName)) {
       const createRes = await createEvolutionInstance({ apiUrl, apiKey, instanceName })
@@ -1582,19 +1717,17 @@ Deno.serve(async (req) => {
         const hint = evolutionHint(createRes.body)
         return jsonResponse(createRes.status, { error: 'evolution_error', details: createRes.body, hint })
       }
-      sendRes = await evolutionRequestAuto({
-        baseUrl: apiUrl,
-        apiKey,
-        path: `/message/sendText/${instanceName}`,
-        method: 'POST',
-        body: { number, text: message },
-        stopOn404,
-      })
+      sendRes = await evolutionSendTextWithFallback({ apiUrl, apiKey, instanceName, phoneRaw, text: message, stopOn404 })
     }
 
     if (!sendRes.ok) {
       const hint = evolutionHint(sendRes.body)
-      return jsonResponse(sendRes.status, { error: 'evolution_error', details: sendRes.body, hint })
+      return jsonResponse(sendRes.status, {
+        error: 'evolution_error',
+        details: sendRes.body,
+        hint,
+        attempts: (sendRes as unknown as { attempts?: unknown }).attempts ?? null,
+      })
     }
 
     if (agExtraOk) {

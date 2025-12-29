@@ -4,10 +4,14 @@ type UsuarioRow = {
   id: string
   whatsapp_instance_name: string | null
   slug: string | null
+  enviar_confirmacao: boolean | null
+  enviar_lembrete: boolean | null
   lembrete_horas_antes: number | null
   mensagem_lembrete: string | null
+  mensagem_confirmacao: string | null
   nome_negocio: string | null
   telefone: string | null
+  endereco: string | null
 }
 
 type SuperAdminConfigRow = {
@@ -27,8 +31,22 @@ type AgendamentoRow = {
   hora_inicio: string | null
   status: string
   lembrete_enviado: boolean | null
+  confirmacao_enviada?: boolean | null
   servico: ServicoRow | null
 }
+
+type UsuarioPartialRow = {
+  id: string
+  whatsapp_instance_name: string | null
+  slug: string | null
+  enviar_confirmacao: boolean | null
+  mensagem_confirmacao: string | null
+  nome_negocio: string | null
+  telefone: string | null
+  endereco: string | null
+}
+
+const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nLocal: {endereco}\n\nNos vemos em breve!\n{nome_negocio}`
 
 const FN_VERSION = 'whatsapp-lembretes@2025-12-26'
 
@@ -68,12 +86,129 @@ function sanitizeInstanceName(input: string) {
   return normalized.slice(0, 50) || 'smagenda'
 }
 
-function sanitizePhone(input: string) {
+function sanitizePhoneDigits(input: string) {
+  return String(input ?? '').replace(/\D/g, '')
+}
+
+function buildRecipientCandidates(raw: string) {
+  const digits = sanitizePhoneDigits(raw)
+  if (!digits) return []
+
+  const bases: string[] = [digits]
+  if (!digits.startsWith('55') && (digits.length === 10 || digits.length === 11)) {
+    bases.push(`55${digits}`)
+  }
+
+  const candidates: string[] = []
+  for (const b of bases) {
+    candidates.push(b)
+    candidates.push(`+${b}`)
+    candidates.push(`${b}@s.whatsapp.net`)
+    candidates.push(`${b}@c.us`)
+  }
+
+  return Array.from(new Set(candidates.map((v) => v.trim()).filter(Boolean)))
+}
+
+function maskRecipient(input: string) {
   const digits = String(input ?? '').replace(/\D/g, '')
   if (!digits) return ''
-  if (digits.startsWith('55')) return digits
-  if (digits.length === 10 || digits.length === 11) return `55${digits}`
-  return digits
+  const last4 = digits.slice(-4)
+  return `${'*'.repeat(Math.max(0, digits.length - 4))}${last4}`
+}
+
+function extractTextFragments(input: unknown): string[] {
+  if (typeof input === 'string') return [input]
+  if (!input) return []
+  if (Array.isArray(input)) return input.flatMap((v) => extractTextFragments(v))
+  if (typeof input !== 'object') return []
+  const obj = input as Record<string, unknown>
+  const keys = ['message', 'error', 'details', 'response', 'data', 'description']
+  const out: string[] = []
+  for (const key of keys) {
+    if (obj[key] !== undefined) out.push(...extractTextFragments(obj[key]))
+  }
+  if (out.length) return out
+  return Object.values(obj).flatMap((v) => extractTextFragments(v))
+}
+
+function unwrapNotFoundLast(details: unknown): unknown {
+  if (!details || typeof details !== 'object') return details
+  const obj = details as Record<string, unknown>
+  if (obj.error === 'not_found' && obj.last !== undefined) return obj.last
+  return details
+}
+
+function isRecipientFormatError(details: unknown) {
+  const unwrapped = unwrapNotFoundLast(details)
+  const text = extractTextFragments(unwrapped).join(' | ').toLowerCase()
+  if (!text) return false
+
+  if (text.includes('quote command returned error')) return true
+  if (text.includes('invalid jid') || text.includes('jid')) return true
+  if (text.includes('not a whatsapp user') || text.includes('is not on whatsapp')) return true
+  if (text.includes('invalid number') || text.includes('number invalid')) return true
+  return false
+}
+
+function normalizeEvolutionText(input: string) {
+  return String(input ?? '').replace(/\r\n/g, '\n')
+}
+
+function stripUnsupportedEvolutionChars(input: string) {
+  const s = normalizeEvolutionText(input)
+  const withoutSurrogates = s.replace(/[\uD800-\uDFFF]/g, '')
+  const withoutVariationSelectors = withoutSurrogates.replace(/[\uFE0E\uFE0F]/g, '')
+  return withoutVariationSelectors.replace(/[^\t\n\r\u0020-\u007E\u00A0-\u00FF]/g, '')
+}
+
+function buildTextCandidates(input: string) {
+  const raw = normalizeEvolutionText(input)
+  const stripped = stripUnsupportedEvolutionChars(raw)
+  const candidates = raw === stripped ? [raw] : [raw, stripped]
+  return Array.from(new Set(candidates.map((v) => v.trim()).filter(Boolean)))
+}
+
+async function evolutionSendTextWithFallback(opts: {
+  apiUrl: string
+  apiKey: string
+  instanceName: string
+  phoneRaw: string
+  text: string
+}) {
+  const recipients = buildRecipientCandidates(opts.phoneRaw)
+  const texts = buildTextCandidates(opts.text)
+  const attempts: Array<{ recipient: string; text_variant: string; status: number; ok: boolean }> = []
+
+  let last: Awaited<ReturnType<typeof evolutionRequestAuto>> | null = null
+
+  for (const recipient of recipients) {
+    for (let i = 0; i < texts.length; i += 1) {
+      const text = texts[i]!
+      const variant = i === 0 ? 'raw' : 'stripped'
+      const res = await evolutionRequestAuto({
+        baseUrl: opts.apiUrl,
+        apiKey: opts.apiKey,
+        path: `/message/sendText/${opts.instanceName}`,
+        method: 'POST',
+        body: { number: recipient, text },
+      })
+
+      attempts.push({ recipient: maskRecipient(recipient), text_variant: variant, status: res.status, ok: res.ok })
+      last = res
+      if (res.ok) return { ...res, attempts }
+
+      if (res.status === 401 || res.status === 403 || res.status === 404) {
+        return { ...res, attempts }
+      }
+
+      if (!isRecipientFormatError(res.body)) {
+        return { ...res, attempts }
+      }
+    }
+  }
+
+  return { ...(last ?? { ok: false, status: 502, body: { error: 'evolution_send_failed' }, baseUrlUsed: opts.apiUrl }), attempts }
 }
 
 function formatBRL(value: number) {
@@ -234,6 +369,13 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return jsonResponse(200, { ok: true })
   if (req.method !== 'POST') return jsonResponse(405, { error: 'method_not_allowed' })
 
+  let bodyJson: unknown = null
+  try {
+    bodyJson = await req.json()
+  } catch {
+    bodyJson = null
+  }
+
   const requiredSecret = Deno.env.get('CRON_SECRET') ?? ''
   if (requiredSecret) {
     const provided = req.headers.get('x-cron-secret') ?? ''
@@ -269,10 +411,101 @@ Deno.serve(async (req) => {
   const globalApiKey = sa?.whatsapp_api_key ?? null
   if (!globalApiUrl || !globalApiKey) return jsonResponse(200, { ok: true, skipped_all: 'not_configured', results: [] })
 
+  const agendamentoId = (() => {
+    if (!bodyJson || typeof bodyJson !== 'object') return null
+    const raw = (bodyJson as Record<string, unknown>).agendamento_id
+    if (typeof raw !== 'string') return null
+    const id = raw.trim()
+    return id ? id : null
+  })()
+
+  if (agendamentoId) {
+    let canUpdateConfirmacao = true
+    const agSel = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco)'
+    const agFallbackSel = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,servico:servicos(nome,preco)'
+
+    const agFirst = await adminClient.from('agendamentos').select(agSel).eq('id', agendamentoId).maybeSingle()
+    if (agFirst.error) {
+      if (!isMissingColumnError(agFirst.error.message)) {
+        return jsonResponse(400, { error: 'load_agendamento_failed', message: agFirst.error.message })
+      }
+      canUpdateConfirmacao = false
+    }
+
+    const agData = agFirst.error
+      ? await adminClient.from('agendamentos').select(agFallbackSel).eq('id', agendamentoId).maybeSingle()
+      : agFirst
+
+    if (agData.error) {
+      return jsonResponse(400, { error: 'load_agendamento_failed', message: agData.error.message })
+    }
+    if (!agData.data) return jsonResponse(404, { error: 'agendamento_not_found' })
+
+    const agRow = agData.data as unknown as AgendamentoRow
+    if (agRow.status !== 'confirmado') return jsonResponse(200, { ok: true, skipped: 'not_confirmed' })
+    if (agRow.confirmacao_enviada === true) return jsonResponse(200, { ok: true, skipped: 'already_sent' })
+
+    const userSel = 'id,whatsapp_instance_name,slug,enviar_confirmacao,mensagem_confirmacao,nome_negocio,telefone,endereco'
+    const userRes = await adminClient.from('usuarios').select(userSel).eq('id', agRow.usuario_id).maybeSingle()
+    if (userRes.error) {
+      if (isMissingColumnError(userRes.error.message) || isMissingTableError(userRes.error.message)) {
+        return jsonResponse(400, { error: 'schema_incomplete', message: userRes.error.message })
+      }
+      return jsonResponse(400, { error: 'load_user_failed', message: userRes.error.message })
+    }
+    if (!userRes.data) return jsonResponse(404, { error: 'usuario_not_found' })
+
+    const uRow = userRes.data as unknown as UsuarioPartialRow
+    if (uRow.enviar_confirmacao === false) return jsonResponse(200, { ok: true, skipped: 'disabled' })
+
+    const instanceNameRaw = uRow.whatsapp_instance_name ?? uRow.slug ?? ''
+    const instanceName = sanitizeInstanceName(instanceNameRaw)
+
+    const tmpl = (uRow.mensagem_confirmacao ?? '').trim() ? (uRow.mensagem_confirmacao ?? '') : defaultConfirmacao
+    const vars = {
+      nome: agRow.cliente_nome ?? '',
+      data: formatBRDate(agRow.data),
+      hora: agRow.hora_inicio ?? '',
+      servico: agRow.servico?.nome ?? '',
+      preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
+      endereco: uRow.endereco ?? '',
+      nome_negocio: uRow.nome_negocio ?? '',
+      telefone_profissional: uRow.telefone ?? '',
+    }
+    const text = interpolateTemplate(tmpl, vars).trim()
+    const phoneRaw = agRow.cliente_telefone ?? ''
+    if (!text || !sanitizePhoneDigits(phoneRaw)) return jsonResponse(200, { ok: true, skipped: 'missing_message_data' })
+
+    const sendRes = await evolutionSendTextWithFallback({
+      apiUrl: globalApiUrl,
+      apiKey: globalApiKey,
+      instanceName,
+      phoneRaw,
+      text,
+    })
+
+    if (!sendRes.ok) return jsonResponse(502, { ok: false, error: 'evolution_error', details: sendRes.body, attempts: sendRes.attempts })
+
+    if (canUpdateConfirmacao) {
+      const { error: updErr } = await adminClient
+        .from('agendamentos')
+        .update({ confirmacao_enviada: true, confirmacao_enviada_em: new Date().toISOString() })
+        .eq('id', agRow.id)
+        .eq('usuario_id', uRow.id)
+        .eq('confirmacao_enviada', false)
+
+      if (updErr) {
+        return jsonResponse(502, { ok: false, error: 'save_confirmacao_flag_failed', message: updErr.message })
+      }
+    }
+
+    return jsonResponse(200, { ok: true, sent: true, usuario_id: uRow.id, agendamento_id: agRow.id })
+  }
+
   const { data: users, error: usersErr } = await adminClient
     .from('usuarios')
-    .select('id,whatsapp_instance_name,slug,enviar_lembrete,lembrete_horas_antes,mensagem_lembrete,nome_negocio,telefone')
-    .eq('enviar_lembrete', true)
+    .select('id,whatsapp_instance_name,slug,enviar_confirmacao,enviar_lembrete,lembrete_horas_antes,mensagem_confirmacao,mensagem_lembrete,nome_negocio,telefone,endereco')
+    .or('enviar_lembrete.eq.true,enviar_confirmacao.eq.true')
     .limit(500)
 
   if (usersErr) {
@@ -283,107 +516,202 @@ Deno.serve(async (req) => {
   const timeZone = 'America/Sao_Paulo'
   const now = new Date()
   const nowVirtual = toVirtualTimeZoneDate(now, timeZone)
-  const results: Array<{ usuario_id: string; sent: number; skipped: number; failed: number }> = []
+  const results: Array<{
+    usuario_id: string
+    confirm_sent: number
+    confirm_skipped: number
+    confirm_failed: number
+    reminder_sent: number
+    reminder_skipped: number
+    reminder_failed: number
+  }> = []
 
   for (const u of users ?? []) {
     const uRow = u as unknown as UsuarioRow
 
     const instanceNameRaw = uRow.whatsapp_instance_name ?? uRow.slug ?? ''
     const instanceName = sanitizeInstanceName(instanceNameRaw)
-    const hours = Number(uRow.lembrete_horas_antes ?? 24)
-    const hoursSafe = Number.isFinite(hours) && hours >= 1 && hours <= 168 ? hours : 24
+    let confirmSent = 0
+    let confirmSkipped = 0
+    let confirmFailed = 0
 
-    const targetStart = new Date(nowVirtual.getTime() + hoursSafe * 60 * 60 * 1000)
-    const targetEnd = new Date(targetStart.getTime() + 60 * 60 * 1000)
+    let reminderSent = 0
+    let reminderSkipped = 0
+    let reminderFailed = 0
 
-    const startDate = targetStart.toISOString().slice(0, 10)
-    const endDate = targetEnd.toISOString().slice(0, 10)
+    const shouldConfirm = uRow.enviar_confirmacao !== false
+    if (shouldConfirm) {
+      const confirmStart = new Date(nowVirtual)
+      confirmStart.setDate(confirmStart.getDate() - 7)
+      const confirmEnd = new Date(nowVirtual)
+      confirmEnd.setDate(confirmEnd.getDate() + 90)
 
-    const { data: ags, error: agErr } = await adminClient
-      .from('agendamentos')
-      .select('id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,lembrete_enviado,servico:servicos(nome,preco)')
-      .eq('usuario_id', uRow.id)
-      .eq('status', 'confirmado')
-      .eq('lembrete_enviado', false)
-      .gte('data', startDate)
-      .lte('data', endDate)
-      .limit(200)
+      const confirmStartDate = confirmStart.toISOString().slice(0, 10)
+      const confirmEndDate = confirmEnd.toISOString().slice(0, 10)
 
-    if (agErr) {
-      results.push({ usuario_id: uRow.id, sent: 0, skipped: 0, failed: 0 })
-      continue
-    }
-
-    let sent = 0
-    let skipped = 0
-    let failed = 0
-
-    for (const ag of ags ?? []) {
-      const agRow = ag as unknown as AgendamentoRow
-
-      if (agRow.lembrete_enviado === true) {
-        skipped++
-        continue
-      }
-
-      const data = agRow.data
-      const horaInicio = agRow.hora_inicio ?? ''
-      const startVirtual = data && horaInicio ? new Date(`${data}T${horaInicio}:00Z`) : null
-      if (!startVirtual || !(startVirtual >= targetStart && startVirtual < targetEnd)) {
-        skipped++
-        continue
-      }
-
-      const tmpl = uRow.mensagem_lembrete ?? ''
-      const vars = {
-        nome: agRow.cliente_nome ?? '',
-        data: formatBRDate(agRow.data),
-        hora: agRow.hora_inicio ?? '',
-        servico: agRow.servico?.nome ?? '',
-        preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
-        nome_negocio: uRow.nome_negocio ?? '',
-        telefone_profissional: uRow.telefone ?? '',
-      }
-      const text = interpolateTemplate(tmpl, vars).trim()
-      const number = sanitizePhone(agRow.cliente_telefone ?? '')
-      if (!text || !number) {
-        skipped++
-        continue
-      }
-
-      const sendRes = await evolutionRequestAuto({
-        baseUrl: globalApiUrl,
-        apiKey: globalApiKey,
-        path: `/message/sendText/${instanceName}`,
-        method: 'POST',
-        body: { number, text },
-      })
-
-      if (!sendRes.ok) {
-        failed++
-        continue
-      }
-
-      const { error: updErr } = await adminClient
+      const { data: confirmAgs, error: confirmErr } = await adminClient
         .from('agendamentos')
-        .update({ lembrete_enviado: true, lembrete_enviado_em: new Date().toISOString() })
-        .eq('id', agRow.id)
+        .select('id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco)')
         .eq('usuario_id', uRow.id)
-        .eq('lembrete_enviado', false)
+        .eq('status', 'confirmado')
+        .eq('confirmacao_enviada', false)
+        .gte('data', confirmStartDate)
+        .lte('data', confirmEndDate)
+        .limit(200)
 
-      if (updErr) {
-        if (isMissingColumnError(updErr.message)) {
-          failed++
-          continue
+      if (confirmErr) {
+        confirmFailed++
+      } else {
+        for (const ag of confirmAgs ?? []) {
+          const agRow = ag as unknown as AgendamentoRow
+          if (agRow.confirmacao_enviada === true) {
+            confirmSkipped++
+            continue
+          }
+
+          const tmpl = (uRow.mensagem_confirmacao ?? '').trim() ? (uRow.mensagem_confirmacao ?? '') : defaultConfirmacao
+          const vars = {
+            nome: agRow.cliente_nome ?? '',
+            data: formatBRDate(agRow.data),
+            hora: agRow.hora_inicio ?? '',
+            servico: agRow.servico?.nome ?? '',
+            preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
+            endereco: uRow.endereco ?? '',
+            nome_negocio: uRow.nome_negocio ?? '',
+            telefone_profissional: uRow.telefone ?? '',
+          }
+          const text = interpolateTemplate(tmpl, vars).trim()
+          const phoneRaw = agRow.cliente_telefone ?? ''
+          if (!text || !sanitizePhoneDigits(phoneRaw)) {
+            confirmSkipped++
+            continue
+          }
+
+          const sendRes = await evolutionSendTextWithFallback({
+            apiUrl: globalApiUrl,
+            apiKey: globalApiKey,
+            instanceName,
+            phoneRaw,
+            text,
+          })
+
+          if (!sendRes.ok) {
+            confirmFailed++
+            continue
+          }
+
+          const { error: updErr } = await adminClient
+            .from('agendamentos')
+            .update({ confirmacao_enviada: true, confirmacao_enviada_em: new Date().toISOString() })
+            .eq('id', agRow.id)
+            .eq('usuario_id', uRow.id)
+            .eq('confirmacao_enviada', false)
+
+          if (updErr) {
+            confirmFailed++
+            continue
+          }
+
+          confirmSent++
         }
-        failed++
-        continue
       }
-
-      sent++
     }
 
-    results.push({ usuario_id: uRow.id, sent, skipped, failed })
+    if (uRow.enviar_lembrete === true) {
+      const hours = Number(uRow.lembrete_horas_antes ?? 24)
+      const hoursSafe = Number.isFinite(hours) && hours >= 1 && hours <= 168 ? hours : 24
+
+      const targetStart = new Date(nowVirtual.getTime() + hoursSafe * 60 * 60 * 1000)
+      const targetEnd = new Date(targetStart.getTime() + 60 * 60 * 1000)
+
+      const startDate = targetStart.toISOString().slice(0, 10)
+      const endDate = targetEnd.toISOString().slice(0, 10)
+
+      const { data: ags, error: agErr } = await adminClient
+        .from('agendamentos')
+        .select('id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,lembrete_enviado,servico:servicos(nome,preco)')
+        .eq('usuario_id', uRow.id)
+        .eq('status', 'confirmado')
+        .eq('lembrete_enviado', false)
+        .gte('data', startDate)
+        .lte('data', endDate)
+        .limit(200)
+
+      if (agErr) {
+        reminderFailed++
+      } else {
+        for (const ag of ags ?? []) {
+          const agRow = ag as unknown as AgendamentoRow
+
+          if (agRow.lembrete_enviado === true) {
+            reminderSkipped++
+            continue
+          }
+
+          const data = agRow.data
+          const horaInicio = agRow.hora_inicio ?? ''
+          const startVirtual = data && horaInicio ? new Date(`${data}T${horaInicio}:00Z`) : null
+          if (!startVirtual || !(startVirtual >= targetStart && startVirtual < targetEnd)) {
+            reminderSkipped++
+            continue
+          }
+
+          const tmpl = uRow.mensagem_lembrete ?? ''
+          const vars = {
+            nome: agRow.cliente_nome ?? '',
+            data: formatBRDate(agRow.data),
+            hora: agRow.hora_inicio ?? '',
+            servico: agRow.servico?.nome ?? '',
+            preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
+            nome_negocio: uRow.nome_negocio ?? '',
+            telefone_profissional: uRow.telefone ?? '',
+          }
+          const text = interpolateTemplate(tmpl, vars).trim()
+          const phoneRaw = agRow.cliente_telefone ?? ''
+          if (!text || !sanitizePhoneDigits(phoneRaw)) {
+            reminderSkipped++
+            continue
+          }
+
+          const sendRes = await evolutionSendTextWithFallback({
+            apiUrl: globalApiUrl,
+            apiKey: globalApiKey,
+            instanceName,
+            phoneRaw,
+            text,
+          })
+
+          if (!sendRes.ok) {
+            reminderFailed++
+            continue
+          }
+
+          const { error: updErr } = await adminClient
+            .from('agendamentos')
+            .update({ lembrete_enviado: true, lembrete_enviado_em: new Date().toISOString() })
+            .eq('id', agRow.id)
+            .eq('usuario_id', uRow.id)
+            .eq('lembrete_enviado', false)
+
+          if (updErr) {
+            reminderFailed++
+            continue
+          }
+
+          reminderSent++
+        }
+      }
+    }
+
+    results.push({
+      usuario_id: uRow.id,
+      confirm_sent: confirmSent,
+      confirm_skipped: confirmSkipped,
+      confirm_failed: confirmFailed,
+      reminder_sent: reminderSent,
+      reminder_skipped: reminderSkipped,
+      reminder_failed: reminderFailed,
+    })
   }
 
   return jsonResponse(200, { ok: true, results })

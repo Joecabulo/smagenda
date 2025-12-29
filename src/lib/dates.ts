@@ -24,3 +24,12 @@ export function minutesToTime(value: number): string {
   return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
 }
 
+export function normalizeTimeHHMM(value: string): string {
+  const raw = String(value ?? '').trim()
+  if (!raw) return ''
+  const parts = raw.split(':')
+  if (parts.length < 2) return raw
+  const hh = String(parts[0] ?? '').padStart(2, '0')
+  const mm = String(parts[1] ?? '').padStart(2, '0')
+  return `${hh}:${mm}`
+}
