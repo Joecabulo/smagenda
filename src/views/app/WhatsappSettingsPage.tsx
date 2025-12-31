@@ -12,6 +12,21 @@ function getOptionalString(payload: unknown, key: string) {
   return typeof value === 'string' ? value : null
 }
 
+function formatDetails(payload: unknown) {
+  if (typeof payload === 'string') {
+    const s = payload.trim()
+    const lower = s.toLowerCase()
+    if (lower.includes('cloudflare tunnel error')) return 'Cloudflare Tunnel error (HTML)'
+    if (s.length > 900) return `${s.slice(0, 900)}…`
+    return s
+  }
+  try {
+    return JSON.stringify(payload)
+  } catch {
+    return String(payload)
+  }
+}
+
 function isWorkerLimitResponse(args: { status: number; body: unknown }) {
   if (args.status === 546) return true
   if (!args.body || typeof args.body !== 'object') return false
@@ -331,7 +346,7 @@ export function WhatsappSettingsPage() {
         return
       }
       const hint = getOptionalString(res.body, 'hint')
-      const details = typeof res.body === 'string' ? res.body : JSON.stringify(res.body)
+      const details = formatDetails(res.body)
       setError(hint ? `Falha ao gerar QR Code (HTTP ${res.status}): ${details}\n\nDica: ${hint}` : `Falha ao gerar QR Code (HTTP ${res.status}): ${details}`)
       setConnecting(false)
       return
@@ -367,7 +382,7 @@ export function WhatsappSettingsPage() {
           return
         }
         const hint = getOptionalString(next.body, 'hint')
-        const details = typeof next.body === 'string' ? next.body : JSON.stringify(next.body)
+        const details = formatDetails(next.body)
         setError(hint ? `Falha ao verificar status (HTTP ${next.status}): ${details}\n\nDica: ${hint}` : `Falha ao verificar status (HTTP ${next.status}): ${details}`)
         setConnecting(false)
         return
@@ -478,8 +493,9 @@ export function WhatsappSettingsPage() {
         setCheckingStatus(false)
         return
       }
-      const details = typeof res.body === 'string' ? res.body : JSON.stringify(res.body)
-      setError(`Falha ao atualizar status (HTTP ${res.status}): ${details}`)
+      const hint = getOptionalString(res.body, 'hint')
+      const details = formatDetails(res.body)
+      setError(hint ? `Falha ao atualizar status (HTTP ${res.status}): ${details}\n\nDica: ${hint}` : `Falha ao atualizar status (HTTP ${res.status}): ${details}`)
       setCheckingStatus(false)
       return
     }
@@ -529,7 +545,7 @@ export function WhatsappSettingsPage() {
         return
       }
       const hint = getOptionalString(res.body, 'hint')
-      const details = typeof res.body === 'string' ? res.body : JSON.stringify(res.body)
+      const details = formatDetails(res.body)
       const attemptsText = (() => {
         const raw = (res.body as Record<string, unknown> | null)?.attempts
         if (!raw) return null

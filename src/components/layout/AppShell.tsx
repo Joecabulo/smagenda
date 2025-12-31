@@ -1,5 +1,6 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../state/auth/useAuth'
+import { getOptionalEnv } from '../../lib/env'
 import { Button } from '../ui/Button'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -7,6 +8,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const location = useLocation()
   const navigate = useNavigate()
   const isFuncionario = appPrincipal?.kind === 'funcionario'
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
+
+  const supportNumber = getOptionalEnv('VITE_SUPPORT_WHATSAPP_NUMBER')
+  const canUseWhatsappSupport = Boolean(
+    supportNumber && usuario && (usuario.plano === 'pro' || usuario.plano === 'team' || usuario.plano === 'enterprise')
+  )
 
   const nav = isFuncionario
     ? [
@@ -39,6 +46,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {canUseWhatsappSupport ? (
+              <a
+                className="inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-slate-300 bg-emerald-600 text-white hover:bg-emerald-500"
+                href={`https://wa.me/${encodeURIComponent(String(supportNumber))}?text=${encodeURIComponent('Olá! Preciso de suporte no SMagenda.')}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Suporte WhatsApp
+              </a>
+            ) : null}
             {principal?.kind === 'super_admin' && impersonation ? (
               <Button
                 variant="secondary"

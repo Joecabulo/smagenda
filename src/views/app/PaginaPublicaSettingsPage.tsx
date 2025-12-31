@@ -20,13 +20,15 @@ function normalizeSlug(s: string) {
 
 export function PaginaPublicaSettingsPage() {
   const { appPrincipal, refresh } = useAuth()
-  const usuarioId = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.id : null
-  const nomeNegocio = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.nome_negocio : null
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
+  const usuarioId = usuario?.id ?? null
+  const nomeNegocio = usuario?.nome_negocio ?? null
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [info, setInfo] = useState<string | null>(null)
 
   const [slug, setSlug] = useState('')
   const [logoUrl, setLogoUrl] = useState('')
@@ -37,6 +39,24 @@ export function PaginaPublicaSettingsPage() {
   const [useBackgroundImage, setUseBackgroundImage] = useState(false)
   const [backgroundImageUrl, setBackgroundImageUrl] = useState('')
   const [bgFile, setBgFile] = useState<File | null>(null)
+
+  type Unidade = {
+    id: string
+    nome: string
+    slug: string
+    endereco: string | null
+    telefone: string | null
+    ativo: boolean
+  }
+
+  const canUseMultiUnits = Boolean(usuario && usuario.plano === 'enterprise')
+  const [unidades, setUnidades] = useState<Unidade[]>([])
+  const [unidadesLoading, setUnidadesLoading] = useState(false)
+  const [savingUnidade, setSavingUnidade] = useState(false)
+  const [unidadeNome, setUnidadeNome] = useState('')
+  const [unidadeSlug, setUnidadeSlug] = useState('')
+  const [unidadeEndereco, setUnidadeEndereco] = useState('')
+  const [unidadeTelefone, setUnidadeTelefone] = useState('')
 
   const logoObjectUrl = useMemo(() => (logoFile ? URL.createObjectURL(logoFile) : null), [logoFile])
   const bgObjectUrl = useMemo(() => (bgFile ? URL.createObjectURL(bgFile) : null), [bgFile])
@@ -57,7 +77,14 @@ export function PaginaPublicaSettingsPage() {
 
   const publicLink = useMemo(() => {
     if (!slug.trim()) return ''
-    return `${window.location.origin}/agendar/${slug.trim()}`
+    return `${window.location.origin}/agendar/${encodeURIComponent(slug.trim())}`
+  }, [slug])
+
+  const unidadeLink = useMemo(() => {
+    return (unidadeSlugValue: string) => {
+      if (!slug.trim() || !unidadeSlugValue.trim()) return ''
+      return `${window.location.origin}/agendar/${encodeURIComponent(slug.trim())}/${encodeURIComponent(unidadeSlugValue.trim())}`
+    }
   }, [slug])
 
   useEffect(() => {
@@ -68,6 +95,7 @@ export function PaginaPublicaSettingsPage() {
       }
       setLoading(true)
       setError(null)
+      setInfo(null)
       setSaved(false)
       const { data, error: err } = await supabase.from('usuarios').select('*').eq('id', usuarioId).maybeSingle()
       if (err) {
@@ -96,6 +124,33 @@ export function PaginaPublicaSettingsPage() {
       setLoading(false)
     })
   }, [usuarioId])
+
+  useEffect(() => {
+    const run = async () => {
+      if (!canUseMultiUnits || !usuarioId) {
+        setUnidades([])
+        return
+      }
+      setUnidadesLoading(true)
+      const { data, error: err } = await supabase
+        .from('unidades')
+        .select('id,nome,slug,endereco,telefone,ativo')
+        .eq('usuario_id', usuarioId)
+        .order('criado_em', { ascending: true })
+
+      if (err) {
+        setError(err.message)
+        setUnidadesLoading(false)
+        return
+      }
+      setUnidades((data ?? []) as unknown as Unidade[])
+      setUnidadesLoading(false)
+    }
+    run().catch((e: unknown) => {
+      setError(e instanceof Error ? e.message : 'Erro ao carregar unidades')
+      setUnidadesLoading(false)
+    })
+  }, [canUseMultiUnits, usuarioId])
 
   const uploadBackground = async (file: File) => {
     if (!usuarioId) throw new Error('Sessão inválida')
@@ -146,6 +201,7 @@ export function PaginaPublicaSettingsPage() {
     setSaving(true)
     setSaved(false)
     setError(null)
+    setInfo(null)
 
     const nextSlug = normalizeSlug(slug)
     if (!isValidSlug(nextSlug)) {
@@ -226,6 +282,72 @@ export function PaginaPublicaSettingsPage() {
     setSaving(false)
   }
 
+  const createUnidade = async () => {
+    if (!canUseMultiUnits || !usuarioId) return
+    const nome = unidadeNome.trim()
+    if (!nome) {
+      setError('Informe o nome da unidade.')
+      return
+    }
+    const slugRaw = (unidadeSlug.trim() || nome).trim()
+    const nextSlug = normalizeSlug(slugRaw)
+    if (!isValidSlug(nextSlug)) {
+      setError('Slug da unidade inválido. Use letras minúsculas, números e hífen.')
+      return
+    }
+
+    setSavingUnidade(true)
+    setError(null)
+    setInfo(null)
+
+    const payload: Record<string, unknown> = {
+      usuario_id: usuarioId,
+      nome,
+      slug: nextSlug,
+      endereco: unidadeEndereco.trim() ? unidadeEndereco.trim() : null,
+      telefone: unidadeTelefone.trim() ? unidadeTelefone.trim() : null,
+    }
+
+    const { error: insertErr } = await supabase.from('unidades').insert(payload)
+    if (insertErr) {
+      const msg = insertErr.message
+      const lower = msg.toLowerCase()
+      const duplicate = lower.includes('duplicate') || lower.includes('unique')
+      setError(duplicate ? 'Já existe uma unidade com esse slug.' : msg)
+      setSavingUnidade(false)
+      return
+    }
+
+    setUnidadeNome('')
+    setUnidadeSlug('')
+    setUnidadeEndereco('')
+    setUnidadeTelefone('')
+    setInfo('Unidade criada.')
+    setSavingUnidade(false)
+
+    const { data, error: reloadErr } = await supabase
+      .from('unidades')
+      .select('id,nome,slug,endereco,telefone,ativo')
+      .eq('usuario_id', usuarioId)
+      .order('criado_em', { ascending: true })
+    if (!reloadErr) setUnidades((data ?? []) as unknown as Unidade[])
+  }
+
+  const toggleUnidadeAtiva = async (id: string, ativo: boolean) => {
+    if (!canUseMultiUnits || !usuarioId) return
+    setSavingUnidade(true)
+    setError(null)
+    setInfo(null)
+    const { error: updateErr } = await supabase.from('unidades').update({ ativo: !ativo }).eq('id', id).eq('usuario_id', usuarioId)
+    if (updateErr) {
+      setError(updateErr.message)
+      setSavingUnidade(false)
+      return
+    }
+    setUnidades((prev) => prev.map((u) => (u.id === id ? { ...u, ativo: !ativo } : u)))
+    setSavingUnidade(false)
+  }
+
   return (
     <AppShell>
       <div className="space-y-6">
@@ -235,6 +357,7 @@ export function PaginaPublicaSettingsPage() {
         </div>
 
         {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
+        {info ? <div className="rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-700">{info}</div> : null}
         {saved ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">Salvo.</div> : null}
 
         <Card>
@@ -281,6 +404,85 @@ export function PaginaPublicaSettingsPage() {
             </div>
           </div>
         </Card>
+
+        {canUseMultiUnits ? (
+          <Card>
+            <div className="p-6 space-y-4">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Unidades</div>
+                <div className="text-sm text-slate-600">Crie filiais com link público próprio.</div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Input label="Nome" value={unidadeNome} onChange={(e) => setUnidadeNome(e.target.value)} placeholder="Unidade Centro" />
+                <Input label="Slug" value={unidadeSlug} onChange={(e) => setUnidadeSlug(normalizeSlug(e.target.value))} placeholder="centro" />
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Input label="Endereço (opcional)" value={unidadeEndereco} onChange={(e) => setUnidadeEndereco(e.target.value)} placeholder="Rua X, 123" />
+                <Input label="Telefone (opcional)" value={unidadeTelefone} onChange={(e) => setUnidadeTelefone(e.target.value)} placeholder="(11) 99999-9999" />
+              </div>
+
+              <div className="flex justify-end">
+                <Button onClick={createUnidade} disabled={savingUnidade || unidadesLoading || loading || saving}>
+                  {savingUnidade ? 'Salvando…' : 'Adicionar unidade'}
+                </Button>
+              </div>
+
+              {unidadesLoading ? <div className="text-sm text-slate-600">Carregando unidades…</div> : null}
+              {!unidadesLoading && unidades.length === 0 ? <div className="text-sm text-slate-600">Nenhuma unidade cadastrada.</div> : null}
+
+              {unidades.length > 0 ? (
+                <div className="space-y-3">
+                  {unidades.map((u) => {
+                    const link = unidadeLink(u.slug)
+                    return (
+                      <div key={u.id} className="rounded-xl border border-slate-200 bg-white p-4 space-y-2">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-900">{u.nome}</div>
+                            <div className="text-xs text-slate-600">/{u.slug}</div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Button variant="secondary" onClick={() => toggleUnidadeAtiva(u.id, u.ativo)} disabled={savingUnidade}>
+                              {u.ativo ? 'Desativar' : 'Ativar'}
+                            </Button>
+                          </div>
+                        </div>
+
+                        <Input label="URL da unidade" value={link} readOnly />
+
+                        <div className="flex flex-wrap gap-3">
+                          <Button
+                            variant="secondary"
+                            onClick={async () => {
+                              if (!link) return
+                              await navigator.clipboard.writeText(link)
+                              setInfo('Link da unidade copiado.')
+                            }}
+                            disabled={!link}
+                          >
+                            Copiar link
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            onClick={() => {
+                              if (!link) return
+                              window.open(link, '_blank', 'noopener,noreferrer')
+                            }}
+                            disabled={!link}
+                          >
+                            Abrir
+                          </Button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : null}
+            </div>
+          </Card>
+        ) : null}
 
         <Card>
           <div className="p-6 space-y-4">

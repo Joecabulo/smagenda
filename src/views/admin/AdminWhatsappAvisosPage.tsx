@@ -466,7 +466,14 @@ export function AdminWhatsappAvisosPage() {
           setError(`Falha ao verificar status (HTTP ${res.status}): ${details}\n\nDica: ${hint}`)
           return
         }
-        const details = typeof res.body === 'string' ? res.body : JSON.stringify(res.body)
+        const details =
+          typeof res.body === 'string'
+            ? res.body.toLowerCase().includes('cloudflare tunnel error')
+              ? 'Cloudflare Tunnel error (HTML)'
+              : res.body.length > 900
+                ? `${res.body.slice(0, 900)}…`
+                : res.body
+            : JSON.stringify(res.body)
         setError(`Falha ao verificar status (HTTP ${res.status}): ${details}`)
         return
       }
@@ -514,7 +521,14 @@ export function AdminWhatsappAvisosPage() {
           setError(`Falha ao gerar QR Code (HTTP ${res.status}): ${details}\n\nDica: ${hint}`)
           return
         }
-        const details = typeof res.body === 'string' ? res.body : JSON.stringify(res.body)
+        const details =
+          typeof res.body === 'string'
+            ? res.body.toLowerCase().includes('cloudflare tunnel error')
+              ? 'Cloudflare Tunnel error (HTML)'
+              : res.body.length > 900
+                ? `${res.body.slice(0, 900)}…`
+                : res.body
+            : JSON.stringify(res.body)
         setError(`Falha ao gerar QR Code (HTTP ${res.status}): ${details}`)
         return
       }

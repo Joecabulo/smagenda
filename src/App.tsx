@@ -31,6 +31,7 @@ function App() {
     <Routes>
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
 
+      <Route path="/agendar/:slug/:unidadeSlug" element={<PublicBookingPage />} />
       <Route path="/agendar/:slug" element={<PublicBookingPage />} />
 
       <Route path="/login" element={<LoginPage />} />

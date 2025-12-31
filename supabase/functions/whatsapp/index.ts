@@ -695,6 +695,21 @@ function evolutionAuthHint(details: unknown) {
   return 'A Evolution API está recusando a API Key (401). Confirme que o valor em Configurações > WhatsApp > API Key é exatamente o mesmo configurado no container da Evolution como AUTHENTICATION_API_KEY. Na v2.3.7, a autenticação funciona via header "apikey" (query ?apikey=.../?token=... não autentica). Se estiver usando proxy/tunnel (Cloudflare/Railway/Nginx), confirme que ele não está removendo o header "apikey".'
 }
 
+function isEvolutionCloudflareTunnelError(details: unknown) {
+  const unwrapped = unwrapNotFoundLast(details)
+  const text = extractTextFragments(unwrapped).join(' | ').toLowerCase()
+  if (!text) return false
+  if (text.includes('cloudflare tunnel error')) return true
+  if (text.includes('error code: 1033')) return true
+  if (text.includes('argo tunnel error')) return true
+  return false
+}
+
+function evolutionCloudflareTunnelHint(details: unknown) {
+  if (!isEvolutionCloudflareTunnelError(details)) return null
+  return 'O domínio da Evolution API está retornando uma página de erro do Cloudflare Tunnel (1033). Isso significa que o tunnel/origem está offline ou desconectado. A correção permanente é manter o serviço de origem (container Evolution) e o processo cloudflared rodando 24/7 (como serviço/systemd/PM2/Docker com restart=always) em um servidor/VPS sempre ligado; fazer deploy da Edge Function não resolve a causa.'
+}
+
 function isEvolutionFetchFailed(details: unknown) {
   const unwrapped = unwrapNotFoundLast(details)
   if (!unwrapped || typeof unwrapped !== 'object') return false
@@ -745,6 +760,7 @@ function evolutionHint(details: unknown) {
   return (
     evolutionUrlHint(details) ??
     evolutionAuthHint(details) ??
+    evolutionCloudflareTunnelHint(details) ??
     evolutionNetworkHint(details) ??
     evolutionNumberNotFoundHint(details) ??
     evolutionQuoteCommandHint(details)

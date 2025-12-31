@@ -43,6 +43,13 @@ export function RequireAuth({ children, requiredKind }: Props) {
         return
       }
 
+      const status = String(data.status_pagamento ?? '').trim().toLowerCase()
+      if (status && status !== 'ativo' && status !== 'trial') {
+        setMasterBlocked(true)
+        setCheckingMaster(false)
+        return
+      }
+
       const venc = data.data_vencimento
       if (data.status_pagamento === 'trial' && venc) {
         const today = new Date()
@@ -91,6 +98,7 @@ export function RequireAuth({ children, requiredKind }: Props) {
   }
 
   const inAdmin = location.pathname.startsWith('/admin')
+  const inPagamento = location.pathname === '/pagamento'
   const effective = inAdmin ? principal : (appPrincipal ?? principal)
 
   if (principal.kind === 'funcionario' && masterBlocked) {
@@ -118,14 +126,24 @@ export function RequireAuth({ children, requiredKind }: Props) {
       today.setHours(0, 0, 0, 0)
       const exp = new Date(`${venc}T00:00:00`)
       if (Number.isFinite(exp.getTime()) && exp < today) {
+        if (inPagamento) return <>{children}</>
         return (
           <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
             <div className="w-full max-w-md space-y-3 rounded-xl border border-slate-200 bg-white p-6">
               <div className="text-sm font-semibold text-slate-900">Período de teste expirado</div>
-              <div className="text-sm text-slate-600">Seu acesso foi pausado. Entre em contato para reativar.</div>
+              <div className="text-sm text-slate-600">Seu acesso foi pausado. Regularize o pagamento para reativar.</div>
               <button
                 type="button"
                 className="w-full inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-slate-300 bg-slate-900 text-white hover:bg-slate-800"
+                onClick={() => {
+                  window.location.href = '/pagamento'
+                }}
+              >
+                Ir para pagamento
+              </button>
+              <button
+                type="button"
+                className="w-full inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-slate-300 bg-white text-slate-900 hover:bg-slate-50"
                 onClick={() => void signOut()}
               >
                 Sair
@@ -134,6 +152,34 @@ export function RequireAuth({ children, requiredKind }: Props) {
           </div>
         )
       }
+    }
+
+    if (principal.profile.status_pagamento !== 'ativo' && principal.profile.status_pagamento !== 'trial') {
+      if (inPagamento) return <>{children}</>
+      return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-md space-y-3 rounded-xl border border-slate-200 bg-white p-6">
+            <div className="text-sm font-semibold text-slate-900">Pagamento pendente</div>
+            <div className="text-sm text-slate-600">Seu acesso está restrito até a regularização do pagamento.</div>
+            <button
+              type="button"
+              className="w-full inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-slate-300 bg-slate-900 text-white hover:bg-slate-800"
+              onClick={() => {
+                window.location.href = '/pagamento'
+              }}
+            >
+              Ir para pagamento
+            </button>
+            <button
+              type="button"
+              className="w-full inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-slate-300 bg-white text-slate-900 hover:bg-slate-50"
+              onClick={() => void signOut()}
+            >
+              Sair
+            </button>
+          </div>
+        </div>
+      )
     }
   }
 

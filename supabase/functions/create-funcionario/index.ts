@@ -83,7 +83,7 @@ Deno.serve(async (req) => {
   const masterId = userData.user.id
   const { data: masterRow, error: masterErr } = await userClient
     .from('usuarios')
-    .select('id,limite_funcionarios,ativo')
+    .select('id,limite_funcionarios,ativo,status_pagamento,data_vencimento')
     .eq('id', masterId)
     .maybeSingle()
 
@@ -92,6 +92,23 @@ Deno.serve(async (req) => {
   }
   if (masterRow.ativo === false) {
     return jsonResponse(403, { error: 'master_inactive' })
+  }
+
+  const statusPagamento = String((masterRow as { status_pagamento?: unknown }).status_pagamento ?? '')
+    .trim()
+    .toLowerCase()
+  const venc = String((masterRow as { data_vencimento?: unknown }).data_vencimento ?? '').trim()
+  if (statusPagamento === 'trial' && venc) {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const exp = new Date(`${venc}T00:00:00`)
+    if (Number.isFinite(exp.getTime()) && exp < today) {
+      return jsonResponse(403, { error: 'trial_expired' })
+    }
+  }
+
+  if (statusPagamento && statusPagamento !== 'ativo' && statusPagamento !== 'trial') {
+    return jsonResponse(403, { error: 'payment_inactive', status_pagamento: statusPagamento })
   }
 
   const { count: activeCount, error: countErr } = await userClient

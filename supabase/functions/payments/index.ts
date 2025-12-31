@@ -1,6 +1,8 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.89.0'
 
-type Payload = { action: 'create_checkout'; usuario_id: string; plano: string }
+type Payload =
+  | { action: 'create_checkout'; usuario_id: string; plano: string }
+  | { action: 'sync_checkout_session'; session_id: string; usuario_id?: string | null }
 
 type StripeEvent = {
   id?: string
@@ -161,6 +163,26 @@ function resolveLimiteFuncionariosFromPlano(planoRaw: unknown) {
   return undefined
 }
 
+function resolveLimiteAgendamentosMesFromPlano(planoRaw: unknown) {
+  const plano = typeof planoRaw === 'string' ? planoRaw.trim().toLowerCase() : ''
+  if (!plano) return undefined
+  if (plano === 'enterprise') return null
+  if (plano === 'team') return 300
+  if (plano === 'pro') return 180
+  if (plano === 'basic') return 60
+  if (plano === 'free') return 30
+  return undefined
+}
+
+function resolvePlanoFromMetadata(metadataRaw: unknown) {
+  const metadata = (metadataRaw ?? null) as Record<string, unknown> | null
+  const itemRaw = typeof metadata?.item === 'string' ? metadata.item : typeof metadata?.plano === 'string' ? metadata.plano : null
+  const item = typeof itemRaw === 'string' ? itemRaw.trim().toLowerCase() : ''
+  if (!item) return { item: null as string | null, plano: null as string | null }
+  const plano = ['basic', 'pro', 'team', 'enterprise'].includes(item) ? item : null
+  return { item, plano }
+}
+
 async function findUsuarioIdByStripe(adminClient: ReturnType<typeof createClient>, input: { subscriptionId?: string | null; customerId?: string | null }) {
   const subscriptionId = (input.subscriptionId ?? '').trim()
   const customerId = (input.customerId ?? '').trim()
@@ -191,6 +213,7 @@ async function applyUsuarioPaymentUpdate(
   update: {
     plano?: string | null
     limite_funcionarios?: number | null
+    limite_agendamentos_mes?: number | null
     status_pagamento?: string | null
     data_vencimento?: string | null
     free_trial_consumido?: boolean | null
@@ -205,6 +228,8 @@ async function applyUsuarioPaymentUpdate(
   if (typeof update.plano === 'string' && update.plano.trim()) payload.plano = update.plano.trim().toLowerCase()
   if (typeof update.limite_funcionarios === 'number' && Number.isFinite(update.limite_funcionarios)) payload.limite_funcionarios = update.limite_funcionarios
   if (update.limite_funcionarios === null) payload.limite_funcionarios = null
+  if (typeof update.limite_agendamentos_mes === 'number' && Number.isFinite(update.limite_agendamentos_mes)) payload.limite_agendamentos_mes = update.limite_agendamentos_mes
+  if (update.limite_agendamentos_mes === null) payload.limite_agendamentos_mes = null
   if (typeof update.status_pagamento === 'string' && update.status_pagamento.trim()) payload.status_pagamento = update.status_pagamento.trim()
   if (typeof update.data_vencimento === 'string' && update.data_vencimento.trim()) payload.data_vencimento = update.data_vencimento.trim()
   if (update.free_trial_consumido === true) payload.free_trial_consumido = true
@@ -294,6 +319,7 @@ Deno.serve(async (req) => {
       const item = typeof itemRaw === 'string' ? itemRaw.trim().toLowerCase() : null
       const plano = item && ['basic', 'pro', 'team', 'enterprise'].includes(item) ? item : null
       const limiteFuncionarios = resolveLimiteFuncionariosFromPlano(plano)
+      const limiteAgendamentosMes = resolveLimiteAgendamentosMesFromPlano(plano)
 
       const customerId = typeof obj.customer === 'string' ? obj.customer : null
       const subscriptionId = typeof obj.subscription === 'string' ? obj.subscription : null
@@ -322,6 +348,7 @@ Deno.serve(async (req) => {
         await applyUsuarioPaymentUpdate(adminClient, finalUsuarioId, {
           plano: plano ?? undefined,
           limite_funcionarios: plano ? limiteFuncionarios : undefined,
+          limite_agendamentos_mes: plano ? limiteAgendamentosMes : undefined,
           status_pagamento: statusPagamento ?? undefined,
           data_vencimento: venc ?? undefined,
           free_trial_consumido: plano ? true : undefined,
@@ -366,6 +393,7 @@ Deno.serve(async (req) => {
       const item = typeof itemRaw === 'string' ? itemRaw.trim().toLowerCase() : null
       const plano = item && ['basic', 'pro', 'team', 'enterprise'].includes(item) ? item : null
       const limiteFuncionarios = resolveLimiteFuncionariosFromPlano(plano)
+      const limiteAgendamentosMes = resolveLimiteAgendamentosMesFromPlano(plano)
 
       let finalUsuarioId = usuarioIdFromMeta
       if (!finalUsuarioId) {
@@ -380,6 +408,7 @@ Deno.serve(async (req) => {
       await applyUsuarioPaymentUpdate(adminClient, finalUsuarioId, {
         plano: plano ?? undefined,
         limite_funcionarios: plano ? limiteFuncionarios : undefined,
+        limite_agendamentos_mes: plano ? limiteAgendamentosMes : undefined,
         status_pagamento: statusPagamento,
         data_vencimento: venc,
         free_trial_consumido: plano ? true : undefined,
@@ -415,8 +444,83 @@ Deno.serve(async (req) => {
     return jsonResponse(400, { error: 'invalid_json' })
   }
 
-  if (!payload || payload.action !== 'create_checkout') {
-    return jsonResponse(400, { error: 'invalid_action' })
+  if (!payload || (payload as Payload).action !== 'create_checkout') {
+    if (!payload || (payload as Payload).action !== 'sync_checkout_session') {
+      return jsonResponse(400, { error: 'invalid_action' })
+    }
+  }
+
+  if (payload.action === 'sync_checkout_session') {
+    const sessionId = String(payload.session_id ?? '').trim()
+    if (!sessionId) return jsonResponse(400, { error: 'invalid_session_id' })
+
+    const usuarioIdFromPayload = normalizeUuid(payload.usuario_id)
+
+    const callerId = userData.user.id
+    const { data: saRow } = await userClient.from('super_admin').select('id').eq('id', callerId).maybeSingle()
+    const isSuperAdmin = Boolean(saRow)
+
+    const sessionRes = await stripeApiRequest(`/checkout/sessions/${encodeURIComponent(sessionId)}?expand[]=subscription`, { method: 'GET', key: stripeKey })
+    if (!sessionRes.ok || !sessionRes.body || typeof sessionRes.body !== 'object') {
+      return jsonResponse(400, { error: 'stripe_error', message: 'Falha ao consultar checkout no Stripe.', stripe: sessionRes.body })
+    }
+
+    const session = sessionRes.body as Record<string, unknown>
+    const metadata = (session.metadata ?? null) as Record<string, unknown> | null
+    const usuarioIdFromMeta = normalizeUuid(metadata?.usuario_id)
+    const usuarioIdFromClientRef = normalizeUuid(session.client_reference_id)
+    const finalUsuarioId = usuarioIdFromPayload ?? usuarioIdFromMeta ?? usuarioIdFromClientRef
+    if (!finalUsuarioId) return jsonResponse(400, { error: 'missing_usuario_id' })
+    if (!isSuperAdmin && callerId !== finalUsuarioId) return jsonResponse(403, { error: 'forbidden' })
+
+    const { item, plano } = resolvePlanoFromMetadata(metadata)
+    const limiteFuncionarios = resolveLimiteFuncionariosFromPlano(plano)
+    const limiteAgendamentosMes = resolveLimiteAgendamentosMesFromPlano(plano)
+
+    const customerId = typeof session.customer === 'string' ? session.customer : null
+    const subscriptionRaw = session.subscription
+    const subscriptionId =
+      typeof subscriptionRaw === 'string'
+        ? subscriptionRaw
+        : subscriptionRaw && typeof subscriptionRaw === 'object' && typeof (subscriptionRaw as Record<string, unknown>).id === 'string'
+          ? String((subscriptionRaw as Record<string, unknown>).id)
+          : null
+
+    let statusPagamento: string | null = null
+    let venc: string | null = null
+
+    if (plano && subscriptionRaw && typeof subscriptionRaw === 'object') {
+      const subObj = subscriptionRaw as Record<string, unknown>
+      statusPagamento = mapStripeSubscriptionToPagamentoStatus(subObj.status)
+      venc = toIsoDateFromUnixSeconds(subObj.current_period_end)
+    } else if (plano && subscriptionId) {
+      const subRes = await stripeApiRequest(`/subscriptions/${encodeURIComponent(subscriptionId)}`, { method: 'GET', key: stripeKey })
+      if (subRes.ok && subRes.body && typeof subRes.body === 'object') {
+        const sub = subRes.body as Record<string, unknown>
+        statusPagamento = mapStripeSubscriptionToPagamentoStatus(sub.status)
+        venc = toIsoDateFromUnixSeconds(sub.current_period_end)
+      } else {
+        statusPagamento = 'ativo'
+      }
+    }
+
+    const nowIso = new Date().toISOString()
+
+    await applyUsuarioPaymentUpdate(adminClient, finalUsuarioId, {
+      plano: plano ?? undefined,
+      limite_funcionarios: plano ? limiteFuncionarios : undefined,
+      limite_agendamentos_mes: plano ? limiteAgendamentosMes : undefined,
+      status_pagamento: statusPagamento ?? undefined,
+      data_vencimento: venc ?? undefined,
+      free_trial_consumido: plano ? true : undefined,
+      stripe_customer_id: customerId,
+      stripe_subscription_id: subscriptionId,
+      stripe_checkout_session_id: sessionId,
+      stripe_last_event_id: `sync_session:${sessionId}`,
+      stripe_last_event_at: nowIso,
+    })
+
+    return jsonResponse(200, { ok: true, usuario_id: finalUsuarioId, item, plano, status_pagamento: statusPagamento, data_vencimento: venc })
   }
 
   const usuarioId = normalizeUuid(payload.usuario_id)

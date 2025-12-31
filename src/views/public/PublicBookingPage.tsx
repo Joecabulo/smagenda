@@ -18,10 +18,14 @@ type UsuarioPublico = {
   intervalo_fim: string | null
   ativo: boolean
   tipo_conta: 'master' | 'individual'
+  plano: 'free' | 'basic' | 'pro' | 'team' | 'enterprise'
   public_primary_color: string | null
   public_background_color: string | null
   public_use_background_image: boolean | null
   public_background_image_url: string | null
+  unidade_id?: string | null
+  unidade_nome?: string | null
+  unidade_slug?: string | null
 }
 
 function coerceHexColor(value: string | null | undefined, fallback: string) {
@@ -37,6 +41,7 @@ type Servico = {
   duracao_minutos: number
   preco: number
   cor: string | null
+  foto_url: string | null
 }
 
 type Funcionario = {
@@ -82,7 +87,7 @@ function formatIsoDateBR(iso: string) {
 type ModalStep = 'hora' | 'servico' | 'profissional' | 'confirmar'
 
 export function PublicBookingPage() {
-  const { slug } = useParams()
+  const { slug, unidadeSlug } = useParams()
 
   const [usuario, setUsuario] = useState<UsuarioPublico | null>(null)
   const [servicos, setServicos] = useState<Servico[]>([])
@@ -110,7 +115,12 @@ export function PublicBookingPage() {
     return d
   })
 
-  const hasStaff = useMemo(() => funcionarios.length > 0, [funcionarios.length])
+  const canChooseProfessional = useMemo(() => {
+    const p = String(usuario?.plano ?? '').trim().toLowerCase()
+    return p === 'team' || p === 'enterprise'
+  }, [usuario?.plano])
+
+  const hasStaff = useMemo(() => canChooseProfessional && funcionarios.length > 0, [canChooseProfessional, funcionarios.length])
 
   const primaryColor = useMemo(() => coerceHexColor(usuario?.public_primary_color ?? null, '#0f172a'), [usuario?.public_primary_color])
   const backgroundColor = useMemo(
@@ -132,7 +142,9 @@ export function PublicBookingPage() {
       setError(null)
       setSuccessId(null)
 
-      const { data: userData, error: userErr } = await supabase.rpc('public_get_usuario_publico', { p_slug: slug }).maybeSingle()
+      const userArgs: Record<string, unknown> = { p_slug: slug }
+      if (unidadeSlug) userArgs.p_unidade_slug = unidadeSlug
+      const { data: userData, error: userErr } = await supabase.rpc('public_get_usuario_publico', userArgs).maybeSingle()
       if (userErr) {
         const msg = userErr.message
         const lower = msg.toLowerCase()
@@ -147,7 +159,14 @@ export function PublicBookingPage() {
         return
       }
       const usuarioPublico = userData as unknown as UsuarioPublico
+      if ((unidadeSlug ?? '').trim() && !usuarioPublico.unidade_id) {
+        setError('Unidade não encontrada')
+        setLoading(false)
+        return
+      }
       setUsuario(usuarioPublico)
+
+      const unidadeId = usuarioPublico.unidade_id ?? null
 
       const { data: servicesData, error: servicesErr } = await supabase.rpc('public_get_servicos_publicos', { p_usuario_id: usuarioPublico.id })
       if (servicesErr) {
@@ -162,7 +181,10 @@ export function PublicBookingPage() {
       setServicos(serviceList)
       if (serviceList.length > 0) setServicoId(serviceList[0].id)
 
-      const { data: staffData, error: staffErr } = await supabase.rpc('public_get_funcionarios_publicos', { p_usuario_master_id: usuarioPublico.id })
+      const { data: staffData, error: staffErr } = await supabase.rpc('public_get_funcionarios_publicos', {
+        p_usuario_master_id: usuarioPublico.id,
+        p_unidade_id: unidadeId,
+      })
       if (staffErr) {
         const msg = staffErr.message
         const lower = msg.toLowerCase()
@@ -181,7 +203,7 @@ export function PublicBookingPage() {
       setError(e instanceof Error ? e.message : 'Erro ao carregar')
       setLoading(false)
     })
-  }, [slug])
+  }, [slug, unidadeSlug])
 
   const selectedServico = useMemo(() => servicos.find((s) => s.id === servicoId) ?? null, [servicos, servicoId])
   const selectedFuncionario = useMemo(() => funcionarios.find((f) => f.id === funcionarioId) ?? null, [funcionarios, funcionarioId])
@@ -252,6 +274,7 @@ export function PublicBookingPage() {
         p_data: data,
         p_servico_id: selectedServico.id,
         p_funcionario_id: hasStaff ? funcionarioId : null,
+        p_unidade_id: usuario?.unidade_id ?? null,
       })
       if (slotsErr) {
         const msg = slotsErr.message
@@ -282,7 +305,7 @@ export function PublicBookingPage() {
       setError(e instanceof Error ? e.message : 'Erro ao calcular horários')
       setSlotsLoading(false)
     })
-  }, [data, funcionarioId, hasStaff, maxDays, selectedServico, usuarioId])
+  }, [data, funcionarioId, hasStaff, maxDays, selectedServico, usuarioId, usuario?.unidade_id])
 
   const submit = async () => {
     if (!usuarioId || !selectedServico || !hora || !clienteNome.trim() || !clienteTelefone.trim()) return
@@ -305,6 +328,7 @@ export function PublicBookingPage() {
       p_cliente_nome: clienteNome.trim(),
       p_cliente_telefone: telefone,
       p_funcionario_id: hasStaff ? funcionarioId : null,
+      p_unidade_id: usuario?.unidade_id ?? null,
     })
     if (err) {
       const msg = err.message
@@ -574,9 +598,19 @@ export function PublicBookingPage() {
                               style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor } : undefined}
                             >
                               <div className="flex items-center justify-between gap-3">
-                                <div className="min-w-0">
-                                  <div className="text-sm font-semibold truncate">{s.nome}</div>
-                                  <div className={selected ? 'text-xs text-white/90' : 'text-xs text-slate-600'}>{s.duracao_minutos} min</div>
+                                <div className="flex items-center gap-3 min-w-0">
+                                  {s.foto_url ? (
+                                    <img
+                                      src={s.foto_url}
+                                      alt={s.nome}
+                                      className="h-12 w-12 rounded-lg object-cover border border-slate-200"
+                                      loading="lazy"
+                                    />
+                                  ) : null}
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-semibold truncate">{s.nome}</div>
+                                    <div className={selected ? 'text-xs text-white/90' : 'text-xs text-slate-600'}>{s.duracao_minutos} min</div>
+                                  </div>
                                 </div>
                               </div>
                             </button>

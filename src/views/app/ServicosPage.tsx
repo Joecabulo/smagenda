@@ -4,7 +4,7 @@ import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
 import { formatBRMoney } from '../../lib/dates'
-import { supabase } from '../../lib/supabase'
+import { supabase, supabaseEnv } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
 
 type Servico = {
@@ -15,6 +15,7 @@ type Servico = {
   duracao_minutos: number
   preco: number
   cor: string | null
+  foto_url: string | null
   ativo: boolean
   ordem: number
 }
@@ -26,6 +27,7 @@ type FormState = {
   duracao_minutos: string
   preco: string
   cor: string
+  foto_url: string
   ativo: boolean
 }
 
@@ -37,6 +39,7 @@ function toFormState(servico?: Servico | null): FormState {
     duracao_minutos: String(servico?.duracao_minutos ?? 45),
     preco: String(servico?.preco ?? 0),
     cor: servico?.cor ?? '#0f172a',
+    foto_url: servico?.foto_url ?? '',
     ativo: servico?.ativo ?? true,
   }
 }
@@ -51,6 +54,7 @@ export function ServicosPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [uploadingFoto, setUploadingFoto] = useState(false)
   const [formOpen, setFormOpen] = useState(false)
   const [form, setForm] = useState<FormState>(() => toFormState(null))
 
@@ -66,7 +70,7 @@ export function ServicosPage() {
     setError(null)
     const { data, error: err } = await supabase
       .from('servicos')
-      .select('id,usuario_id,nome,descricao,duracao_minutos,preco,cor,ativo,ordem')
+      .select('id,usuario_id,nome,descricao,duracao_minutos,preco,cor,foto_url,ativo,ordem')
       .eq('usuario_id', usuarioId)
       .order('ordem', { ascending: true })
       .order('criado_em', { ascending: true })
@@ -112,18 +116,58 @@ export function ServicosPage() {
     setForm(toFormState(null))
   }
 
+  const uploadFotoServico = async (file: File) => {
+    if (!usuarioId) throw new Error('Sessão inválida')
+
+    const safeName = file.name
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-zA-Z0-9._-]/g, '')
+      .slice(0, 80)
+    const key = `${usuarioId}/servicos/${Date.now()}-${safeName || 'foto'}`
+
+    const tryUpload = async (bucket: string) => {
+      const { error: uploadErr } = await supabase.storage.from(bucket).upload(key, file, {
+        upsert: true,
+        contentType: file.type || undefined,
+      })
+      if (uploadErr) throw uploadErr
+      const { data } = supabase.storage.from(bucket).getPublicUrl(key)
+      const publicUrl = data?.publicUrl
+      if (!publicUrl) throw new Error('Não foi possível obter a URL pública da foto')
+      return publicUrl
+    }
+
+    try {
+      return await tryUpload('servicos')
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const lower = msg.toLowerCase()
+      const missingBucket = lower.includes('bucket') && lower.includes('not found')
+      if (!missingBucket) throw err
+      return await tryUpload('logos')
+    }
+  }
+
   const submit = async () => {
     if (!canSubmit) return
     setSaving(true)
     setError(null)
 
-    const payload = {
+    const canUseFotos = usuario.plano === 'pro' || usuario.plano === 'team' || usuario.plano === 'enterprise'
+
+    const payload: Record<string, unknown> = {
       nome: form.nome.trim(),
       descricao: form.descricao.trim() ? form.descricao.trim() : null,
       duracao_minutos: Number(form.duracao_minutos),
       preco: Number(form.preco),
       cor: form.cor || null,
       ativo: Boolean(form.ativo),
+    }
+
+    if (canUseFotos) {
+      const nextFoto = form.foto_url.trim()
+      payload.foto_url = nextFoto ? nextFoto : null
     }
 
     if (form.id) {
@@ -247,11 +291,86 @@ export function ServicosPage() {
                   <span className="text-sm text-slate-700">Ativo</span>
                 </label>
               </div>
+
+              {usuario.plano === 'pro' || usuario.plano === 'team' || usuario.plano === 'enterprise' ? (
+                <div className="space-y-2">
+                  <Input
+                    label="Foto do serviço (opcional)"
+                    type="file"
+                    accept="image/*"
+                    disabled={uploadingFoto || saving}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0]
+                      if (!file || !usuarioId) return
+
+                      const maxBytes = 6 * 1024 * 1024
+                      if (file.size > maxBytes) {
+                        setError('A foto deve ter no máximo 6MB.')
+                        e.target.value = ''
+                        return
+                      }
+
+                      void (async () => {
+                        setUploadingFoto(true)
+                        setError(null)
+                        const publicUrl = await uploadFotoServico(file)
+                        setForm((p) => ({ ...p, foto_url: publicUrl }))
+                        e.target.value = ''
+                        setUploadingFoto(false)
+                      })().catch((err: unknown) => {
+                        const msg = err instanceof Error ? err.message : 'Erro ao enviar foto'
+                        const lower = msg.toLowerCase()
+                        const missingBucket = lower.includes('bucket') && lower.includes('not found')
+                        if (missingBucket) {
+                          const host = supabaseEnv.ok
+                            ? (() => {
+                                try {
+                                  return new URL(supabaseEnv.values.VITE_SUPABASE_URL).host
+                                } catch {
+                                  return supabaseEnv.values.VITE_SUPABASE_URL
+                                }
+                              })()
+                            : 'supabase_desconfigurado'
+                          setError(
+                            `Bucket não encontrado no Storage. Projeto: ${host}. Crie o bucket "servicos" (público) ou use o SQL "Storage (fotos de serviços)" em /admin/configuracoes.`
+                          )
+                        } else {
+                          setError(msg)
+                        }
+                        setUploadingFoto(false)
+                        e.target.value = ''
+                      })
+                    }}
+                  />
+
+                  {form.foto_url.trim() ? (
+                    <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <img src={form.foto_url} alt="Foto do serviço" className="h-12 w-12 rounded-lg object-cover border border-slate-200" />
+                        <div className="text-sm text-slate-700 truncate">{form.foto_url}</div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        disabled={saving || uploadingFoto}
+                        onClick={() => setForm((p) => ({ ...p, foto_url: '' }))}
+                      >
+                        Remover
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                  Foto do serviço disponível a partir do plano PRO.
+                </div>
+              )}
+
               <div className="flex flex-wrap justify-end gap-2">
-                <Button variant="secondary" onClick={closeForm} disabled={saving}>
+                <Button variant="secondary" onClick={closeForm} disabled={saving || uploadingFoto}>
                   Cancelar
                 </Button>
-                <Button onClick={submit} disabled={!canSubmit || saving}>
+                <Button onClick={submit} disabled={!canSubmit || saving || uploadingFoto}>
                   Salvar
                 </Button>
               </div>
@@ -269,7 +388,11 @@ export function ServicosPage() {
               servicos.map((s, idx) => (
                 <div key={s.id} className="p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex items-start gap-3">
-                    <div className="mt-1 h-4 w-4 rounded" style={{ backgroundColor: s.cor ?? '#0f172a' }} />
+                    {s.foto_url ? (
+                      <img src={s.foto_url} alt={s.nome} className="h-12 w-12 rounded-lg object-cover border border-slate-200" />
+                    ) : (
+                      <div className="mt-1 h-4 w-4 rounded" style={{ backgroundColor: s.cor ?? '#0f172a' }} />
+                    )}
                     <div>
                       <div className="text-sm font-semibold text-slate-900">{s.nome}</div>
                       <div className="text-sm text-slate-600">

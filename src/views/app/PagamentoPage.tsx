@@ -9,7 +9,7 @@ import { useAuth } from '../../state/auth/useAuth'
 
 type FnResult = { ok: true; status: number; body: unknown } | { ok: false; status: number; body: unknown }
 
-async function createCheckoutPagamento(usuarioId: string, item: string): Promise<FnResult> {
+async function callPaymentsFn(body: Record<string, unknown>): Promise<FnResult> {
   if (!supabaseEnv.ok) {
     return { ok: false as const, status: 0, body: { error: 'missing_supabase_env' } }
   }
@@ -88,7 +88,7 @@ async function createCheckoutPagamento(usuarioId: string, item: string): Promise
           apikey: supabaseAnonKey,
           Authorization: `Bearer ${jwt}`,
         },
-        body: JSON.stringify({ action: 'create_checkout', usuario_id: usuarioId, plano: item }),
+        body: JSON.stringify(body),
       })
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Falha de rede'
@@ -135,6 +135,16 @@ async function createCheckoutPagamento(usuarioId: string, item: string): Promise
   }
 
   return first
+}
+
+async function createCheckoutPagamento(usuarioId: string, item: string): Promise<FnResult> {
+  return callPaymentsFn({ action: 'create_checkout', usuario_id: usuarioId, plano: item })
+}
+
+async function syncCheckoutSessionPagamento(sessionId: string, usuarioId: string | null): Promise<FnResult> {
+  const payload: Record<string, unknown> = { action: 'sync_checkout_session', session_id: sessionId }
+  if (usuarioId) payload.usuario_id = usuarioId
+  return callPaymentsFn(payload)
 }
 
 type PlanKey = 'free' | 'basic' | 'pro' | 'team' | 'enterprise'
@@ -224,7 +234,7 @@ export function PagamentoPage() {
           title: 'ENTERPRISE',
           priceLabel: 'R$ 199,90/mês',
           subtitle: 'NOVO',
-          bullets: ['Tudo do Team +', 'Agendamentos ilimitados', 'Funcionários ilimitados', 'Multi-unidades (filiais)', 'API de integração', 'Suporte dedicado via WhatsApp', 'Treinamento da equipe incluso'],
+          bullets: ['Tudo do Team +', 'Agendamentos ilimitados', 'Funcionários ilimitados', 'Multi-unidades (filiais)', 'Suporte dedicado via WhatsApp', 'Treinamento da equipe incluso'],
         },
       ] satisfies PlanCard[],
     [canShowFree]
@@ -259,8 +269,23 @@ export function PagamentoPage() {
       const item = (params.get('item') ?? params.get('plano') ?? '').trim().toLowerCase() || null
       setCheckoutNotice({ kind: checkout, item })
 
-      await refresh()
+      const sessionId = (params.get('session_id') ?? '').trim()
+      const usuarioIdFromParams = (params.get('usuario_id') ?? '').trim() || null
+
+      const first = await refresh()
+      const refreshedUsuarioId = first?.kind === 'usuario' ? first.profile.id : null
+      const effectiveUsuarioId = refreshedUsuarioId ?? usuarioIdFromParams
+
       if (checkout === 'success') {
+        if (sessionId) {
+          const sync = await syncCheckoutSessionPagamento(sessionId, effectiveUsuarioId)
+          if (!sync.ok) {
+            setError(formatCheckoutError(sync.status, sync.body))
+          } else {
+            await refresh()
+          }
+        }
+
         let tries = 0
         while (tries < 10) {
           await new Promise((r) => setTimeout(r, 2000))

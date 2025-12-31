@@ -14,6 +14,19 @@ type UsuarioRow = {
   endereco: string | null
 }
 
+type BillingUsuarioRow = {
+  id: string
+  whatsapp_instance_name: string | null
+  slug: string | null
+  nome_negocio: string | null
+  telefone: string | null
+  whatsapp_habilitado?: boolean | null
+  status_pagamento?: string | null
+  data_vencimento?: string | null
+  plano?: string | null
+  ativo?: boolean | null
+}
+
 type SuperAdminConfigRow = {
   id: string
   whatsapp_api_url: string | null
@@ -48,7 +61,7 @@ type UsuarioPartialRow = {
 
 const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nLocal: {endereco}\n\nNos vemos em breve!\n{nome_negocio}`
 
-const FN_VERSION = 'whatsapp-lembretes@2025-12-26'
+const FN_VERSION = 'whatsapp-lembretes@2025-12-31'
 
 function jsonResponse(status: number, body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -227,6 +240,14 @@ function formatBRDate(isoDate: string) {
 
 function interpolateTemplate(template: string, vars: Record<string, string>) {
   return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => vars[key] ?? `{${key}}`)
+}
+
+function computeDaysLeft(todayIso: string, vencIso: string) {
+  const today = new Date(`${todayIso}T00:00:00Z`)
+  const venc = new Date(`${vencIso}T00:00:00Z`)
+  if (!Number.isFinite(today.getTime()) || !Number.isFinite(venc.getTime())) return null
+  const diffMs = venc.getTime() - today.getTime()
+  return Math.round(diffMs / (24 * 60 * 60 * 1000))
 }
 
 async function evolutionRequest(opts: { baseUrl: string; apiKey: string; path: string; method: string; body?: unknown }) {
@@ -410,6 +431,208 @@ Deno.serve(async (req) => {
   const globalApiUrl = sa?.whatsapp_api_url ?? null
   const globalApiKey = sa?.whatsapp_api_key ?? null
   if (!globalApiUrl || !globalApiKey) return jsonResponse(200, { ok: true, skipped_all: 'not_configured', results: [] })
+
+  const action = (() => {
+    if (!bodyJson || typeof bodyJson !== 'object') return null
+    const raw = (bodyJson as Record<string, unknown>).action
+    return typeof raw === 'string' ? raw.trim().toLowerCase() : null
+  })()
+
+  if (action === 'billing_status_changed') {
+    const usuarioId = (() => {
+      if (!bodyJson || typeof bodyJson !== 'object') return null
+      const raw = (bodyJson as Record<string, unknown>).usuario_id
+      if (typeof raw !== 'string') return null
+      const v = raw.trim()
+      return v ? v : null
+    })()
+    const status = (() => {
+      if (!bodyJson || typeof bodyJson !== 'object') return null
+      const raw = (bodyJson as Record<string, unknown>).status_pagamento
+      return typeof raw === 'string' ? raw.trim().toLowerCase() : null
+    })()
+
+    if (!usuarioId || !status) return jsonResponse(400, { error: 'invalid_payload' })
+
+    const { data: uRaw, error: uErr } = await adminClient
+      .from('usuarios')
+      .select('id,whatsapp_instance_name,slug,nome_negocio,telefone,whatsapp_habilitado,status_pagamento,data_vencimento,plano,ativo')
+      .eq('id', usuarioId)
+      .maybeSingle()
+    if (uErr) return jsonResponse(400, { error: 'load_user_failed', message: uErr.message })
+    if (!uRaw) return jsonResponse(404, { error: 'usuario_not_found' })
+
+    const u = uRaw as unknown as BillingUsuarioRow
+    if (u.ativo === false && status !== 'suspenso' && status !== 'cancelado') return jsonResponse(200, { ok: true, skipped: 'usuario_inativo' })
+    if (u.whatsapp_habilitado !== true) return jsonResponse(200, { ok: true, skipped: 'whatsapp_disabled' })
+    if (!sanitizePhoneDigits(u.telefone ?? '')) return jsonResponse(200, { ok: true, skipped: 'missing_phone' })
+
+    const instanceNameRaw = u.whatsapp_instance_name ?? u.slug ?? ''
+    const instanceName = sanitizeInstanceName(instanceNameRaw)
+
+    const venc = (u.data_vencimento ?? '').trim()
+    const vencPart = venc ? `\n\nVencimento: ${formatBRDate(venc)}` : ''
+    const plano = (u.plano ?? '').trim().toUpperCase()
+    const planoPart = plano ? `\nPlano: ${plano}` : ''
+    const business = (u.nome_negocio ?? '').trim()
+    const header = business ? `Olá! Aqui é o SMagenda (${business}).` : 'Olá! Aqui é o SMagenda.'
+
+    const text =
+      status === 'inadimplente'
+        ? `${header}\n\nIdentificamos falha no pagamento da sua assinatura.${vencPart}${planoPart}\n\nPara regularizar e manter o acesso, finalize o pagamento em: ${cleanUrl(Deno.env.get('SITE_URL') ?? Deno.env.get('APP_URL') ?? '')}/pagamento`
+        : status === 'suspenso'
+          ? `${header}\n\nSeu acesso está suspenso no momento.${vencPart}${planoPart}\n\nRegularize o pagamento para reativar em: ${cleanUrl(Deno.env.get('SITE_URL') ?? Deno.env.get('APP_URL') ?? '')}/pagamento`
+          : status === 'cancelado'
+            ? `${header}\n\nSua assinatura foi cancelada.${planoPart}\n\nCaso queira reativar, acesse: ${cleanUrl(Deno.env.get('SITE_URL') ?? Deno.env.get('APP_URL') ?? '')}/pagamento`
+            : `${header}\n\nAtualização do pagamento: ${status}.${vencPart}${planoPart}`
+
+    const sendRes = await evolutionSendTextWithFallback({ apiUrl: globalApiUrl, apiKey: globalApiKey, instanceName, phoneRaw: u.telefone ?? '', text })
+    if (!sendRes.ok) return jsonResponse(502, { ok: false, error: 'evolution_error', details: sendRes.body, attempts: sendRes.attempts })
+    return jsonResponse(200, { ok: true, sent: true, usuario_id: u.id, status_pagamento: status })
+  }
+
+  if (action === 'billing_daily') {
+    const timeZone = 'America/Sao_Paulo'
+    const now = new Date()
+    const nowVirtual = toVirtualTimeZoneDate(now, timeZone)
+    const todayIso = nowVirtual.toISOString().slice(0, 10)
+
+    const { data: usuarios, error: usuariosErr } = await adminClient
+      .from('usuarios')
+      .select('id,whatsapp_instance_name,slug,nome_negocio,telefone,whatsapp_habilitado,status_pagamento,data_vencimento,plano,ativo')
+      .eq('ativo', true)
+      .not('data_vencimento', 'is', null)
+      .in('status_pagamento', ['ativo', 'trial', 'inadimplente', 'suspenso'])
+      .limit(2000)
+    if (usuariosErr) return jsonResponse(400, { error: 'load_users_failed', message: usuariosErr.message })
+
+    const updated: Array<{ usuario_id: string; next_status: string; next_ativo: boolean | null }> = []
+    const sent: Array<{ usuario_id: string; kind: string; days_left: number }> = []
+    const skipped: Array<{ usuario_id: string; reason: string }> = []
+
+    for (const row of usuarios ?? []) {
+      const u = row as unknown as BillingUsuarioRow
+      const venc = (u.data_vencimento ?? '').trim()
+      if (!venc) {
+        skipped.push({ usuario_id: u.id, reason: 'missing_vencimento' })
+        continue
+      }
+
+      const daysLeft = computeDaysLeft(todayIso, venc)
+      if (daysLeft === null) {
+        skipped.push({ usuario_id: u.id, reason: 'invalid_vencimento' })
+        continue
+      }
+
+      const currentStatus = String(u.status_pagamento ?? '').trim().toLowerCase()
+      const baseUrl = cleanUrl(Deno.env.get('SITE_URL') ?? Deno.env.get('APP_URL') ?? '')
+      const pagamentoUrl = baseUrl ? `${baseUrl}/pagamento` : '/pagamento'
+
+      const stage = (() => {
+        if (daysLeft === 3 || daysLeft === 1 || daysLeft === 0) return { kind: currentStatus === 'trial' ? 'trial' : 'vencendo' }
+        if (daysLeft === -3) return { kind: 'atraso_3' }
+        if (daysLeft === -7) return { kind: 'atraso_7' }
+        if (daysLeft === -14) return { kind: 'suspensao_14' }
+        if (daysLeft === -30) return { kind: 'cancelamento_30' }
+        return null
+      })()
+
+      const shouldUpdateTrialExpired = currentStatus === 'trial' && daysLeft < 0
+      if (shouldUpdateTrialExpired) {
+        const { error: updErr } = await adminClient
+          .from('usuarios')
+          .update({ status_pagamento: 'inadimplente' })
+          .eq('id', u.id)
+          .eq('status_pagamento', 'trial')
+        if (!updErr) updated.push({ usuario_id: u.id, next_status: 'inadimplente', next_ativo: null })
+      }
+
+      if (stage?.kind === 'atraso_3' && currentStatus === 'ativo') {
+        const { error: updErr } = await adminClient
+          .from('usuarios')
+          .update({ status_pagamento: 'inadimplente' })
+          .eq('id', u.id)
+          .eq('status_pagamento', 'ativo')
+        if (!updErr) updated.push({ usuario_id: u.id, next_status: 'inadimplente', next_ativo: null })
+      }
+
+      if (stage?.kind === 'suspensao_14') {
+        const { error: updErr } = await adminClient
+          .from('usuarios')
+          .update({ status_pagamento: 'suspenso', ativo: false })
+          .eq('id', u.id)
+          .neq('status_pagamento', 'cancelado')
+        if (!updErr) updated.push({ usuario_id: u.id, next_status: 'suspenso', next_ativo: false })
+
+        await adminClient.from('funcionarios').update({ ativo: false }).eq('usuario_master_id', u.id)
+      }
+
+      if (stage?.kind === 'cancelamento_30') {
+        const { error: updErr } = await adminClient
+          .from('usuarios')
+          .update({ status_pagamento: 'cancelado', ativo: false })
+          .eq('id', u.id)
+        if (!updErr) updated.push({ usuario_id: u.id, next_status: 'cancelado', next_ativo: false })
+
+        await adminClient.from('funcionarios').update({ ativo: false }).eq('usuario_master_id', u.id)
+      }
+
+      if (!stage) {
+        skipped.push({ usuario_id: u.id, reason: 'not_due_window' })
+        continue
+      }
+
+      if (u.whatsapp_habilitado !== true) {
+        skipped.push({ usuario_id: u.id, reason: 'whatsapp_disabled' })
+        continue
+      }
+
+      const phone = u.telefone ?? ''
+      if (!sanitizePhoneDigits(phone)) {
+        skipped.push({ usuario_id: u.id, reason: 'invalid_phone' })
+        continue
+      }
+
+      const instanceNameRaw = u.whatsapp_instance_name ?? u.slug ?? ''
+      const instanceName = sanitizeInstanceName(instanceNameRaw)
+      const plano = (u.plano ?? '').trim().toUpperCase()
+      const planoPart = plano ? `\nPlano: ${plano}` : ''
+      const business = (u.nome_negocio ?? '').trim()
+      const header = business ? `Olá! Aqui é o SMagenda (${business}).` : 'Olá! Aqui é o SMagenda.'
+      const vencPart = venc ? `\nVencimento: ${formatBRDate(venc)}` : ''
+
+      const text = (() => {
+        if (stage.kind === 'trial') {
+          const when = daysLeft === 0 ? 'hoje' : daysLeft === 1 ? 'amanhã' : 'em 3 dias'
+          return `${header}\n\nSeu período de teste termina ${when}.${vencPart}${planoPart}\n\nPara manter o acesso, escolha um plano em: ${pagamentoUrl}`
+        }
+        if (stage.kind === 'vencendo') {
+          const when = daysLeft === 0 ? 'hoje' : daysLeft === 1 ? 'amanhã' : 'em 3 dias'
+          return `${header}\n\nSeu pagamento vence ${when}.${vencPart}${planoPart}\n\nPara evitar interrupções, confira em: ${pagamentoUrl}`
+        }
+        if (stage.kind === 'atraso_3') {
+          return `${header}\n\nSeu pagamento está em atraso há 3 dias.${vencPart}${planoPart}\n\nPara regularizar e manter o acesso, acesse: ${pagamentoUrl}`
+        }
+        if (stage.kind === 'atraso_7') {
+          return `${header}\n\nSeu pagamento está em atraso há 7 dias.${vencPart}${planoPart}\n\nPara evitar suspensão, acesse: ${pagamentoUrl}`
+        }
+        if (stage.kind === 'suspensao_14') {
+          return `${header}\n\nSeu acesso foi suspenso por pagamento em atraso.${vencPart}${planoPart}\n\nRegularize para reativar: ${pagamentoUrl}`
+        }
+        return `${header}\n\nSua assinatura foi cancelada por pagamento em atraso.${planoPart}\n\nCaso queira reativar, acesse: ${pagamentoUrl}`
+      })()
+
+      const sendRes = await evolutionSendTextWithFallback({ apiUrl: globalApiUrl, apiKey: globalApiKey, instanceName, phoneRaw: phone, text })
+      if (!sendRes.ok) {
+        skipped.push({ usuario_id: u.id, reason: 'evolution_error' })
+        continue
+      }
+
+      sent.push({ usuario_id: u.id, kind: stage.kind, days_left: daysLeft })
+    }
+
+    return jsonResponse(200, { ok: true, action: 'billing_daily', today: todayIso, updated, sent, skipped })
+  }
 
   const agendamentoId = (() => {
     if (!bodyJson || typeof bodyJson !== 'object') return null

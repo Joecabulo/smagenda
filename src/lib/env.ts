@@ -4,6 +4,12 @@ export function getRequiredEnv(name: string): string {
   return value
 }
 
+export function getOptionalEnv(name: string): string | null {
+  const raw = import.meta.env[name] as string | undefined
+  const value = String(raw ?? '').trim()
+  return value ? value : null
+}
+
 export type EnvCheck = { ok: true; values: Record<string, string> } | { ok: false; missing: string[] }
 
 export function checkRequiredEnvs(names: string[]): EnvCheck {
