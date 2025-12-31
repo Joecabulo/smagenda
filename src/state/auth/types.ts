@@ -18,6 +18,7 @@ export type UsuarioProfile = {
   limite_funcionarios: number | null
   status_pagamento: 'ativo' | 'inadimplente' | 'cancelado' | 'trial' | 'suspenso'
   data_vencimento: string | null
+  free_trial_consumido: boolean
   ativo: boolean
 }
 

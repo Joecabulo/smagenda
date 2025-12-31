@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { AppShell } from '../../components/layout/AppShell'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
@@ -251,8 +252,20 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
 
 export function DashboardPage() {
   const { appPrincipal } = useAuth()
+  const location = useLocation()
+  const navigate = useNavigate()
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
   const usuarioId = usuario?.id ?? null
+
+  useEffect(() => {
+    const search = location.search ?? ''
+    if (!search) return
+    const params = new URLSearchParams(search)
+    const checkout = (params.get('checkout') ?? '').trim().toLowerCase()
+    if (checkout === 'success' || checkout === 'cancel') {
+      navigate(`/pagamento${search}`, { replace: true })
+    }
+  }, [location.search, navigate])
 
   const tutorialKey = useMemo(() => (usuarioId ? `smagenda:tutorial:dashboard:${usuarioId}` : null), [usuarioId])
   const [tutorialOpen, setTutorialOpen] = useState(false)

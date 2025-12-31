@@ -204,6 +204,61 @@ export function RelatoriosPage() {
     return { total, concluidos, noShows, noShowRate, prevista, realizada, topServices, peakHours, novos, recorrentes }
   }, [agendamentos, allUntilEnd, start])
 
+  const byFuncionario = useMemo(() => {
+    const isCancelado = (s: string) => s.trim().toLowerCase() === 'cancelado'
+    const isNoShow = (s: string) => {
+      const x = s.trim().toLowerCase()
+      return x === 'nao_compareceu' || x === 'não_compareceu' || x === 'no_show'
+    }
+    const isConcluido = (s: string) => {
+      const x = s.trim().toLowerCase()
+      return x === 'concluido' || x === 'concluído'
+    }
+
+    const map = new Map<
+      string,
+      {
+        id: string
+        nome: string
+        total: number
+        concluidos: number
+        noShows: number
+        prevista: number
+        realizada: number
+      }
+    >()
+
+    for (const a of agendamentos) {
+      if (isCancelado(a.status)) continue
+      const id = a.funcionario?.id ?? 'geral'
+      const nome = a.funcionario?.nome_completo ?? 'Geral'
+      const prev = map.get(id)
+      const next = prev
+        ? { ...prev }
+        : {
+            id,
+            nome,
+            total: 0,
+            concluidos: 0,
+            noShows: 0,
+            prevista: 0,
+            realizada: 0,
+          }
+
+      next.total += 1
+      if (isConcluido(a.status)) next.concluidos += 1
+      if (isNoShow(a.status)) next.noShows += 1
+
+      const preco = a.servico?.preco ? Number(a.servico.preco) : 0
+      next.prevista += preco
+      if (isConcluido(a.status)) next.realizada += preco
+
+      map.set(id, next)
+    }
+
+    return Array.from(map.values()).sort((x, y) => y.total - x.total)
+  }, [agendamentos])
+
   const exportCsv = async () => {
     if (!usuarioId) return
     setExporting(true)
@@ -369,6 +424,35 @@ export function RelatoriosPage() {
             </div>
           </Card>
         </div>
+
+        <Card>
+          <div className="p-6 space-y-3">
+            <div className="text-sm font-semibold text-slate-900">Por profissional</div>
+            {loading ? (
+              <div className="text-sm text-slate-600">Carregando…</div>
+            ) : byFuncionario.length === 0 ? (
+              <div className="text-sm text-slate-600">Sem dados no período.</div>
+            ) : (
+              <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
+                {byFuncionario.map((f) => (
+                  <div key={f.id} className="p-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-slate-900 truncate">{f.nome}</div>
+                      <div className="text-xs text-slate-600">
+                        {f.concluidos} concluídos • {f.noShows} no-show
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 justify-end">
+                      <Badge tone="slate">{f.total} agendamentos</Badge>
+                      <Badge tone="slate">Prevista {formatBRMoney(f.prevista)}</Badge>
+                      <Badge tone="green">Realizada {formatBRMoney(f.realizada)}</Badge>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Card>
 
         <Card>
           <div className="p-6 space-y-3">

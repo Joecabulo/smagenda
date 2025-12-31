@@ -320,6 +320,8 @@ export function PublicBookingPage() {
         setError(`Selecione um horário com no mínimo ${Math.round(minLeadMinutes / 60)}h de antecedência.`)
       } else if (lower.includes('ocupado')) {
         setError('Esse horário acabou de ser ocupado. Selecione outro horário.')
+      } else if (lower.includes('limite_mensal_atingido')) {
+        setError('Este estabelecimento atingiu o limite de agendamentos do mês. Tente novamente no próximo mês.')
       } else {
         setError(msg)
       }

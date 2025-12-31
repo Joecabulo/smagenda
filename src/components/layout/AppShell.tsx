@@ -11,13 +11,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const nav = isFuncionario
     ? [
         { to: '/funcionario/agenda', label: 'Minha Agenda' },
-        { to: '/configuracoes/mensagens', label: 'Mensagens' },
       ]
     : [
         { to: '/dashboard', label: 'Agenda' },
         { to: '/servicos', label: 'Meus Serviços' },
         { to: '/clientes', label: 'Clientes' },
         { to: '/relatorios', label: 'Relatórios' },
+        { to: '/pagamento', label: 'Pagamento' },
         { to: '/funcionarios', label: 'Funcionários' },
         { to: '/configuracoes/whatsapp', label: 'WhatsApp' },
         { to: '/configuracoes/mensagens', label: 'Mensagens Automáticas' },

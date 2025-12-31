@@ -365,6 +365,24 @@ where status_pagamento = 'trial'
   and data_vencimento is null;`
   }, [])
 
+  const sqlPaymentsStripe = useMemo(() => {
+    return `alter table public.usuarios add column if not exists free_trial_consumido boolean not null default false;
+alter table public.usuarios add column if not exists stripe_customer_id text;
+alter table public.usuarios add column if not exists stripe_subscription_id text;
+alter table public.usuarios add column if not exists stripe_checkout_session_id text;
+alter table public.usuarios add column if not exists stripe_last_event_id text;
+alter table public.usuarios add column if not exists stripe_last_event_at timestamptz;
+
+update public.usuarios
+set free_trial_consumido = true
+where plano is not null
+  and lower(trim(plano)) <> 'free'
+  and free_trial_consumido is distinct from true;
+
+create index if not exists usuarios_stripe_customer_id_idx on public.usuarios (stripe_customer_id);
+create index if not exists usuarios_stripe_subscription_id_idx on public.usuarios (stripe_subscription_id);`
+  }, [])
+
   const sqlRlsApp = useMemo(() => {
     return `alter table public.usuarios enable row level security;
 alter table public.funcionarios enable row level security;
@@ -599,7 +617,7 @@ using (
       where f.id = auth.uid()
         and f.usuario_master_id = agendamentos.usuario_id
         and f.ativo = true
-        and f.pode_cancelar_agendamentos = true
+        and (f.pode_cancelar_agendamentos = true or f.pode_criar_agendamentos = true)
     )
   )
 )
@@ -614,7 +632,7 @@ with check (
       where f.id = auth.uid()
         and f.usuario_master_id = agendamentos.usuario_id
         and f.ativo = true
-        and f.pode_cancelar_agendamentos = true
+        and (f.pode_cancelar_agendamentos = true or f.pode_criar_agendamentos = true)
     )
   )
 );
@@ -766,6 +784,7 @@ alter table public.usuarios add column if not exists public_background_color tex
 alter table public.usuarios add column if not exists public_use_background_image boolean not null default false;
 alter table public.usuarios add column if not exists public_background_image_url text;
 alter table public.usuarios add column if not exists timezone text;
+alter table public.usuarios add column if not exists limite_agendamentos_mes int;
 
 create or replace function public.public_get_usuario_publico(p_slug text)
 returns table (
@@ -1069,6 +1088,10 @@ declare
   v_max_days int := 60;
   v_tz text;
   v_today date;
+  v_limite_mes int;
+  v_month_start date;
+  v_month_end date;
+  v_month_count int;
 begin
   if p_usuario_id is null or p_data is null or nullif(p_hora_inicio, '') is null or p_servico_id is null then
     raise exception 'invalid_payload';
@@ -1076,11 +1099,12 @@ begin
 
   v_uid := p_usuario_id;
 
-  select u.horario_inicio, u.horario_fim, u.dias_trabalho, u.intervalo_inicio, u.intervalo_fim, u.timezone
+  select u.horario_inicio, u.horario_fim, u.dias_trabalho, u.intervalo_inicio, u.intervalo_fim, u.timezone, u.limite_agendamentos_mes
   into v_base
   from public.usuarios u
   where u.id = v_uid
-    and u.ativo = true;
+    and u.ativo = true
+  for update;
 
   if v_base is null then
     raise exception 'usuario_invalido';
@@ -1095,6 +1119,28 @@ begin
 
   if p_data > (v_today + v_max_days) then
     raise exception 'data_muito_futura';
+  end if;
+
+  v_limite_mes := v_base.limite_agendamentos_mes;
+  if v_limite_mes is not null then
+    if v_limite_mes <= 0 then
+      raise exception 'limite_mensal_atingido';
+    end if;
+
+    v_month_start := date_trunc('month', p_data)::date;
+    v_month_end := (v_month_start + interval '1 month')::date;
+
+    select count(*)
+    into v_month_count
+    from public.agendamentos a
+    where a.usuario_id = v_uid
+      and a.data >= v_month_start
+      and a.data < v_month_end
+      and a.status <> 'cancelado';
+
+    if v_month_count >= v_limite_mes then
+      raise exception 'limite_mensal_atingido';
+    end if;
   end if;
 
   select s.duracao_minutos
@@ -1828,6 +1874,12 @@ $$;`
           title="SQL de Trial (15 dias / 1 funcionário)"
           description="Use para habilitar trial automático após confirmação de email."
           sql={sqlTrial}
+        />
+
+        <SqlCard
+          title="SQL de Pagamento (Stripe)"
+          description="Use para permitir que o webhook salve o status de pagamento real."
+          sql={sqlPaymentsStripe}
         />
 
         <SqlCard

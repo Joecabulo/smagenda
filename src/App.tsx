@@ -16,6 +16,7 @@ import { WhatsappSettingsPage } from './views/app/WhatsappSettingsPage'
 import { MensagensSettingsPage } from './views/app/MensagensSettingsPage'
 import { PaginaPublicaSettingsPage } from './views/app/PaginaPublicaSettingsPage'
 import { FuncionarioAgendaPage } from './views/app/FuncionarioAgendaPage'
+import { PagamentoPage } from './views/app/PagamentoPage'
 import { AdminLoginPage } from './views/admin/AdminLoginPage'
 import { AdminBootstrapPage } from './views/admin/AdminBootstrapPage'
 import { AdminDashboardPage } from './views/admin/AdminDashboardPage'
@@ -86,6 +87,14 @@ function App() {
         }
       />
       <Route
+        path="/pagamento"
+        element={
+          <RequireAuth requiredKind="usuario">
+            <PagamentoPage />
+          </RequireAuth>
+        }
+      />
+      <Route
         path="/funcionarios"
         element={
           <RequireAuth requiredKind="usuario">
@@ -104,7 +113,7 @@ function App() {
       <Route
         path="/configuracoes/mensagens"
         element={
-          <RequireAuth>
+          <RequireAuth requiredKind="usuario">
             <MensagensSettingsPage />
           </RequireAuth>
         }

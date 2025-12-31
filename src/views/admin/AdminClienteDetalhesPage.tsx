@@ -76,9 +76,9 @@ const statusOptions = ['ativo', 'inadimplente', 'cancelado', 'trial', 'suspenso'
 
 const planoDefaultLimite: Record<string, number | null> = {
   free: 1,
-  basic: 2,
-  pro: 5,
-  team: 10,
+  basic: 1,
+  pro: 3,
+  team: 5,
   enterprise: null,
 }
 
@@ -105,6 +105,7 @@ export function AdminClienteDetalhesPage() {
   const [funcPermissao, setFuncPermissao] = useState<'admin' | 'funcionario'>('funcionario')
   const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null)
   const [creatingCheckout, setCreatingCheckout] = useState(false)
+  const [refreshingPagamento, setRefreshingPagamento] = useState(false)
 
   const limiteParsed = useMemo(() => {
     const n = limiteFuncionarios.trim() === '' ? null : Number(limiteFuncionarios)
@@ -165,6 +166,29 @@ export function AdminClienteDetalhesPage() {
       setLoading(false)
     })
   }, [id])
+
+  const refreshPagamento = async () => {
+    if (!id) return
+    setRefreshingPagamento(true)
+    setError(null)
+    const { data, error: err } = await supabase
+      .from('usuarios')
+      .select('id,plano,status_pagamento,ativo,limite_funcionarios')
+      .eq('id', id)
+      .maybeSingle()
+    if (err || !data) {
+      setError(err?.message ?? 'Erro ao atualizar pagamento')
+      setRefreshingPagamento(false)
+      return
+    }
+    const next = data as unknown as Pick<Cliente, 'id' | 'plano' | 'status_pagamento' | 'ativo' | 'limite_funcionarios'>
+    setCliente((prev) => (prev ? { ...prev, ...next } : (next as unknown as Cliente)))
+    setPlano(next.plano)
+    setStatusPagamento(next.status_pagamento)
+    setAtivo(next.ativo)
+    setLimiteFuncionarios(next.limite_funcionarios === null ? '' : String(next.limite_funcionarios))
+    setRefreshingPagamento(false)
+  }
 
   const save = async () => {
     if (!id) return
@@ -288,6 +312,9 @@ export function AdminClienteDetalhesPage() {
     }
     setCheckoutUrl(url)
     setCreatingCheckout(false)
+    setTimeout(() => {
+      void refreshPagamento()
+    }, 4000)
   }
 
   const toggleFuncionario = async (f: Funcionario) => {
@@ -432,9 +459,14 @@ export function AdminClienteDetalhesPage() {
                   <div className="text-sm font-semibold text-slate-900">Pagamento</div>
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="text-sm text-slate-600">Gera um link de checkout para o plano selecionado.</div>
-                    <Button variant="secondary" onClick={gerarCheckout} disabled={creatingCheckout || !plano}>
-                      {creatingCheckout ? 'Gerando…' : 'Gerar link de pagamento'}
-                    </Button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button variant="secondary" onClick={() => void refreshPagamento()} disabled={refreshingPagamento || !cliente}>
+                        {refreshingPagamento ? 'Atualizando…' : 'Atualizar status'}
+                      </Button>
+                      <Button variant="secondary" onClick={gerarCheckout} disabled={creatingCheckout || !plano}>
+                        {creatingCheckout ? 'Gerando…' : 'Gerar link de pagamento'}
+                      </Button>
+                    </div>
                   </div>
                   {checkoutUrl ? (
                     <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">

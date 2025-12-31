@@ -32,6 +32,7 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
   const plano = (typeof row.plano === 'string' ? row.plano : 'free') as UsuarioProfile['plano']
   const tipoConta = (typeof row.tipo_conta === 'string' ? row.tipo_conta : 'master') as UsuarioProfile['tipo_conta']
   const statusPagamento = (typeof row.status_pagamento === 'string' ? row.status_pagamento : 'trial') as UsuarioProfile['status_pagamento']
+  const freeTrialConsumido = row.free_trial_consumido === true
 
   return {
     id: userId,
@@ -53,6 +54,7 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
     limite_funcionarios: typeof row.limite_funcionarios === 'number' ? row.limite_funcionarios : null,
     status_pagamento: statusPagamento,
     data_vencimento: typeof row.data_vencimento === 'string' ? row.data_vencimento : null,
+    free_trial_consumido: freeTrialConsumido,
     ativo: typeof row.ativo === 'boolean' ? row.ativo : true,
   }
 }
