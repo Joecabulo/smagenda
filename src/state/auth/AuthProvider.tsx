@@ -33,12 +33,14 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
   const tipoConta = (typeof row.tipo_conta === 'string' ? row.tipo_conta : 'master') as UsuarioProfile['tipo_conta']
   const statusPagamento = (typeof row.status_pagamento === 'string' ? row.status_pagamento : 'trial') as UsuarioProfile['status_pagamento']
   const freeTrialConsumido = row.free_trial_consumido === true
+  const tipoNegocio = typeof row.tipo_negocio === 'string' ? row.tipo_negocio : null
 
   return {
     id: userId,
     nome_completo: nomeCompleto,
     nome_negocio: nomeNegocio,
     slug,
+    tipo_negocio: tipoNegocio,
     logo_url: typeof row.logo_url === 'string' ? row.logo_url : null,
     telefone: typeof row.telefone === 'string' ? row.telefone : null,
     email: rawEmail ?? '',

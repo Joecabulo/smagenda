@@ -16,6 +16,15 @@ type Cliente = {
   ativo: boolean
 }
 
+function normalizePlanoLabel(planoRaw: string) {
+  const p = String(planoRaw ?? '').trim().toLowerCase()
+  if (p === 'enterprise') return 'EMPRESA'
+  if (p === 'pro' || p === 'team') return 'PRO'
+  if (p === 'basic') return 'BASIC'
+  if (p === 'free') return 'FREE'
+  return planoRaw
+}
+
 export function AdminClientesPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -44,7 +53,13 @@ export function AdminClientesPage() {
         const safe = q.replaceAll(',', ' ').trim()
         req = req.or(`nome_negocio.ilike.%${safe}%,slug.ilike.%${safe}%,email.ilike.%${safe}%,telefone.ilike.%${safe}%`)
       }
-      if (plano) req = req.eq('plano', plano)
+      if (plano) {
+        if (plano === 'pro') {
+          req = req.in('plano', ['pro', 'team'])
+        } else {
+          req = req.eq('plano', plano)
+        }
+      }
       if (statusPagamento) req = req.eq('status_pagamento', statusPagamento)
       if (ativo) req = req.eq('ativo', ativo === 'true')
 
@@ -85,8 +100,7 @@ export function AdminClientesPage() {
                   <option value="free">FREE</option>
                   <option value="basic">BASIC</option>
                   <option value="pro">PRO</option>
-                  <option value="team">TEAM</option>
-                  <option value="enterprise">ENTERPRISE</option>
+                  <option value="enterprise">EMPRESA</option>
                 </select>
               </label>
               <label className="block">
@@ -165,7 +179,7 @@ export function AdminClientesPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       {c.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}
-                      <Badge tone="slate">{c.plano}</Badge>
+                      <Badge tone="slate">{normalizePlanoLabel(c.plano)}</Badge>
                       <Badge tone={c.status_pagamento === 'inadimplente' ? 'red' : 'slate'}>{c.status_pagamento}</Badge>
                     </div>
                   </div>

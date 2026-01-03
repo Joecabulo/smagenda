@@ -239,9 +239,17 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
 export function FuncionarioAgendaPage() {
   const { appPrincipal } = useAuth()
   const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
-
   const funcionarioId = funcionario?.id ?? null
   const usuarioMasterId = funcionario?.usuario_master_id ?? null
+
+  const [usuarioMasterHorario, setUsuarioMasterHorario] = useState<{
+    horario_inicio: string | null
+    horario_fim: string | null
+    intervalo_inicio: string | null
+    intervalo_fim: string | null
+  } | null>(null)
+
+  const [usuarioMasterPlano, setUsuarioMasterPlano] = useState<string | null>(null)
 
   const [date, setDate] = useState(() => {
     const now = new Date()
@@ -267,6 +275,14 @@ export function FuncionarioAgendaPage() {
   const [blockRepeat, setBlockRepeat] = useState<RepeatKind>('none')
   const [blockRepeatUntil, setBlockRepeatUntil] = useState('')
   const [savingBlock, setSavingBlock] = useState(false)
+
+  const canUseRecurringBlocks = useMemo(() => {
+    const p = String(usuarioMasterPlano ?? '').trim().toLowerCase()
+    return p === 'pro' || p === 'team' || p === 'enterprise'
+  }, [usuarioMasterPlano])
+
+  const effectiveBlockRepeat = canUseRecurringBlocks ? blockRepeat : 'none'
+  const effectiveBlockRepeatUntil = canUseRecurringBlocks ? blockRepeatUntil : ''
 
   const weekStartDate = useMemo(() => startOfWeek(date), [date])
   const weekEndDate = useMemo(() => addDays(weekStartDate, 6), [weekStartDate])
@@ -303,9 +319,23 @@ export function FuncionarioAgendaPage() {
   const slotStepMinutes = 30
 
   const slots = useMemo(() => {
-    if (!funcionario?.horario_inicio || !funcionario?.horario_fim) return []
-    return buildSlots(funcionario.horario_inicio, funcionario.horario_fim, funcionario.intervalo_inicio, funcionario.intervalo_fim, slotStepMinutes)
-  }, [funcionario, slotStepMinutes])
+    const start = funcionario?.horario_inicio ?? usuarioMasterHorario?.horario_inicio ?? null
+    const end = funcionario?.horario_fim ?? usuarioMasterHorario?.horario_fim ?? null
+    if (!start || !end) return []
+    const intervalStart = funcionario?.intervalo_inicio ?? usuarioMasterHorario?.intervalo_inicio ?? null
+    const intervalEnd = funcionario?.intervalo_fim ?? usuarioMasterHorario?.intervalo_fim ?? null
+    return buildSlots(start, end, intervalStart, intervalEnd, slotStepMinutes)
+  }, [
+    funcionario?.horario_inicio,
+    funcionario?.horario_fim,
+    funcionario?.intervalo_inicio,
+    funcionario?.intervalo_fim,
+    slotStepMinutes,
+    usuarioMasterHorario?.horario_inicio,
+    usuarioMasterHorario?.horario_fim,
+    usuarioMasterHorario?.intervalo_inicio,
+    usuarioMasterHorario?.intervalo_fim,
+  ])
 
   const totalDia = useMemo(() => {
     if (!funcionario?.pode_ver_financeiro) return 0
@@ -319,6 +349,25 @@ export function FuncionarioAgendaPage() {
       if (!funcionarioId || !usuarioMasterId) return
       setLoading(true)
       setError(null)
+
+      const { data: masterHorarioData } = await supabase
+        .from('usuarios')
+        .select('horario_inicio,horario_fim,intervalo_inicio,intervalo_fim,plano')
+        .eq('id', usuarioMasterId)
+        .maybeSingle()
+      if (masterHorarioData) {
+        const row = masterHorarioData as unknown as Record<string, unknown>
+        setUsuarioMasterHorario({
+          horario_inicio: typeof row.horario_inicio === 'string' ? row.horario_inicio : null,
+          horario_fim: typeof row.horario_fim === 'string' ? row.horario_fim : null,
+          intervalo_inicio: typeof row.intervalo_inicio === 'string' ? row.intervalo_inicio : null,
+          intervalo_fim: typeof row.intervalo_fim === 'string' ? row.intervalo_fim : null,
+        })
+        setUsuarioMasterPlano(typeof row.plano === 'string' ? row.plano : null)
+      } else {
+        setUsuarioMasterHorario(null)
+        setUsuarioMasterPlano(null)
+      }
 
       const { data: servicosData, error: servicosError } = await supabase
         .from('servicos')
@@ -520,8 +569,8 @@ export function FuncionarioAgendaPage() {
   }, [bloqueios])
 
   const repeatPreview = useMemo(() => {
-    return buildRepeatKeys(dayKey, blockRepeat, blockRepeatUntil.trim() ? blockRepeatUntil : null)
-  }, [blockRepeat, blockRepeatUntil, dayKey])
+    return buildRepeatKeys(dayKey, effectiveBlockRepeat, effectiveBlockRepeatUntil.trim() ? effectiveBlockRepeatUntil : null)
+  }, [dayKey, effectiveBlockRepeat, effectiveBlockRepeatUntil])
 
   const canSaveBlock = useMemo(() => {
     if (!funcionarioId || !usuarioMasterId) return false
@@ -542,7 +591,11 @@ export function FuncionarioAgendaPage() {
     setError(null)
     const motivo = blockMotivo.trim() ? blockMotivo.trim() : null
 
-    const { keys, error: repeatErr } = buildRepeatKeys(dayKey, blockRepeat, blockRepeatUntil.trim() ? blockRepeatUntil : null)
+    const { keys, error: repeatErr } = buildRepeatKeys(
+      dayKey,
+      effectiveBlockRepeat,
+      effectiveBlockRepeatUntil.trim() ? effectiveBlockRepeatUntil : null
+    )
     if (repeatErr) {
       setError(repeatErr)
       setSavingBlock(false)
@@ -727,8 +780,10 @@ export function FuncionarioAgendaPage() {
                   <div className="text-sm font-medium text-slate-700 mb-1">Repetir</div>
                   <select
                     className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
-                    value={blockRepeat}
+                    value={effectiveBlockRepeat}
+                    disabled={!canUseRecurringBlocks}
                     onChange={(e) => {
+                      if (!canUseRecurringBlocks) return
                       const next = e.target.value as RepeatKind
                       setBlockRepeat(next)
                       if (next === 'none') {
@@ -741,19 +796,19 @@ export function FuncionarioAgendaPage() {
                     }}
                   >
                     <option value="none">Não repetir</option>
-                    <option value="daily">Diariamente</option>
-                    <option value="weekly">Semanalmente</option>
-                    <option value="monthly">Mensalmente</option>
+                    {canUseRecurringBlocks ? <option value="daily">Diariamente</option> : null}
+                    {canUseRecurringBlocks ? <option value="weekly">Semanalmente</option> : null}
+                    {canUseRecurringBlocks ? <option value="monthly">Mensalmente</option> : null}
                   </select>
                 </label>
                 <div className="sm:col-span-2">
-                  {blockRepeat !== 'none' ? (
+                  {effectiveBlockRepeat !== 'none' ? (
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                       <Input
                         label="Até"
                         type="date"
                         min={dayKey}
-                        value={blockRepeatUntil}
+                        value={effectiveBlockRepeatUntil}
                         onChange={(e) => setBlockRepeatUntil(e.target.value)}
                       />
                       <div className="flex items-end">
@@ -812,7 +867,7 @@ export function FuncionarioAgendaPage() {
                         <div key={ag.id} className="p-3 flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="text-sm font-semibold text-slate-900 truncate">
-                              {normalizeTimeHHMM(ag.hora_inicio)} — {ag.cliente_nome}
+                              {(normalizeTimeHHMM(ag.hora_inicio) || '—')} — {ag.cliente_nome}
                             </div>
                             <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
                             <div className="text-sm text-slate-700">
@@ -838,7 +893,8 @@ export function FuncionarioAgendaPage() {
                   const isStart = Boolean(agStart)
                   const visible = isStart && matchesFilters(agCover)
                   const statusUi = resolveStatusUi(agCover.status)
-                  const timeLabel = isStart ? normalizeTimeHHMM(agCover.hora_inicio) : time
+                  const startLabel = normalizeTimeHHMM(agCover.hora_inicio)
+                  const timeLabel = isStart && startLabel ? startLabel : time
                   return (
                     <div key={time} className="p-4 flex items-start justify-between gap-3">
                       <div>

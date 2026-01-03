@@ -50,6 +50,10 @@ type UsuarioExtraRow = {
 
 type ServicoRow = { nome: string | null; preco: number | null }
 
+type FuncionarioRow = { nome_completo: string | null; telefone: string | null }
+
+type UnidadeRow = { nome: string | null; endereco: string | null; telefone: string | null }
+
 type AgendamentoRow = {
   id: string
   usuario_id: string
@@ -58,7 +62,11 @@ type AgendamentoRow = {
   data: string
   hora_inicio: string | null
   status: string
+  funcionario_id?: string | null
+  unidade_id?: string | null
   servico: ServicoRow | null
+  funcionario?: FuncionarioRow | null
+  unidade?: UnidadeRow | null
 }
 
 type AgendamentoConfirmacaoRow = { confirmacao_enviada: boolean | null }
@@ -142,6 +150,11 @@ function isMissingTableError(message: string) {
 
 function isMissingColumnError(message: string) {
   return message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
+}
+
+function isMissingRelationshipError(message: string) {
+  const m = message.toLowerCase()
+  return m.includes('could not find a relationship between')
 }
 
 async function loadGlobalWhatsappConfig(dbClient: ReturnType<typeof createClient>) {
@@ -1664,16 +1677,32 @@ Deno.serve(async (req) => {
     const agendamentoId = String(payload.agendamento_id ?? '').trim()
     if (!agendamentoId) return jsonResponse(400, { error: 'invalid_payload' })
 
-    const { data: ag, error: agErr } = await userClient
-      .from('agendamentos')
-      .select('id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,servico:servicos(nome,preco)')
-      .eq('id', agendamentoId)
-      .maybeSingle()
+    const selectFull =
+      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,funcionario_id,unidade_id,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+    const selectBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,servico:servicos(nome,preco)'
+
+    const first = await userClient.from('agendamentos').select(selectFull).eq('id', agendamentoId).maybeSingle()
+    const second =
+      first.error && (isMissingTableError(first.error.message) || isMissingColumnError(first.error.message) || isMissingRelationshipError(first.error.message))
+        ? await userClient.from('agendamentos').select(selectBase).eq('id', agendamentoId).maybeSingle()
+        : null
+
+    const ag = (second ? second.data : first.data) as unknown
+    const agErr = second ? second.error : first.error
 
     if (agErr || !ag) return jsonResponse(404, { error: 'agendamento_not_found' })
     const agRow = ag as unknown as AgendamentoRow
     if (agRow.usuario_id !== masterId) return jsonResponse(403, { error: 'not_allowed' })
-    if (agRow.status !== 'confirmado') return jsonResponse(400, { error: 'agendamento_not_confirmed' })
+    const statusNormalized = String(agRow.status ?? '')
+      .trim()
+      .toLowerCase()
+    if (statusNormalized !== 'confirmado') {
+      return jsonResponse(400, {
+        error: 'agendamento_not_confirmed',
+        status: agRow.status,
+        hint: 'A confirmação automática só envia quando o status do agendamento está como “confirmado”.',
+      })
+    }
 
     const { data: agExtraRaw, error: agExtraErr } = await userClient
       .from('agendamentos')
@@ -1695,35 +1724,46 @@ Deno.serve(async (req) => {
 
     const tmplCandidate = (userExtra?.mensagem_confirmacao ?? '').trim()
     const tmpl = tmplCandidate ? (userExtra?.mensagem_confirmacao ?? '') : defaultConfirmacao
+
+    const unidadeEndereco = (agRow.unidade?.endereco ?? '').trim()
+    const endereco = unidadeEndereco || (userBaseRow.endereco ?? '')
+    const telefoneProfissional = (agRow.funcionario?.telefone ?? '').trim() || (userBaseRow.telefone ?? '')
+
     const vars = {
       nome: agRow.cliente_nome ?? '',
       data: formatBRDate(agRow.data),
       hora: agRow.hora_inicio ?? '',
       servico: agRow.servico?.nome ?? '',
       preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
-      endereco: userBaseRow.endereco ?? '',
+      endereco,
       nome_negocio: userBaseRow.nome_negocio ?? '',
-      telefone_profissional: userBaseRow.telefone ?? '',
+      telefone_profissional: telefoneProfissional,
+      profissional_nome: agRow.funcionario?.nome_completo ?? '',
+      unidade_nome: agRow.unidade?.nome ?? '',
+      unidade_endereco: unidadeEndereco,
+      unidade_telefone: agRow.unidade?.telefone ?? '',
     }
     const message = interpolateTemplate(tmpl, vars).trim()
     const phoneRaw = String(agRow.cliente_telefone ?? '')
-    if (!sanitizePhone(phoneRaw) || !message) return jsonResponse(400, { error: 'missing_message_data' })
+    const phoneOk = Boolean(sanitizePhone(phoneRaw))
+    const msgOk = Boolean(message)
+    if (!phoneOk || !msgOk) {
+      return jsonResponse(400, {
+        error: 'missing_message_data',
+        phone_ok: phoneOk,
+        message_ok: msgOk,
+        phone_masked: phoneRaw ? maskRecipient(phoneRaw) : null,
+        hint: !phoneOk
+          ? 'O agendamento não tem telefone válido do cliente. Preencha o telefone com DDD (ex.: 11999999999) e tente novamente.'
+          : 'A mensagem de confirmação ficou vazia. Verifique o modelo de mensagem em Configurações > Mensagens automáticas.',
+      })
+    }
 
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
 
     const stateRes = await evolutionRequestAuto({ baseUrl: apiUrl, apiKey, path: `/instance/connectionState/${instanceName}`, method: 'GET', stopOn404 })
-    if (stateRes.ok) {
-      const state = extractInstanceState(stateRes.body)
-      const normalized = (state ?? '').trim().toLowerCase()
-      if (normalized && normalized !== 'open' && normalized !== 'connected') {
-        return jsonResponse(409, {
-          error: 'instance_not_connected',
-          state,
-          instanceName,
-          hint: 'WhatsApp ainda não está conectado nessa instância. Vá em Configurações > WhatsApp e clique em Conectar (QR Code) e depois tente novamente.',
-        })
-      }
-    }
+    const state = stateRes.ok ? extractInstanceState(stateRes.body) : null
+    const stateNormalized = (state ?? '').trim().toLowerCase()
 
     let sendRes = await evolutionSendTextWithFallback({ apiUrl, apiKey, instanceName, phoneRaw, text: message, stopOn404 })
 
@@ -1737,6 +1777,15 @@ Deno.serve(async (req) => {
     }
 
     if (!sendRes.ok) {
+      if (stateNormalized && stateNormalized !== 'open' && stateNormalized !== 'connected') {
+        return jsonResponse(409, {
+          error: 'instance_not_connected',
+          state,
+          instanceName,
+          hint: 'WhatsApp ainda não está conectado nessa instância. Vá em Configurações > WhatsApp e clique em Conectar (QR Code) e depois tente novamente.',
+        })
+      }
+
       const hint = evolutionHint(sendRes.body)
       return jsonResponse(sendRes.status, {
         error: 'evolution_error',
@@ -1758,7 +1807,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    return jsonResponse(200, { ok: true })
+    return jsonResponse(200, { ok: true, state })
   }
 
   return jsonResponse(400, { error: 'unknown_action' })

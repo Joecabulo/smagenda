@@ -774,11 +774,15 @@ grant execute on function public.public_get_ocupacoes(uuid, date, uuid) to authe
 
   const sqlPublicBooking = useMemo(() => {
     return `drop function if exists public.public_get_usuario_publico(text);
+drop function if exists public.public_get_servicos_publicos(uuid);
+drop function if exists public.public_get_funcionarios_publicos(uuid);
 
 alter table public.usuarios add column if not exists slug text;
 create unique index if not exists usuarios_slug_unique on public.usuarios (slug);
 
 alter table public.usuarios add column if not exists logo_url text;
+alter table public.usuarios add column if not exists instagram_url text;
+alter table public.usuarios add column if not exists tipo_negocio text;
 alter table public.usuarios add column if not exists public_primary_color text;
 alter table public.usuarios add column if not exists public_background_color text;
 alter table public.usuarios add column if not exists public_use_background_image boolean not null default false;
@@ -795,6 +799,7 @@ returns table (
   logo_url text,
   endereco text,
   telefone text,
+  instagram_url text,
   horario_inicio text,
   horario_fim text,
   dias_trabalho int[],
@@ -803,6 +808,7 @@ returns table (
   ativo boolean,
   tipo_conta text,
   plano text,
+  tipo_negocio text,
   public_primary_color text,
   public_background_color text,
   public_use_background_image boolean,
@@ -820,6 +826,7 @@ begin
     u.logo_url::text,
     u.endereco::text,
     u.telefone::text,
+    u.instagram_url::text,
     u.horario_inicio::text,
     u.horario_fim::text,
     u.dias_trabalho::int[],
@@ -828,6 +835,7 @@ begin
     u.ativo::boolean,
     u.tipo_conta::text,
     u.plano::text,
+    u.tipo_negocio::text,
     u.public_primary_color::text,
     u.public_background_color::text,
     u.public_use_background_image::boolean,
@@ -843,6 +851,7 @@ create or replace function public.public_get_servicos_publicos(p_usuario_id uuid
 returns table (
   id uuid,
   nome text,
+  descricao text,
   duracao_minutos int,
   preco numeric,
   cor text,
@@ -854,7 +863,7 @@ set search_path = public
 as $$
 begin
   return query
-  select s.id::uuid, s.nome::text, s.duracao_minutos::int, s.preco::numeric, s.cor::text, s.foto_url::text
+  select s.id::uuid, s.nome::text, s.descricao::text, s.duracao_minutos::int, s.preco::numeric, s.cor::text, s.foto_url::text
   from public.servicos s
   where s.usuario_id = p_usuario_id
     and s.ativo = true
@@ -923,7 +932,7 @@ declare
   v_now_min int;
   v_min_lead_min int := 120;
   v_step_min int := 30;
-  v_max_days int := 60;
+  v_max_days int := 15;
   v_tz text;
   v_today date;
 begin
@@ -1089,7 +1098,7 @@ declare
   v_created_id uuid;
   v_now_min int;
   v_min_lead_min int := 120;
-  v_max_days int := 60;
+  v_max_days int := 15;
   v_tz text;
   v_today date;
   v_limite_mes int;
@@ -1370,8 +1379,52 @@ before insert or update of foto_url on public.servicos
 for each row execute function public.servicos_enforce_foto_by_plano();`
   }, [])
 
+  const sqlServicosLimiteBasic = useMemo(() => {
+    return `create or replace function public.servicos_enforce_limite_by_plano()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_plano text;
+  v_count int;
+begin
+  if public.is_super_admin() then
+    return NEW;
+  end if;
+
+  select u.plano::text into v_plano
+  from public.usuarios u
+  where u.id = NEW.usuario_id;
+
+  v_plano := lower(coalesce(nullif(v_plano, ''), 'free'));
+  if v_plano in ('pro', 'team', 'enterprise') then
+    return NEW;
+  end if;
+
+  select count(*) into v_count
+  from public.servicos s
+  where s.usuario_id = NEW.usuario_id;
+
+  if coalesce(v_count, 0) >= 3 then
+    raise exception 'limite_servicos_atingido';
+  end if;
+
+  return NEW;
+end;
+$$;
+
+drop trigger if exists servicos_enforce_limite_by_plano on public.servicos;
+create trigger servicos_enforce_limite_by_plano
+before insert on public.servicos
+for each row execute function public.servicos_enforce_limite_by_plano();`
+  }, [])
+
   const sqlMultiUnidadesEnterprise = useMemo(() => {
-    return `create table if not exists public.unidades (
+    return `alter table public.usuarios add column if not exists tipo_negocio text;
+
+create table if not exists public.unidades (
   id uuid primary key default gen_random_uuid(),
   usuario_id uuid not null references public.usuarios(id) on delete cascade,
   nome text not null,
@@ -1453,6 +1506,7 @@ returns table (
   logo_url text,
   endereco text,
   telefone text,
+  instagram_url text,
   horario_inicio text,
   horario_fim text,
   dias_trabalho int[],
@@ -1461,6 +1515,7 @@ returns table (
   ativo boolean,
   tipo_conta text,
   plano text,
+  tipo_negocio text,
   public_primary_color text,
   public_background_color text,
   public_use_background_image boolean,
@@ -1496,6 +1551,7 @@ begin
     b.logo_url::text,
     coalesce(u.endereco::text, b.endereco::text) as endereco,
     coalesce(u.telefone::text, b.telefone::text) as telefone,
+    b.instagram_url::text,
     coalesce(u.horario_inicio::text, b.horario_inicio::text) as horario_inicio,
     coalesce(u.horario_fim::text, b.horario_fim::text) as horario_fim,
     coalesce(u.dias_trabalho::int[], b.dias_trabalho::int[]) as dias_trabalho,
@@ -1504,6 +1560,7 @@ begin
     b.ativo::boolean,
     b.tipo_conta::text,
     b.plano::text,
+    b.tipo_negocio::text,
     coalesce(u.public_primary_color::text, b.public_primary_color::text) as public_primary_color,
     coalesce(u.public_background_color::text, b.public_background_color::text) as public_background_color,
     coalesce(u.public_use_background_image::boolean, b.public_use_background_image::boolean) as public_use_background_image,
@@ -1617,7 +1674,7 @@ declare
   v_now_min int;
   v_min_lead_min int := 120;
   v_step_min int := 30;
-  v_max_days int := 60;
+  v_max_days int := 15;
   v_tz text;
   v_today date;
   v_unidade_ok boolean;
@@ -1640,12 +1697,12 @@ begin
   end if;
 
   select
-    coalesce(un.horario_inicio, u.horario_inicio) as horario_inicio,
-    coalesce(un.horario_fim, u.horario_fim) as horario_fim,
+    coalesce(un.horario_inicio::text, u.horario_inicio::text) as horario_inicio,
+    coalesce(un.horario_fim::text, u.horario_fim::text) as horario_fim,
     coalesce(un.dias_trabalho, u.dias_trabalho) as dias_trabalho,
-    coalesce(un.intervalo_inicio, u.intervalo_inicio) as intervalo_inicio,
-    coalesce(un.intervalo_fim, u.intervalo_fim) as intervalo_fim,
-    coalesce(un.timezone, u.timezone) as timezone
+    coalesce(un.intervalo_inicio::text, u.intervalo_inicio::text) as intervalo_inicio,
+    coalesce(un.intervalo_fim::text, u.intervalo_fim::text) as intervalo_fim,
+    coalesce(un.timezone::text, u.timezone::text) as timezone
   into v_base
   from public.usuarios u
   left join public.unidades un
@@ -1804,7 +1861,7 @@ declare
   v_created_id uuid;
   v_now_min int;
   v_min_lead_min int := 120;
-  v_max_days int := 60;
+  v_max_days int := 15;
   v_tz text;
   v_today date;
   v_limite_mes int;
@@ -1820,12 +1877,12 @@ begin
   v_uid := p_usuario_id;
 
   select
-    coalesce(un.horario_inicio, u.horario_inicio) as horario_inicio,
-    coalesce(un.horario_fim, u.horario_fim) as horario_fim,
+    coalesce(un.horario_inicio::text, u.horario_inicio::text) as horario_inicio,
+    coalesce(un.horario_fim::text, u.horario_fim::text) as horario_fim,
     coalesce(un.dias_trabalho, u.dias_trabalho) as dias_trabalho,
-    coalesce(un.intervalo_inicio, u.intervalo_inicio) as intervalo_inicio,
-    coalesce(un.intervalo_fim, u.intervalo_fim) as intervalo_fim,
-    coalesce(un.timezone, u.timezone) as timezone,
+    coalesce(un.intervalo_inicio::text, u.intervalo_inicio::text) as intervalo_inicio,
+    coalesce(un.intervalo_fim::text, u.intervalo_fim::text) as intervalo_fim,
+    coalesce(un.timezone::text, u.timezone::text) as timezone,
     u.limite_agendamentos_mes as limite_agendamentos_mes
   into v_base
   from public.usuarios u
@@ -2687,7 +2744,7 @@ $$;`
         />
 
         <SqlCard
-          title="SQL de Multi-unidades (ENTERPRISE)"
+          title="SQL de Multi-unidades (EMPRESA)"
           description="Use para criar filiais e habilitar links do tipo /agendar/:slug/:unidade."
           sql={sqlMultiUnidadesEnterprise}
         />
@@ -2701,6 +2758,12 @@ $$;`
         />
 
         <SqlCard title="SQL de fotos nos serviços (PRO+)" description="Use para liberar fotos de serviços apenas no plano PRO+." sql={sqlServicosFotosPro} />
+
+        <SqlCard
+          title="SQL de limite de serviços (BASIC)"
+          description="Use para limitar a criação de serviços a 3 no plano BASIC/FREE."
+          sql={sqlServicosLimiteBasic}
+        />
 
         <SqlCard title="SQL do WhatsApp (automação)" description="Use para habilitar QR Code, confirmação automática e lembretes." sql={sqlWhatsappAutomacao} />
 

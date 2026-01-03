@@ -280,7 +280,7 @@ export function FuncionariosPage() {
       }
     } else {
       if (limiteAtingido) {
-        setError('Limite de funcionários atingido para seu plano.')
+        setError('Limite de funcionários atingido. Ajuste a quantidade de profissionais em Pagamento.')
         setSaving(false)
         return
       }

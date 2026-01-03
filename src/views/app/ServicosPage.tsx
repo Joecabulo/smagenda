@@ -58,6 +58,17 @@ export function ServicosPage() {
   const [formOpen, setFormOpen] = useState(false)
   const [form, setForm] = useState<FormState>(() => toFormState(null))
 
+  const isPro = useMemo(() => {
+    const p = String(usuario?.plano ?? '').trim().toLowerCase()
+    return p === 'pro' || p === 'team' || p === 'enterprise'
+  }, [usuario?.plano])
+
+  const servicosLimite = isPro ? null : 3
+  const limiteServicosAtingido = useMemo(() => {
+    if (!servicosLimite) return false
+    return servicos.length >= servicosLimite
+  }, [servicos.length, servicosLimite])
+
   const canSubmit = useMemo(() => {
     const duracao = Number(form.duracao_minutos)
     const preco = Number(form.preco)
@@ -102,6 +113,10 @@ export function ServicosPage() {
   }
 
   const openCreate = () => {
+    if (limiteServicosAtingido) {
+      setError('Limite de serviços atingido. Para criar mais, faça upgrade no plano em Pagamento.')
+      return
+    }
     setForm(toFormState(null))
     setFormOpen(true)
   }
@@ -154,7 +169,7 @@ export function ServicosPage() {
     setSaving(true)
     setError(null)
 
-    const canUseFotos = usuario.plano === 'pro' || usuario.plano === 'team' || usuario.plano === 'enterprise'
+    const canUseFotos = isPro
 
     const payload: Record<string, unknown> = {
       nome: form.nome.trim(),
@@ -178,10 +193,18 @@ export function ServicosPage() {
         return
       }
     } else {
+      if (limiteServicosAtingido) {
+        setError('Limite de serviços atingido. Para criar mais, faça upgrade no plano em Pagamento.')
+        setSaving(false)
+        return
+      }
       const nextOrder = (servicos.at(-1)?.ordem ?? -1) + 1
       const { error: err } = await supabase.from('servicos').insert({ usuario_id: usuario.id, ordem: nextOrder, ...payload })
       if (err) {
-        setError(err.message)
+        const msg = err.message.toLowerCase().includes('limite_servicos_atingido')
+          ? 'Limite de serviços atingido. Para criar mais, faça upgrade no plano em Pagamento.'
+          : err.message
+        setError(msg)
         setSaving(false)
         return
       }
@@ -250,10 +273,17 @@ export function ServicosPage() {
             <div className="text-sm font-semibold text-slate-500">Meus Serviços</div>
             <div className="text-xl font-semibold text-slate-900">Gerencie serviços e preços</div>
           </div>
-          <Button onClick={openCreate}>+ Adicionar Serviço</Button>
+          <Button onClick={openCreate} disabled={limiteServicosAtingido}>
+            + Adicionar Serviço
+          </Button>
         </div>
 
         {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
+        {!isPro && servicosLimite ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            Plano BASIC: até {servicosLimite} serviços.
+          </div>
+        ) : null}
 
         {formOpen ? (
           <Card>

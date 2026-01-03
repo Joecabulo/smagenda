@@ -1,16 +1,20 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
-import { supabase } from '../../lib/supabase'
+import { formatBRMoney } from '../../lib/dates'
+import { supabase, supabaseEnv } from '../../lib/supabase'
 
 type UsuarioPublico = {
   id: string
   nome_negocio: string
   logo_url: string | null
+  tipo_negocio?: string | null
   endereco: string | null
   telefone: string | null
+  instagram_url?: string | null
   horario_inicio: string | null
   horario_fim: string | null
   dias_trabalho: number[] | null
@@ -38,6 +42,7 @@ function coerceHexColor(value: string | null | undefined, fallback: string) {
 type Servico = {
   id: string
   nome: string
+  descricao?: string | null
   duracao_minutos: number
   preco: number
   cor: string | null
@@ -58,15 +63,211 @@ function normalizePhone(value: string) {
   return value.replace(/[^0-9+]/g, '').trim()
 }
 
-function monthLabel(d: Date) {
-  const months = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
-  return `${months[d.getMonth()]} ${d.getFullYear()}`
+function resolvePublicLabels(tipoNegocio: string | null | undefined) {
+  const key = (tipoNegocio ?? '').trim().toLowerCase()
+  if (key === 'lava_jatos') return { servico: 'Lavagem', servicos: 'Lavagens', profissional: 'Lavador', profissionais: 'Lavadores' }
+  if (key === 'barbearia') return { servico: 'Serviço', servicos: 'Serviços', profissional: 'Barbeiro', profissionais: 'Barbeiros' }
+  if (key === 'salao') return { servico: 'Serviço', servicos: 'Serviços', profissional: 'Profissional', profissionais: 'Profissionais' }
+  if (key === 'estetica') return { servico: 'Procedimento', servicos: 'Procedimentos', profissional: 'Especialista', profissionais: 'Especialistas' }
+  if (key === 'odontologia') return { servico: 'Procedimento', servicos: 'Procedimentos', profissional: 'Dentista', profissionais: 'Dentistas' }
+  return { servico: 'Serviço', servicos: 'Serviços', profissional: 'Profissional', profissionais: 'Profissionais' }
 }
 
 function addDays(d: Date, days: number) {
   const x = new Date(d)
   x.setDate(x.getDate() + days)
   return x
+}
+
+function weekdayShortLabel(d: Date) {
+  const wd = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
+  return wd[d.getDay()] ?? ''
+}
+
+function formatShortDayMonth(d: Date) {
+  const dd = String(d.getDate()).padStart(2, '0')
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  return `${dd}/${mm}`
+}
+
+function toWhatsappNumber(value: string) {
+  const digits = String(value ?? '').replace(/[^0-9]/g, '')
+  if (!digits) return null
+  if (digits.startsWith('55')) return digits
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`
+  return digits
+}
+
+function toGoogleMapsLink(address: string) {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
+}
+
+function parseHHMMToMinutes(value: string | null | undefined) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  const parts = raw.split(':')
+  const hh = Number(parts[0])
+  const mm = Number(parts[1] ?? 0)
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null
+  return hh * 60 + mm
+}
+
+function normalizeInstagramUrl(value: string) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  if (raw.startsWith('http://') || raw.startsWith('https://')) return raw
+  if (raw.startsWith('@')) return `https://instagram.com/${raw.slice(1)}`
+  if (raw.includes('instagram.com/')) return `https://${raw.replace(/^https?:\/\//, '')}`
+  return `https://instagram.com/${raw}`
+}
+
+function rpcErrText(err: unknown) {
+  const e = err && typeof err === 'object' ? (err as Record<string, unknown>) : null
+  const msg = typeof e?.message === 'string' ? e.message.trim() : 'Erro'
+  const code = typeof e?.code === 'string' ? e.code.trim() : ''
+  const details = typeof e?.details === 'string' ? e.details.trim() : ''
+  const hint = typeof e?.hint === 'string' ? e.hint.trim() : ''
+  const parts = [msg]
+  if (code && !msg.includes(code)) parts.push(code)
+  if (details && details !== msg) parts.push(details)
+  if (hint) parts.push(hint)
+  return parts.filter(Boolean).join(' — ')
+}
+
+function shouldRetryWithoutUnidade(err: unknown) {
+  const lower = rpcErrText(err).toLowerCase()
+  const mentionsUnidadeArg = lower.includes('p_unidade_id')
+  const looksLikeSignatureMismatch = isSignatureMismatchText(lower)
+  return mentionsUnidadeArg && looksLikeSignatureMismatch
+}
+
+function shouldRetryWithoutFuncionario(err: unknown) {
+  const lower = rpcErrText(err).toLowerCase()
+  const mentionsFuncionarioArg = lower.includes('p_funcionario_id')
+  const looksLikeSignatureMismatch = isSignatureMismatchText(lower)
+  return mentionsFuncionarioArg && looksLikeSignatureMismatch
+}
+
+function isSignatureMismatchText(lower: string) {
+  return (
+    lower.includes('does not exist') ||
+    lower.includes('function') ||
+    lower.includes('rpc') ||
+    (lower.includes('schema cache') && lower.includes('could not find'))
+  )
+}
+
+async function callPublicRpc<T>(fnName: string, args: Record<string, unknown>) {
+  if (!supabaseEnv.ok) {
+    return { ok: false as const, errorText: `Supabase não configurado. Faltando: ${supabaseEnv.missing.join(', ')}` }
+  }
+
+  const base = supabaseEnv.values.VITE_SUPABASE_URL.replace(/\/+$/, '')
+  const key = supabaseEnv.values.VITE_SUPABASE_ANON_KEY
+  const url = `${base}/rest/v1/rpc/${fnName}`
+
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify(args),
+    })
+  } catch (e: unknown) {
+    return { ok: false as const, errorText: e instanceof Error ? e.message : 'Falha de rede' }
+  }
+
+  const raw = await res.text().catch(() => '')
+  const parsed: unknown = raw
+    ? (() => {
+        try {
+          return JSON.parse(raw) as unknown
+        } catch {
+          return raw
+        }
+      })()
+    : null
+
+  if (!res.ok) {
+    const obj = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+    const msg =
+      (typeof obj?.message === 'string' && obj.message.trim()) ||
+      (typeof obj?.error === 'string' && obj.error.trim()) ||
+      (typeof obj?.hint === 'string' && obj.hint.trim()) ||
+      `HTTP ${res.status}`
+    const details = typeof obj?.details === 'string' ? obj.details.trim() : ''
+    const code = typeof obj?.code === 'string' ? obj.code.trim() : ''
+    const parts = [msg]
+    if (code && !msg.includes(code)) parts.push(code)
+    if (details && details !== msg) parts.push(details)
+    return { ok: false as const, errorText: parts.filter(Boolean).join(' — ') }
+  }
+
+  return { ok: true as const, data: parsed as T }
+}
+
+async function callPublicRpcWithSignatureFallback<T>(
+  fnName: string,
+  args: Record<string, unknown>,
+  unidadeId: string | null
+): Promise<{ ok: true; data: T } | { ok: false; errorText: string }> {
+  const first = await callPublicRpc<T>(fnName, args)
+  if (first.ok) return first
+
+  const firstLower = first.errorText.toLowerCase()
+  if (!isSignatureMismatchText(firstLower)) return first
+
+  const hasUnidadeKey = Object.prototype.hasOwnProperty.call(args, 'p_unidade_id')
+  const hasFuncionarioKey = Object.prototype.hasOwnProperty.call(args, 'p_funcionario_id')
+
+  const stableKey = (o: Record<string, unknown>) => {
+    const keys = Object.keys(o).sort()
+    const ordered: Record<string, unknown> = {}
+    for (const k of keys) ordered[k] = o[k]
+    return JSON.stringify(ordered)
+  }
+
+  const withoutKey = (o: Record<string, unknown>, key: string) => {
+    const next: Record<string, unknown> = { ...o }
+    delete (next as Record<string, unknown>)[key]
+    return next
+  }
+
+  const seen = new Set<string>([stableKey(args)])
+  const variants: Record<string, unknown>[] = []
+
+  if (hasUnidadeKey) {
+    if (shouldRetryWithoutUnidade({ message: first.errorText })) variants.push(withoutKey(args, 'p_unidade_id'))
+  } else {
+    variants.push({ ...args, p_unidade_id: unidadeId ?? null })
+  }
+
+  if (hasFuncionarioKey) {
+    if (shouldRetryWithoutFuncionario({ message: first.errorText })) variants.push(withoutKey(args, 'p_funcionario_id'))
+  } else {
+    variants.push({ ...args, p_funcionario_id: null })
+  }
+
+  if (hasUnidadeKey && hasFuncionarioKey) {
+    if (shouldRetryWithoutUnidade({ message: first.errorText }) || shouldRetryWithoutFuncionario({ message: first.errorText })) {
+      variants.push(withoutKey(withoutKey(args, 'p_unidade_id'), 'p_funcionario_id'))
+    }
+  }
+
+  for (const v of variants) {
+    const key = stableKey(v)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const res = await callPublicRpc<T>(fnName, v)
+    if (res.ok) return res
+  }
+
+  return first
 }
 
 function toIsoDateLocal(d: Date) {
@@ -84,10 +285,16 @@ function formatIsoDateBR(iso: string) {
   return `${dd}/${mm}/${yyyy}`
 }
 
-type ModalStep = 'hora' | 'servico' | 'profissional' | 'confirmar'
-
 export function PublicBookingPage() {
   const { slug, unidadeSlug } = useParams()
+
+  const debugEnabled = useMemo(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('debug') === '1'
+    } catch {
+      return false
+    }
+  }, [])
 
   const [usuario, setUsuario] = useState<UsuarioPublico | null>(null)
   const [servicos, setServicos] = useState<Servico[]>([])
@@ -101,24 +308,27 @@ export function PublicBookingPage() {
   const [hora, setHora] = useState('')
   const [clienteNome, setClienteNome] = useState('')
   const [clienteTelefone, setClienteTelefone] = useState('')
+  const [clientePlaca, setClientePlaca] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [successId, setSuccessId] = useState<string | null>(null)
   const [logoFailed, setLogoFailed] = useState(false)
 
   const [modalOpen, setModalOpen] = useState(false)
-  const [modalStep, setModalStep] = useState<ModalStep>('hora')
 
-  const [monthCursor, setMonthCursor] = useState(() => {
-    const d = new Date()
-    d.setDate(1)
-    d.setHours(0, 0, 0, 0)
-    return d
-  })
+  const [step, setStep] = useState<'servico' | 'profissional' | 'quando'>('servico')
+
+  const servicoRef = useRef<HTMLDivElement | null>(null)
+  const profissionalRef = useRef<HTMLDivElement | null>(null)
+  const whenRef = useRef<HTMLDivElement | null>(null)
 
   const canChooseProfessional = useMemo(() => {
     const p = String(usuario?.plano ?? '').trim().toLowerCase()
-    return p === 'team' || p === 'enterprise'
+    return p === 'pro' || p === 'team' || p === 'enterprise'
   }, [usuario?.plano])
+
+  const labels = useMemo(() => resolvePublicLabels(usuario?.tipo_negocio ?? null), [usuario?.tipo_negocio])
+
+  const needsPlaca = useMemo(() => String(usuario?.tipo_negocio ?? '').trim().toLowerCase() === 'lava_jatos', [usuario?.tipo_negocio])
 
   const hasStaff = useMemo(() => canChooseProfessional && funcionarios.length > 0, [canChooseProfessional, funcionarios.length])
 
@@ -142,14 +352,21 @@ export function PublicBookingPage() {
       setError(null)
       setSuccessId(null)
 
+      const wantsUnidade = Boolean((unidadeSlug ?? '').trim())
       const userArgs: Record<string, unknown> = { p_slug: slug }
-      if (unidadeSlug) userArgs.p_unidade_slug = unidadeSlug
+      if (wantsUnidade) userArgs.p_unidade_slug = unidadeSlug
       const { data: userData, error: userErr } = await supabase.rpc('public_get_usuario_publico', userArgs).maybeSingle()
       if (userErr) {
         const msg = userErr.message
         const lower = msg.toLowerCase()
         const missingFn = lower.includes('public_get_usuario_publico') && (lower.includes('function') || lower.includes('rpc'))
-        setError(missingFn ? 'Configuração do Supabase incompleta: crie o SQL do link público (listar + agendar).' : msg)
+        setError(
+          missingFn
+            ? wantsUnidade
+              ? 'Configuração do Supabase incompleta: crie o SQL do link público e o SQL de Multi-unidades (EMPRESA).'
+              : 'Configuração do Supabase incompleta: crie o SQL do link público (listar + agendar).'
+            : msg
+        )
         setLoading(false)
         return
       }
@@ -181,10 +398,9 @@ export function PublicBookingPage() {
       setServicos(serviceList)
       if (serviceList.length > 0) setServicoId(serviceList[0].id)
 
-      const { data: staffData, error: staffErr } = await supabase.rpc('public_get_funcionarios_publicos', {
-        p_usuario_master_id: usuarioPublico.id,
-        p_unidade_id: unidadeId,
-      })
+      const staffArgs: Record<string, unknown> = { p_usuario_master_id: usuarioPublico.id }
+      if (unidadeId) staffArgs.p_unidade_id = unidadeId
+      const { data: staffData, error: staffErr } = await supabase.rpc('public_get_funcionarios_publicos', staffArgs)
       if (staffErr) {
         const msg = staffErr.message
         const lower = msg.toLowerCase()
@@ -210,11 +426,13 @@ export function PublicBookingPage() {
 
   const usuarioId = usuario?.id ?? null
 
-  const maxDays = 60
+  const maxDays = 15
   const minLeadMinutes = 120
 
   const [availableSlots, setAvailableSlots] = useState<string[]>([])
   const [slotsLoading, setSlotsLoading] = useState(false)
+
+  const [debugSlotsText, setDebugSlotsText] = useState<string | null>(null)
 
   const today = useMemo(() => {
     const d = new Date()
@@ -229,37 +447,55 @@ export function PublicBookingPage() {
     return new Set(base)
   }, [usuario?.dias_trabalho])
 
-  const calendarDays = useMemo(() => {
-    const first = new Date(monthCursor)
-    first.setDate(1)
-    first.setHours(0, 0, 0, 0)
-    const startOffset = first.getDay()
-    const start = new Date(first)
-    start.setDate(first.getDate() - startOffset)
-    const days: Date[] = []
-    for (let i = 0; i < 42; i += 1) {
-      days.push(addDays(start, i))
-    }
-    return { first, days }
-  }, [monthCursor])
+  const isDayDisabled = useCallback(
+    (d: Date) => {
+      const x = new Date(d)
+      x.setHours(0, 0, 0, 0)
+      if (x < today) return true
+      if (x > maxDate) return true
+      if (allowedWeekdays && !allowedWeekdays.has(x.getDay())) return true
+      return false
+    },
+    [allowedWeekdays, maxDate, today]
+  )
 
-  const isDayDisabled = (d: Date) => {
-    const x = new Date(d)
-    x.setHours(0, 0, 0, 0)
-    if (x < today) return true
-    if (x > maxDate) return true
-    if (allowedWeekdays && !allowedWeekdays.has(x.getDay())) return true
-    return false
-  }
+  const dateOptions = useMemo(() => {
+    const days: Date[] = []
+    const horizon = maxDays + 1
+    for (let i = 0; i < horizon; i += 1) {
+      const d = addDays(today, i)
+      if (d > maxDate) break
+      days.push(d)
+    }
+    return days
+  }, [maxDate, maxDays, today])
 
   useEffect(() => {
+    if (!usuario) return
+    if (!data) return
+    const current = new Date(`${data}T00:00:00`)
+    if (!Number.isFinite(current.getTime())) return
+    if (!isDayDisabled(current)) return
+    const next = dateOptions.find((d) => !isDayDisabled(d))
+    if (!next) return
+    const nextIso = toIsoDateLocal(next)
+    if (nextIso === data) return
+    setTimeout(() => setData(nextIso), 0)
+  }, [data, dateOptions, isDayDisabled, usuario])
+
+  useEffect(() => {
+    let alive = true
     const run = async () => {
       if (!usuarioId || !selectedServico || !data) {
         setAvailableSlots([])
+        setSlotsLoading(false)
+        if (debugEnabled) setDebugSlotsText(JSON.stringify({ ok: false, reason: 'missing_payload', usuarioId, servicoId: selectedServico?.id ?? null, data }, null, 2))
         return
       }
       if (hasStaff && !funcionarioId) {
         setAvailableSlots([])
+        setSlotsLoading(false)
+        if (debugEnabled) setDebugSlotsText(JSON.stringify({ ok: false, reason: 'missing_funcionario', usuarioId, data, servicoId: selectedServico.id }, null, 2))
         return
       }
 
@@ -267,17 +503,18 @@ export function PublicBookingPage() {
       setError(null)
       setHora('')
 
-      type SlotRow = { hora_inicio: string }
-
-      const { data: slotsData, error: slotsErr } = await supabase.rpc('public_get_slots_publicos', {
+      const slotsArgs: Record<string, unknown> = {
         p_usuario_id: usuarioId,
         p_data: data,
         p_servico_id: selectedServico.id,
         p_funcionario_id: hasStaff ? funcionarioId : null,
-        p_unidade_id: usuario?.unidade_id ?? null,
-      })
-      if (slotsErr) {
-        const msg = slotsErr.message
+      }
+      if (usuario?.unidade_id) slotsArgs.p_unidade_id = usuario.unidade_id
+
+      const slotsRes = await callPublicRpcWithSignatureFallback<unknown>('public_get_slots_publicos', slotsArgs, usuario?.unidade_id ?? null)
+      if (!alive) return
+      if (!slotsRes.ok) {
+        const msg = slotsRes.errorText
         const lower = msg.toLowerCase()
         const missingFn = lower.includes('public_get_slots_publicos') && (lower.includes('function') || lower.includes('rpc'))
         if (missingFn) {
@@ -294,21 +531,138 @@ export function PublicBookingPage() {
           setError(msg)
         }
         setSlotsLoading(false)
+        if (debugEnabled) {
+          const current = new Date(`${data}T00:00:00`)
+          const schedStartMin = parseHHMMToMinutes(usuario?.horario_inicio ?? null)
+          const schedEndMin = parseHHMMToMinutes(usuario?.horario_fim ?? null)
+          const ivStartMin = parseHHMMToMinutes(usuario?.intervalo_inicio ?? null)
+          const ivEndMin = parseHHMMToMinutes(usuario?.intervalo_fim ?? null)
+          const schedSpanMin = schedStartMin !== null && schedEndMin !== null ? schedEndMin - schedStartMin : null
+          const duracaoMin = selectedServico?.duracao_minutos ?? null
+          const snapshot = {
+            ok: false,
+            error: msg,
+            env: supabaseEnv.ok ? { url: supabaseEnv.values.VITE_SUPABASE_URL, anonKeyPrefix: `${supabaseEnv.values.VITE_SUPABASE_ANON_KEY.slice(0, 12)}…` } : { missing: supabaseEnv.missing },
+            route: { slug: slug ?? null, unidadeSlug: unidadeSlug ?? null },
+            payload: slotsArgs,
+            selected: {
+              servico: selectedServico ? { id: selectedServico.id, duracao_minutos: selectedServico.duracao_minutos, nome: selectedServico.nome } : null,
+              funcionario: hasStaff ? (selectedFuncionario ? { id: selectedFuncionario.id, nome: selectedFuncionario.nome_completo } : { id: funcionarioId || null }) : null,
+            },
+            rules: {
+              maxDays,
+              minLeadMinutes,
+              allowedWeekdays: Array.isArray(usuario?.dias_trabalho) ? usuario?.dias_trabalho : null,
+              isDayDisabled: Number.isFinite(current.getTime()) ? isDayDisabled(current) : null,
+              weekday: Number.isFinite(current.getTime()) ? current.getDay() : null,
+            },
+            base: {
+              usuario_id: usuario?.id ?? null,
+              unidade_id: usuario?.unidade_id ?? null,
+              horario_inicio: usuario?.horario_inicio ?? null,
+              horario_fim: usuario?.horario_fim ?? null,
+              intervalo_inicio: usuario?.intervalo_inicio ?? null,
+              intervalo_fim: usuario?.intervalo_fim ?? null,
+              timezone: (usuario as unknown as { timezone?: string | null } | null)?.timezone ?? null,
+            },
+            derived: {
+              schedStartMin,
+              schedEndMin,
+              ivStartMin,
+              ivEndMin,
+              schedSpanMin,
+              duracaoMin,
+              duracaoMaiorQueExpediente: schedSpanMin !== null && duracaoMin !== null ? duracaoMin > schedSpanMin : null,
+            },
+          }
+          setDebugSlotsText(JSON.stringify(snapshot, null, 2))
+        }
         return
       }
 
-      const list = ((slotsData ?? []) as unknown as SlotRow[]).map((r) => String(r.hora_inicio ?? '').trim()).filter(Boolean)
-      setAvailableSlots(list)
+      const raw = (slotsRes.data ?? []) as unknown
+      const rows = Array.isArray(raw) ? raw : []
+
+      const list = rows
+        .map((r) => {
+          if (typeof r === 'string') return r.trim()
+          if (!r || typeof r !== 'object') return ''
+          const obj = r as Record<string, unknown>
+          if (typeof obj.hora_inicio === 'string') return obj.hora_inicio.trim()
+          if (typeof obj.hora === 'string') return obj.hora.trim()
+          return ''
+        })
+        .filter(Boolean)
+
+      const uniqueSorted = Array.from(new Set(list)).sort((a, b) => a.localeCompare(b))
+      setAvailableSlots(uniqueSorted)
       setSlotsLoading(false)
+
+      if (debugEnabled) {
+        const current = new Date(`${data}T00:00:00`)
+        const schedStartMin = parseHHMMToMinutes(usuario?.horario_inicio ?? null)
+        const schedEndMin = parseHHMMToMinutes(usuario?.horario_fim ?? null)
+        const ivStartMin = parseHHMMToMinutes(usuario?.intervalo_inicio ?? null)
+        const ivEndMin = parseHHMMToMinutes(usuario?.intervalo_fim ?? null)
+        const schedSpanMin = schedStartMin !== null && schedEndMin !== null ? schedEndMin - schedStartMin : null
+        const duracaoMin = selectedServico?.duracao_minutos ?? null
+        const snapshot = {
+          ok: true,
+          env: supabaseEnv.ok ? { url: supabaseEnv.values.VITE_SUPABASE_URL, anonKeyPrefix: `${supabaseEnv.values.VITE_SUPABASE_ANON_KEY.slice(0, 12)}…` } : { missing: supabaseEnv.missing },
+          route: { slug: slug ?? null, unidadeSlug: unidadeSlug ?? null },
+          payload: slotsArgs,
+          selected: {
+            servico: selectedServico ? { id: selectedServico.id, duracao_minutos: selectedServico.duracao_minutos, nome: selectedServico.nome } : null,
+            funcionario: hasStaff ? (selectedFuncionario ? { id: selectedFuncionario.id, nome: selectedFuncionario.nome_completo } : { id: funcionarioId || null }) : null,
+          },
+          rules: {
+            maxDays,
+            minLeadMinutes,
+            allowedWeekdays: Array.isArray(usuario?.dias_trabalho) ? usuario?.dias_trabalho : null,
+            isDayDisabled: Number.isFinite(current.getTime()) ? isDayDisabled(current) : null,
+            weekday: Number.isFinite(current.getTime()) ? current.getDay() : null,
+          },
+          base: {
+            usuario_id: usuario?.id ?? null,
+            unidade_id: usuario?.unidade_id ?? null,
+            horario_inicio: usuario?.horario_inicio ?? null,
+            horario_fim: usuario?.horario_fim ?? null,
+            intervalo_inicio: usuario?.intervalo_inicio ?? null,
+            intervalo_fim: usuario?.intervalo_fim ?? null,
+            timezone: (usuario as unknown as { timezone?: string | null } | null)?.timezone ?? null,
+          },
+          derived: {
+            schedStartMin,
+            schedEndMin,
+            ivStartMin,
+            ivEndMin,
+            schedSpanMin,
+            duracaoMin,
+            duracaoMaiorQueExpediente: schedSpanMin !== null && duracaoMin !== null ? duracaoMin > schedSpanMin : null,
+          },
+          result: {
+            slots: uniqueSorted.length,
+            slots_preview: uniqueSorted.slice(0, 40),
+          },
+        }
+        setDebugSlotsText(JSON.stringify(snapshot, null, 2))
+      }
     }
     run().catch((e: unknown) => {
+      if (!alive) return
       setError(e instanceof Error ? e.message : 'Erro ao calcular horários')
       setSlotsLoading(false)
+      if (debugEnabled) setDebugSlotsText(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : 'Erro ao calcular horários' }, null, 2))
     })
-  }, [data, funcionarioId, hasStaff, maxDays, selectedServico, usuarioId, usuario?.unidade_id])
+
+    return () => {
+      alive = false
+    }
+  }, [data, debugEnabled, funcionarioId, hasStaff, isDayDisabled, maxDays, minLeadMinutes, selectedFuncionario, selectedServico, slug, unidadeSlug, usuario, usuarioId])
 
   const submit = async () => {
     if (!usuarioId || !selectedServico || !hora || !clienteNome.trim() || !clienteTelefone.trim()) return
+    if (needsPlaca && !clientePlaca.trim()) return
     setSubmitting(true)
     setError(null)
     setSuccessId(null)
@@ -320,18 +674,23 @@ export function PublicBookingPage() {
       return
     }
 
-    const { data: createdId, error: err } = await supabase.rpc('public_create_agendamento_publico', {
+    const placa = clientePlaca.trim().replace(/[^a-zA-Z0-9-]/g, '').toUpperCase()
+    const clienteNomeFinal = needsPlaca && placa ? `${clienteNome.trim()} (Placa: ${placa})` : clienteNome.trim()
+
+    const createArgs: Record<string, unknown> = {
       p_usuario_id: usuarioId,
       p_data: data,
       p_hora_inicio: hora,
       p_servico_id: selectedServico.id,
-      p_cliente_nome: clienteNome.trim(),
+      p_cliente_nome: clienteNomeFinal,
       p_cliente_telefone: telefone,
       p_funcionario_id: hasStaff ? funcionarioId : null,
-      p_unidade_id: usuario?.unidade_id ?? null,
-    })
-    if (err) {
-      const msg = err.message
+    }
+    if (usuario?.unidade_id) createArgs.p_unidade_id = usuario.unidade_id
+
+    const createRes = await callPublicRpcWithSignatureFallback<unknown>('public_create_agendamento_publico', createArgs, usuario?.unidade_id ?? null)
+    if (!createRes.ok) {
+      const msg = createRes.errorText
       const lower = msg.toLowerCase()
       const missingFn = lower.includes('public_create_agendamento_publico') && (lower.includes('function') || lower.includes('rpc'))
       if (missingFn) {
@@ -352,22 +711,105 @@ export function PublicBookingPage() {
       setSubmitting(false)
       return
     }
-    setSuccessId(createdId ? String(createdId) : 'ok')
+    setSuccessId(createRes.data ? String(createRes.data) : 'ok')
     setSubmitting(false)
     setModalOpen(false)
-    setModalStep('hora')
   }
 
-  const canSubmit = Boolean(usuarioId && selectedServico && hora && clienteNome.trim() && clienteTelefone.trim() && (!hasStaff || funcionarioId))
+  const canSubmit = Boolean(
+    usuarioId &&
+      selectedServico &&
+      hora &&
+      clienteNome.trim() &&
+      clienteTelefone.trim() &&
+      (!hasStaff || funcionarioId) &&
+      (!needsPlaca || clientePlaca.trim())
+  )
 
   const closeModal = () => {
     setModalOpen(false)
-    setModalStep('hora')
-    setClienteNome('')
-    setClienteTelefone('')
-    setHora('')
     setError(null)
   }
+
+  const summary = useMemo(() => {
+    const servicoNome = selectedServico?.nome ?? null
+    const servicoPreco = typeof selectedServico?.preco === 'number' ? selectedServico.preco : null
+    const profissionalNome = hasStaff ? (selectedFuncionario?.nome_completo ?? null) : null
+    const canContinue = Boolean(usuarioId && selectedServico && hora && (!hasStaff || funcionarioId))
+    const actionLabel = canContinue ? 'Continuar' : 'Escolher horário'
+    return { servicoNome, servicoPreco, profissionalNome, canContinue, actionLabel }
+  }, [funcionarioId, hasStaff, hora, selectedFuncionario?.nome_completo, selectedServico, usuarioId])
+
+  const openFromFooter = () => {
+    if (!usuario) return
+    if (!summary.canContinue) {
+      if (!selectedServico) {
+        setStep('servico')
+        setTimeout(() => {
+          servicoRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }, 0)
+        return
+      }
+      if (hasStaff && !funcionarioId) {
+        setStep('profissional')
+        setTimeout(() => {
+          profissionalRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }, 0)
+        return
+      }
+
+      setStep('quando')
+      setTimeout(() => {
+        whenRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, 0)
+      return
+    }
+    setModalOpen(true)
+  }
+
+  const whatsappHref = useMemo(() => {
+    const digits = toWhatsappNumber(usuario?.telefone ?? '')
+    return digits ? `https://wa.me/${digits}` : null
+  }, [usuario?.telefone])
+
+  const instagramHref = useMemo(() => {
+    return normalizeInstagramUrl(String(usuario?.instagram_url ?? ''))
+  }, [usuario?.instagram_url])
+
+  const visibleSteps = useMemo(() => {
+    return hasStaff ? (['servico', 'profissional', 'quando'] as const) : (['servico', 'quando'] as const)
+  }, [hasStaff])
+
+  const canGoStep = (target: 'servico' | 'profissional' | 'quando') => {
+    if (target === 'servico') return true
+    if (target === 'profissional') return Boolean(selectedServico && hasStaff)
+    if (target === 'quando') return Boolean(selectedServico && (!hasStaff || funcionarioId))
+    return false
+  }
+
+  const goStep = (target: 'servico' | 'profissional' | 'quando') => {
+    if (!canGoStep(target)) return
+    setStep(target)
+    setTimeout(() => {
+      if (target === 'servico') servicoRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      if (target === 'profissional') profissionalRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      if (target === 'quando') whenRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 0)
+  }
+
+  const slotGroups = useMemo(() => {
+    const manha: string[] = []
+    const tarde: string[] = []
+    const noite: string[] = []
+    for (const t of availableSlots) {
+      const hh = Number(String(t).split(':')[0])
+      if (!Number.isFinite(hh)) continue
+      if (hh < 12) manha.push(t)
+      else if (hh < 18) tarde.push(t)
+      else noite.push(t)
+    }
+    return { manha, tarde, noite }
+  }, [availableSlots])
 
   return (
     <div
@@ -386,115 +828,405 @@ export function PublicBookingPage() {
             <div className="text-2xl font-semibold text-slate-900">Agendar</div>
           </div>
 
-        {loading ? <div className="text-sm text-slate-600">Carregando…</div> : null}
-        {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
-        {successId ? (
-          <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">Agendamento criado.</div>
-        ) : null}
+          {loading ? <div className="text-sm text-slate-600">Carregando…</div> : null}
+          {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
+          {successId ? (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">Agendamento criado.</div>
+          ) : null}
 
           {usuario ? (
             <Card>
-              <div className="p-6 space-y-2">
-                {usuario.logo_url && !logoFailed ? (
-                  <div className="flex justify-center">
-                    <img
-                      src={usuario.logo_url}
-                      alt={usuario.nome_negocio}
-                      className="h-24 w-auto max-w-full rounded-2xl object-contain border border-slate-200"
-                      onError={() => setLogoFailed(true)}
-                    />
+              <div className="overflow-hidden rounded-xl">
+                <div
+                  className="h-24"
+                  style={
+                    usuario.public_use_background_image && usuario.public_background_image_url
+                      ? { backgroundImage: `url(${usuario.public_background_image_url})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+                      : {
+                          backgroundImage: `linear-gradient(135deg, ${primaryColor} 0%, #0b1220 100%)`,
+                        }
+                  }
+                />
+                <div className="px-5 pb-5">
+                  <div className="-mt-10 flex items-end gap-3">
+                    {usuario.logo_url && !logoFailed ? (
+                      <img
+                        src={usuario.logo_url}
+                        alt={usuario.nome_negocio}
+                        className="h-16 w-16 rounded-full border-2 border-white object-cover shadow-sm"
+                        onError={() => setLogoFailed(true)}
+                      />
+                    ) : (
+                      <div className="h-16 w-16 rounded-full border-2 border-white bg-white/70 shadow-sm" />
+                    )}
+                    <div className="min-w-0">
+                      <div className="text-lg font-semibold text-slate-900 truncate">{usuario.nome_negocio}</div>
+                      {usuario.unidade_nome ? <div className="text-xs text-slate-600 truncate">{usuario.unidade_nome}</div> : null}
+                    </div>
                   </div>
-                ) : null}
-                <div className="text-lg font-semibold text-slate-900 text-center">{usuario.nome_negocio}</div>
-                {usuario.endereco ? <div className="text-sm text-slate-600">📍 {usuario.endereco}</div> : null}
-                {usuario.telefone ? <div className="text-sm text-slate-600">📱 {usuario.telefone}</div> : null}
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Badge tone="green">Agendamento online</Badge>
+                    {usuario.endereco ? <Badge>Endereço</Badge> : null}
+                    {usuario.telefone && whatsappHref ? (
+                      <a href={whatsappHref} target="_blank" rel="noreferrer noopener" className="inline-flex">
+                        <Badge>WhatsApp</Badge>
+                      </a>
+                    ) : usuario.telefone ? (
+                      <Badge>WhatsApp</Badge>
+                    ) : null}
+                    {instagramHref ? (
+                      <a href={instagramHref} target="_blank" rel="noreferrer noopener" className="inline-flex">
+                        <Badge>Instagram</Badge>
+                      </a>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-4 space-y-2">
+                    {usuario.endereco ? (
+                      <a
+                        className="block text-sm text-slate-700 underline underline-offset-2"
+                        href={toGoogleMapsLink(usuario.endereco)}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                      >
+                        {usuario.endereco}
+                      </a>
+                    ) : null}
+                  </div>
+                </div>
               </div>
             </Card>
           ) : null}
 
           {usuario ? (
             <Card>
-              <div className="p-6 space-y-4">
-                <div className="text-sm font-semibold text-slate-900">Escolha o dia</div>
-
-                <div className="rounded-xl border border-slate-200 bg-white">
-                  <div className="flex items-center justify-between px-3 py-2 border-b border-slate-100">
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        const prev = new Date(monthCursor)
-                        prev.setMonth(prev.getMonth() - 1)
-                        prev.setDate(1)
-                        prev.setHours(0, 0, 0, 0)
-                        setMonthCursor(prev)
-                      }}
-                    >
-                      ‹
-                    </Button>
-                    <div className="text-sm font-semibold text-slate-900">{monthLabel(monthCursor)}</div>
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        const next = new Date(monthCursor)
-                        next.setMonth(next.getMonth() + 1)
-                        next.setDate(1)
-                        next.setHours(0, 0, 0, 0)
-                        setMonthCursor(next)
-                      }}
-                    >
-                      ›
-                    </Button>
-                  </div>
-
-                  <div className="grid grid-cols-7 gap-1 p-2 text-xs text-slate-600">
-                    {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map((w) => (
-                      <div key={w} className="text-center py-1">
-                        {w}
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="grid grid-cols-7 gap-1 px-2 pb-2">
-                    {calendarDays.days.map((dObj) => {
-                      const inMonth = dObj.getMonth() === calendarDays.first.getMonth()
-                      const disabled = isDayDisabled(dObj)
-                      const iso = toIsoDateLocal(dObj)
-                      return (
-                        <button
-                          key={iso}
-                          type="button"
-                          disabled={disabled}
-                          onClick={() => {
-                            setError(null)
-                            setSuccessId(null)
-                            setHora('')
-                            setData(iso)
-                            setModalOpen(true)
-                            setModalStep('hora')
-                          }}
-                          className={[
-                            'h-10 rounded-lg border text-sm font-medium',
-                            disabled
-                              ? 'opacity-40 cursor-not-allowed bg-white border-slate-200 text-slate-500'
-                              : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
-                          ].join(' ')}
-                          style={data === iso && !disabled ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : undefined}
-                        >
-                          <span className={inMonth ? '' : 'text-slate-400'}>{dObj.getDate()}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-
-                <div className="text-xs text-slate-600">
-                  Janela de agendamento: hoje até {maxDays} dias. Antecedência mínima: {Math.round(minLeadMinutes / 60)}h.
+              <div className="p-4 space-y-4">
+                <div className="flex gap-2">
+                  {visibleSteps.map((s) => {
+                    const active = step === s
+                    const enabled = canGoStep(s)
+                    const label =
+                      s === 'servico'
+                        ? `1. ${labels.servico}`
+                        : s === 'profissional'
+                          ? `2. ${labels.profissional}`
+                          : `${hasStaff ? '3' : '2'}. Quando`
+                    return (
+                      <button
+                        key={s}
+                        type="button"
+                        disabled={!enabled}
+                        onClick={() => goStep(s)}
+                        className={[
+                          'flex-1 rounded-lg border px-3 py-2 text-sm font-medium',
+                          enabled ? 'cursor-pointer' : 'opacity-40 cursor-not-allowed',
+                          active ? 'text-white' : 'bg-white border-slate-200 text-slate-700',
+                        ].join(' ')}
+                        style={active ? { backgroundColor: primaryColor, borderColor: primaryColor } : undefined}
+                      >
+                        {label}
+                      </button>
+                    )
+                  })}
                 </div>
               </div>
             </Card>
+          ) : null}
+
+          {usuario ? (
+            <div ref={servicoRef} className="space-y-3">
+              <div className="text-sm font-semibold text-slate-900">1) {labels.servico}</div>
+              {servicos.length === 0 ? (
+                <div className="text-sm text-slate-600">Sem {labels.servicos.toLowerCase()} disponíveis.</div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {servicos.map((s) => {
+                    const selected = servicoId === s.id
+                    const hasPreco = typeof s.preco === 'number'
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => {
+                          setError(null)
+                          setSuccessId(null)
+                          setHora('')
+                          setServicoId(s.id)
+                          const next = hasStaff ? 'profissional' : 'quando'
+                          setStep(next)
+                          setTimeout(() => {
+                            if (next === 'profissional') profissionalRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                            if (next === 'quando') whenRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                          }, 0)
+                        }}
+                        className={[
+                          'rounded-2xl border p-4 text-left transition',
+                          selected ? 'text-white' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
+                        ].join(' ')}
+                        style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor } : undefined}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-start gap-3 min-w-0">
+                            {s.foto_url ? (
+                              <img
+                                src={s.foto_url}
+                                alt={s.nome}
+                                className="h-14 w-14 rounded-xl object-cover border border-slate-200"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className={['h-14 w-14 rounded-xl border border-slate-200', selected ? 'bg-white/20' : 'bg-slate-50'].join(' ')} />
+                            )}
+                            <div className="min-w-0">
+                              <div className="text-sm font-semibold truncate">{s.nome}</div>
+                              {s.descricao ? <div className={selected ? 'mt-1 text-xs text-white/90' : 'mt-1 text-xs text-slate-600'}>{s.descricao}</div> : null}
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <span
+                                  className={[
+                                    'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium',
+                                    selected ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-700',
+                                  ].join(' ')}
+                                >
+                                  {s.duracao_minutos} min
+                                </span>
+                                {hasPreco ? (
+                                  <span
+                                    className={[
+                                      'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium',
+                                      selected ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-700',
+                                    ].join(' ')}
+                                  >
+                                    {formatBRMoney(s.preco)}
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                          </div>
+                          <div className={['shrink-0 rounded-full px-3 py-1 text-xs font-semibold', selected ? 'bg-white/20 text-white' : 'bg-slate-900 text-white'].join(' ')}>
+                            {selected ? 'Selecionado' : 'Selecionar'}
+                          </div>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {usuario && hasStaff && step !== 'servico' ? (
+            <div ref={profissionalRef} className="space-y-3">
+              <div className="text-sm font-semibold text-slate-900">2) {labels.profissional}</div>
+              {funcionarios.length === 0 ? (
+                <div className="text-sm text-slate-600">Sem {labels.profissionais.toLowerCase()} disponíveis.</div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {funcionarios.map((f) => {
+                    const selected = funcionarioId === f.id
+                    return (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => {
+                          setError(null)
+                          setSuccessId(null)
+                          setHora('')
+                          setFuncionarioId(f.id)
+                          setStep('quando')
+                          setTimeout(() => {
+                            whenRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                          }, 0)
+                        }}
+                        className={[
+                          'rounded-2xl border p-4 text-left transition',
+                          selected ? 'text-white' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
+                        ].join(' ')}
+                        style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor } : undefined}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold truncate">{f.nome_completo}</div>
+                          <div className={['shrink-0 rounded-full px-3 py-1 text-xs font-semibold', selected ? 'bg-white/20 text-white' : 'bg-slate-900 text-white'].join(' ')}>
+                            {selected ? 'Selecionado' : 'Selecionar'}
+                          </div>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {usuario && step === 'quando' ? (
+            <div ref={whenRef} className="space-y-3">
+              <div className="text-sm font-semibold text-slate-900">{hasStaff ? '3' : '2'}) Quando</div>
+              <Card>
+                <div className="p-4 space-y-4">
+                  <div>
+                    <div className="text-xs font-semibold tracking-wide text-slate-500">Data</div>
+                    <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+                      {dateOptions.map((dObj) => {
+                        const iso = toIsoDateLocal(dObj)
+                        const disabled = isDayDisabled(dObj)
+                        const selected = data === iso && !disabled
+                        return (
+                          <button
+                            key={iso}
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => {
+                              setError(null)
+                              setSuccessId(null)
+                              setHora('')
+                              setData(iso)
+                              setStep('quando')
+                            }}
+                            className={[
+                              'min-w-[4.5rem] rounded-xl border px-3 py-2 text-left',
+                              disabled ? 'opacity-40 cursor-not-allowed bg-white border-slate-200 text-slate-500' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
+                            ].join(' ')}
+                            style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : undefined}
+                          >
+                            <div className={['text-xs font-semibold', selected ? 'text-white/90' : 'text-slate-600'].join(' ')}>{weekdayShortLabel(dObj)}</div>
+                            <div className="text-sm font-semibold">{formatShortDayMonth(dObj)}</div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                    <div className="mt-2 text-xs text-slate-600">
+                      Janela de agendamento: hoje até {maxDays} dias. Antecedência mínima: {Math.round(minLeadMinutes / 60)}h.
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-semibold tracking-wide text-slate-500">Horário</div>
+                    {!selectedServico ? (
+                      <div className="mt-2 text-sm text-slate-600">Selecione um {labels.servico.toLowerCase()}.</div>
+                    ) : hasStaff && !selectedFuncionario ? (
+                      <div className="mt-2 text-sm text-slate-600">Selecione um {labels.profissional.toLowerCase()}.</div>
+                    ) : slotsLoading ? (
+                      <div className="mt-2 text-sm text-slate-600">Buscando horários…</div>
+                    ) : availableSlots.length === 0 ? (
+                      <div className="mt-2 text-sm text-slate-600">Sem horários disponíveis.</div>
+                    ) : (
+                      <div className="mt-3 space-y-4">
+                        {slotGroups.manha.length > 0 ? (
+                          <div className="space-y-2">
+                            <div className="text-xs font-semibold text-slate-700">Manhã</div>
+                            <div className="grid grid-cols-3 gap-2">
+                              {slotGroups.manha.map((t) => {
+                                const selected = hora === t
+                                return (
+                                  <button
+                                    key={t}
+                                    type="button"
+                                    onClick={() => setHora(t)}
+                                    className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
+                                    style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
+                                  >
+                                    {t}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {slotGroups.tarde.length > 0 ? (
+                          <div className="space-y-2">
+                            <div className="text-xs font-semibold text-slate-700">Tarde</div>
+                            <div className="grid grid-cols-3 gap-2">
+                              {slotGroups.tarde.map((t) => {
+                                const selected = hora === t
+                                return (
+                                  <button
+                                    key={t}
+                                    type="button"
+                                    onClick={() => setHora(t)}
+                                    className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
+                                    style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
+                                  >
+                                    {t}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {slotGroups.noite.length > 0 ? (
+                          <div className="space-y-2">
+                            <div className="text-xs font-semibold text-slate-700">Noite</div>
+                            <div className="grid grid-cols-3 gap-2">
+                              {slotGroups.noite.map((t) => {
+                                const selected = hora === t
+                                return (
+                                  <button
+                                    key={t}
+                                    type="button"
+                                    onClick={() => setHora(t)}
+                                    className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
+                                    style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
+                                  >
+                                    {t}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+
+                    {debugEnabled && debugSlotsText ? (
+                      <div className="mt-4">
+                        <Card>
+                          <div className="p-4 space-y-2">
+                            <div className="text-xs font-semibold tracking-wide text-slate-500">Debug (slots)</div>
+                            <pre className="text-[11px] leading-4 text-slate-700 whitespace-pre-wrap break-words font-mono">{debugSlotsText}</pre>
+                          </div>
+                        </Card>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </Card>
+            </div>
           ) : null}
         </div>
       </div>
+
+      {usuario && !modalOpen && !successId ? (
+        <div className="fixed bottom-0 left-0 right-0 z-40">
+          <div className="mx-auto max-w-xl px-4 pb-4">
+            <div className="rounded-2xl border border-slate-200 bg-white/95 backdrop-blur p-4 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold tracking-wide text-slate-500">Resumo do agendamento</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-900 truncate">
+                    {formatIsoDateBR(data)} {hora ? `• ${hora}` : ''}
+                  </div>
+                  <div className="mt-1 text-xs text-slate-700 truncate">
+                    {labels.servico}: {summary.servicoNome ?? '—'}
+                    {summary.servicoPreco !== null ? ` • ${formatBRMoney(summary.servicoPreco)}` : ''}
+                  </div>
+                  {hasStaff ? (
+                    <div className="mt-1 text-xs text-slate-700 truncate">
+                      {labels.profissional}: {summary.profissionalNome ?? '—'}
+                    </div>
+                  ) : null}
+                </div>
+                <Button onClick={openFromFooter} style={{ backgroundColor: primaryColor, borderColor: primaryColor }}>
+                  {summary.actionLabel}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {usuario && !modalOpen && !successId ? <div className="h-28" /> : null}
 
       {modalOpen && usuario ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -514,212 +1246,49 @@ export function PublicBookingPage() {
 
                 {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
 
-                {modalStep === 'hora' ? (
-                  <div className="space-y-4">
+                <div className="space-y-4">
+                  <div className="text-sm font-semibold text-slate-900">Confirmar agendamento</div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-semibold text-slate-900">1) Horário</div>
-                      <div className="flex gap-2">
-                        <Button variant="secondary" onClick={() => setModalStep('servico')}>
-                          Serviço
-                        </Button>
-                        {hasStaff ? (
-                          <Button variant="secondary" onClick={() => setModalStep('profissional')}>
-                            Profissional
-                          </Button>
-                        ) : null}
-                      </div>
+                      <div>Dia</div>
+                      <div className="font-semibold">{formatIsoDateBR(data)}</div>
                     </div>
-
-                    {!selectedServico ? (
-                      <div className="text-sm text-slate-600">Sem serviços disponíveis.</div>
-                    ) : hasStaff && !selectedFuncionario ? (
-                      <div className="text-sm text-slate-600">Selecione um profissional.</div>
-                    ) : slotsLoading ? (
-                      <div className="text-sm text-slate-600">Buscando horários…</div>
-                    ) : availableSlots.length === 0 ? (
-                      <div className="text-sm text-slate-600">Sem horários disponíveis.</div>
-                    ) : (
-                      <div className="flex flex-wrap gap-2">
-                        {availableSlots.map((t) => {
-                          const selected = hora === t
-                          return (
-                            <button
-                              key={t}
-                              type="button"
-                              onClick={() => setHora(t)}
-                              className={['rounded-lg px-3 py-2 text-sm font-medium border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(
-                                ' '
-                              )}
-                              style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
-                            >
-                              {t}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    )}
-
-                    <div className="flex justify-end">
-                      <Button
-                        onClick={() => setModalStep('servico')}
-                        disabled={!hora}
-                        style={{ backgroundColor: primaryColor, borderColor: primaryColor }}
-                      >
-                        Avançar
-                      </Button>
+                    <div className="flex items-center justify-between gap-2">
+                      <div>Hora</div>
+                      <div className="font-semibold">{hora || '—'}</div>
                     </div>
-                  </div>
-                ) : null}
-
-                {modalStep === 'servico' ? (
-                  <div className="space-y-4">
-                    <div className="text-sm font-semibold text-slate-900">2) Serviço</div>
-                    {servicos.length === 0 ? (
-                      <div className="text-sm text-slate-600">Sem serviços disponíveis.</div>
-                    ) : (
-                      <div className="grid grid-cols-1 gap-2">
-                        {servicos.map((s) => {
-                          const selected = servicoId === s.id
-                          return (
-                            <button
-                              key={s.id}
-                              type="button"
-                              onClick={() => {
-                                setError(null)
-                                setSuccessId(null)
-                                setHora('')
-                                setServicoId(s.id)
-                                setModalStep('hora')
-                              }}
-                              className={[
-                                'rounded-xl border p-3 text-left',
-                                selected ? 'text-white' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
-                              ].join(' ')}
-                              style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor } : undefined}
-                            >
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="flex items-center gap-3 min-w-0">
-                                  {s.foto_url ? (
-                                    <img
-                                      src={s.foto_url}
-                                      alt={s.nome}
-                                      className="h-12 w-12 rounded-lg object-cover border border-slate-200"
-                                      loading="lazy"
-                                    />
-                                  ) : null}
-                                  <div className="min-w-0">
-                                    <div className="text-sm font-semibold truncate">{s.nome}</div>
-                                    <div className={selected ? 'text-xs text-white/90' : 'text-xs text-slate-600'}>{s.duracao_minutos} min</div>
-                                  </div>
-                                </div>
-                              </div>
-                            </button>
-                          )
-                        })}
-                      </div>
-                    )}
-
-                    <div className="flex justify-between">
-                      <Button variant="secondary" onClick={() => setModalStep('hora')}>
-                        Voltar
-                      </Button>
-                      <Button
-                        onClick={() => setModalStep(hasStaff ? 'profissional' : 'confirmar')}
-                        disabled={!hora || !selectedServico}
-                        style={{ backgroundColor: primaryColor, borderColor: primaryColor }}
-                      >
-                        Avançar
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-
-                {modalStep === 'profissional' ? (
-                  <div className="space-y-4">
-                    <div className="text-sm font-semibold text-slate-900">3) Profissional</div>
-                    {funcionarios.length === 0 ? (
-                      <div className="text-sm text-slate-600">Sem profissionais disponíveis.</div>
-                    ) : (
-                      <div className="grid grid-cols-1 gap-2">
-                        {funcionarios.map((f) => {
-                          const selected = funcionarioId === f.id
-                          return (
-                            <button
-                              key={f.id}
-                              type="button"
-                              onClick={() => {
-                                setError(null)
-                                setSuccessId(null)
-                                setHora('')
-                                setFuncionarioId(f.id)
-                                setModalStep('hora')
-                              }}
-                              className={[
-                                'rounded-xl border p-3 text-left',
-                                selected ? 'text-white' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
-                              ].join(' ')}
-                              style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor } : undefined}
-                            >
-                              <div className="text-sm font-semibold">{f.nome_completo}</div>
-                            </button>
-                          )
-                        })}
-                      </div>
-                    )}
-
-                    <div className="flex justify-between">
-                      <Button variant="secondary" onClick={() => setModalStep('servico')}>
-                        Voltar
-                      </Button>
-                      <Button
-                        onClick={() => setModalStep('confirmar')}
-                        disabled={!hora || (hasStaff && !funcionarioId)}
-                        style={{ backgroundColor: primaryColor, borderColor: primaryColor }}
-                      >
-                        Avançar
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-
-                {modalStep === 'confirmar' ? (
-                  <div className="space-y-4">
-                    <div className="text-sm font-semibold text-slate-900">{hasStaff ? '4' : '3'}) Confirmação</div>
-
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                    {needsPlaca && clientePlaca.trim() ? (
                       <div className="flex items-center justify-between gap-2">
-                        <div>Dia</div>
-                        <div className="font-semibold">{formatIsoDateBR(data)}</div>
+                        <div>Placa</div>
+                        <div className="font-semibold">{clientePlaca.trim().replace(/[^a-zA-Z0-9-]/g, '').toUpperCase()}</div>
                       </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <div>Hora</div>
-                        <div className="font-semibold">{hora || '—'}</div>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <div>Serviço</div>
-                        <div className="font-semibold">{selectedServico?.nome ?? '—'}</div>
-                      </div>
-                      {hasStaff ? (
-                        <div className="flex items-center justify-between gap-2">
-                          <div>Profissional</div>
-                          <div className="font-semibold">{selectedFuncionario?.nome_completo ?? '—'}</div>
-                        </div>
-                      ) : null}
+                    ) : null}
+                    <div className="flex items-center justify-between gap-2">
+                      <div>{labels.servico}</div>
+                      <div className="font-semibold">{selectedServico?.nome ?? '—'}</div>
                     </div>
-
-                    <Input label="Nome" value={clienteNome} onChange={(e) => setClienteNome(e.target.value)} />
-                    <Input label="WhatsApp" value={clienteTelefone} onChange={(e) => setClienteTelefone(e.target.value)} />
-
-                    <div className="flex justify-between">
-                      <Button variant="secondary" onClick={() => setModalStep(hasStaff ? 'profissional' : 'servico')}>
-                        Voltar
-                      </Button>
-                      <Button onClick={submit} disabled={!canSubmit || submitting} style={{ backgroundColor: primaryColor, borderColor: primaryColor }}>
-                        Confirmar
-                      </Button>
-                    </div>
+                    {hasStaff ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <div>{labels.profissional}</div>
+                        <div className="font-semibold">{selectedFuncionario?.nome_completo ?? '—'}</div>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
+
+                  <Input label="Nome" value={clienteNome} onChange={(e) => setClienteNome(e.target.value)} />
+                  <Input label="WhatsApp" value={clienteTelefone} onChange={(e) => setClienteTelefone(e.target.value)} />
+                  {needsPlaca ? <Input label="Placa do carro" value={clientePlaca} onChange={(e) => setClientePlaca(e.target.value)} /> : null}
+
+                  <div className="flex justify-between">
+                    <Button variant="secondary" onClick={closeModal}>
+                      Voltar
+                    </Button>
+                    <Button onClick={submit} disabled={!canSubmit || submitting} style={{ backgroundColor: primaryColor, borderColor: primaryColor }}>
+                      {submitting ? 'Confirmando…' : 'Confirmar'}
+                    </Button>
+                  </div>
+                </div>
               </div>
             </Card>
           </div>

@@ -96,9 +96,12 @@ export function OnboardingPage() {
         const msg = e instanceof Error ? e.message : 'Falha ao enviar logo'
         const lower = msg.toLowerCase()
         const missingBucket = lower.includes('bucket') || lower.includes('not found')
+        const rls = lower.includes('row-level security') || lower.includes('row level security')
         setError(
           missingBucket
             ? 'Configuração do Supabase incompleta: crie o bucket "logos" no Storage e habilite leitura pública + upload do próprio usuário.'
+            : rls
+              ? 'Sem permissão para enviar ao Storage. Execute o SQL do Storage (logos) em /admin/configuracoes.'
             : msg
         )
         setSubmitting(false)
@@ -118,7 +121,10 @@ export function OnboardingPage() {
       })
       .eq('id', usuarioId)
     if (updateError) {
-      setError(updateError.message)
+      const msg = updateError.message
+      const lower = msg.toLowerCase()
+      const rls = lower.includes('row-level security') || lower.includes('row level security')
+      setError(rls ? 'Sem permissão para atualizar seu perfil (RLS). Execute o SQL de políticas (Usuário / Funcionário) em /admin/configuracoes.' : msg)
       setSubmitting(false)
       return
     }

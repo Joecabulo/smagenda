@@ -19,6 +19,7 @@ type Cliente = {
   status_pagamento: string
   ativo: boolean
   limite_funcionarios: number | null
+  limite_agendamentos_mes?: number | null
 }
 
 type Funcionario = {
@@ -71,14 +72,30 @@ async function callFn(path: string, body: unknown): Promise<FnResult> {
   return { ok: true, status: res.status, body: parsed }
 }
 
-const planoOptions = ['free', 'basic', 'pro', 'team', 'enterprise']
+function normalizePlanoToTwoPlans(planoRaw: string) {
+  const p = String(planoRaw ?? '').trim().toLowerCase()
+  if (p === 'team') return 'pro'
+  if (p === 'enterprise') return 'enterprise'
+  if (p === 'basic' || p === 'pro' || p === 'free') return p
+  return 'basic'
+}
+
+function normalizePlanoLabel(planoRaw: string) {
+  const p = String(planoRaw ?? '').trim().toLowerCase()
+  if (p === 'enterprise') return 'EMPRESA'
+  if (p === 'pro' || p === 'team') return 'PRO'
+  if (p === 'basic') return 'BASIC'
+  if (p === 'free') return 'FREE'
+  return planoRaw
+}
+
+const planoOptions = ['free', 'basic', 'pro', 'enterprise']
 const statusOptions = ['ativo', 'inadimplente', 'cancelado', 'trial', 'suspenso']
 
 const planoDefaultLimite: Record<string, number | null> = {
   free: 1,
   basic: 1,
-  pro: 3,
-  team: 5,
+  pro: 8,
   enterprise: null,
 }
 
@@ -97,6 +114,7 @@ export function AdminClienteDetalhesPage() {
   const [statusPagamento, setStatusPagamento] = useState('')
   const [ativo, setAtivo] = useState(true)
   const [limiteFuncionarios, setLimiteFuncionarios] = useState('')
+  const [limiteAgendamentosMes, setLimiteAgendamentosMes] = useState('')
   const [creatingFuncionario, setCreatingFuncionario] = useState(false)
   const [funcFormOpen, setFuncFormOpen] = useState(false)
   const [funcNome, setFuncNome] = useState('')
@@ -106,11 +124,17 @@ export function AdminClienteDetalhesPage() {
   const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null)
   const [creatingCheckout, setCreatingCheckout] = useState(false)
   const [refreshingPagamento, setRefreshingPagamento] = useState(false)
+  const [checkoutFuncionariosTotal, setCheckoutFuncionariosTotal] = useState<number>(1)
 
   const limiteParsed = useMemo(() => {
     const n = limiteFuncionarios.trim() === '' ? null : Number(limiteFuncionarios)
     return Number.isNaN(n as number) ? null : n
   }, [limiteFuncionarios])
+
+  const limiteAgMesParsed = useMemo(() => {
+    const n = limiteAgendamentosMes.trim() === '' ? null : Number(limiteAgendamentosMes)
+    return Number.isNaN(n as number) ? null : n
+  }, [limiteAgendamentosMes])
 
   const limiteAtingido = useMemo(() => {
     if (!cliente) return false
@@ -130,7 +154,7 @@ export function AdminClienteDetalhesPage() {
 
       const { data, error: err } = await supabase
         .from('usuarios')
-        .select('id,nome_completo,nome_negocio,slug,email,telefone,plano,status_pagamento,ativo,limite_funcionarios')
+        .select('id,nome_completo,nome_negocio,slug,email,telefone,plano,status_pagamento,ativo,limite_funcionarios,limite_agendamentos_mes')
         .eq('id', id)
         .maybeSingle()
       if (err) {
@@ -141,10 +165,17 @@ export function AdminClienteDetalhesPage() {
       const next = ((data ?? null) as unknown as Cliente | null) ?? null
       setCliente(next)
       if (next) {
-        setPlano(next.plano)
+        const normalizedPlano = normalizePlanoToTwoPlans(next.plano)
+        setPlano(normalizedPlano)
         setStatusPagamento(next.status_pagamento)
         setAtivo(next.ativo)
         setLimiteFuncionarios(next.limite_funcionarios === null ? '' : String(next.limite_funcionarios))
+        setLimiteAgendamentosMes(next.limite_agendamentos_mes === null || typeof next.limite_agendamentos_mes !== 'number' ? '' : String(next.limite_agendamentos_mes))
+
+        const n = typeof next.limite_funcionarios === 'number' && Number.isFinite(next.limite_funcionarios) && next.limite_funcionarios > 0 ? Math.floor(next.limite_funcionarios) : 1
+        const min = normalizedPlano === 'pro' ? 8 : 1
+        const max = normalizedPlano === 'pro' ? 12 : 200
+        setCheckoutFuncionariosTotal(Math.max(min, Math.min(max, n)))
       }
 
       const { count: sCount } = await supabase.from('servicos').select('id', { count: 'exact', head: true }).eq('usuario_id', id)
@@ -173,7 +204,7 @@ export function AdminClienteDetalhesPage() {
     setError(null)
     const { data, error: err } = await supabase
       .from('usuarios')
-      .select('id,plano,status_pagamento,ativo,limite_funcionarios')
+      .select('id,plano,status_pagamento,ativo,limite_funcionarios,limite_agendamentos_mes')
       .eq('id', id)
       .maybeSingle()
     if (err || !data) {
@@ -181,12 +212,18 @@ export function AdminClienteDetalhesPage() {
       setRefreshingPagamento(false)
       return
     }
-    const next = data as unknown as Pick<Cliente, 'id' | 'plano' | 'status_pagamento' | 'ativo' | 'limite_funcionarios'>
+    const next = data as unknown as Pick<Cliente, 'id' | 'plano' | 'status_pagamento' | 'ativo' | 'limite_funcionarios' | 'limite_agendamentos_mes'>
     setCliente((prev) => (prev ? { ...prev, ...next } : (next as unknown as Cliente)))
-    setPlano(next.plano)
+    const normalizedPlano = normalizePlanoToTwoPlans(next.plano)
+    setPlano(normalizedPlano)
     setStatusPagamento(next.status_pagamento)
     setAtivo(next.ativo)
     setLimiteFuncionarios(next.limite_funcionarios === null ? '' : String(next.limite_funcionarios))
+    setLimiteAgendamentosMes(next.limite_agendamentos_mes === null || typeof next.limite_agendamentos_mes !== 'number' ? '' : String(next.limite_agendamentos_mes))
+    const n = typeof next.limite_funcionarios === 'number' && Number.isFinite(next.limite_funcionarios) && next.limite_funcionarios > 0 ? Math.floor(next.limite_funcionarios) : 1
+    const min = normalizedPlano === 'pro' ? 8 : 1
+    const max = normalizedPlano === 'pro' ? 12 : 200
+    setCheckoutFuncionariosTotal(Math.max(min, Math.min(max, n)))
     setRefreshingPagamento(false)
   }
 
@@ -200,9 +237,16 @@ export function AdminClienteDetalhesPage() {
       setSaving(false)
       return
     }
+
+    const limiteAgMes = limiteAgendamentosMes.trim() === '' ? null : Number(limiteAgendamentosMes)
+    if (limiteAgendamentosMes.trim() !== '' && Number.isNaN(limiteAgMes)) {
+      setError('Limite de agendamentos/mês inválido')
+      setSaving(false)
+      return
+    }
     const { error: err } = await supabase
       .from('usuarios')
-      .update({ plano, status_pagamento: statusPagamento, ativo, limite_funcionarios: limite })
+      .update({ plano, status_pagamento: statusPagamento, ativo, limite_funcionarios: limite, limite_agendamentos_mes: limiteAgMes })
       .eq('id', id)
     if (err) {
       setError(err.message)
@@ -210,7 +254,7 @@ export function AdminClienteDetalhesPage() {
       return
     }
     setCliente((prev) =>
-      prev ? { ...prev, plano, status_pagamento: statusPagamento, ativo, limite_funcionarios: limite } : prev
+      prev ? { ...prev, plano, status_pagamento: statusPagamento, ativo, limite_funcionarios: limite, limite_agendamentos_mes: limiteAgMes } : prev
     )
     setSaving(false)
   }
@@ -284,17 +328,19 @@ export function AdminClienteDetalhesPage() {
     setFuncionariosCount((funcs ?? []).length)
   }
 
-  const gerarCheckout = async () => {
+  const gerarCheckout = async (metodo: 'card' | 'pix') => {
     if (!cliente) return
     if (!plano) {
       setError('Selecione um plano antes de gerar o link de pagamento.')
       return
     }
+
+    const total = plano === 'pro' ? Math.max(8, Math.min(12, Math.floor(checkoutFuncionariosTotal || 8))) : 1
     setCreatingCheckout(true)
     setError(null)
     setCheckoutUrl(null)
 
-    const res = await callFn('payments', { action: 'create_checkout', usuario_id: cliente.id, plano })
+    const res = await callFn('payments', { action: 'create_checkout', usuario_id: cliente.id, plano, metodo, funcionarios_total: total })
     if (!res.ok) {
       const msg = typeof res.body === 'object' && res.body !== null && typeof (res.body as Record<string, unknown>).message === 'string'
         ? String((res.body as Record<string, unknown>).message)
@@ -366,9 +412,20 @@ export function AdminClienteDetalhesPage() {
                     <div className="text-sm text-slate-600">/{cliente.slug}</div>
                   </div>
                   <div className="flex items-center gap-2">
-                    {cliente.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}
-                    <Badge tone="slate">{cliente.plano.toUpperCase()}</Badge>
-                    <Badge tone={cliente.status_pagamento === 'inadimplente' ? 'red' : 'slate'}>{cliente.status_pagamento}</Badge>
+                    {cliente.ativo ? <Badge tone="green">Conta: Ativa</Badge> : <Badge tone="red">Conta: Inativa</Badge>}
+                    <Badge tone="slate">{normalizePlanoLabel(cliente.plano)}</Badge>
+                    <Badge tone={cliente.status_pagamento === 'inadimplente' ? 'red' : cliente.status_pagamento === 'ativo' ? 'green' : 'slate'}>
+                      Pagamento: {(() => {
+                        const v = String(cliente.status_pagamento ?? '').trim().toLowerCase()
+                        if (!v) return '—'
+                        if (v === 'ativo') return 'Ativo'
+                        if (v === 'trial') return 'Trial'
+                        if (v === 'inadimplente') return 'Inadimplente'
+                        if (v === 'suspenso') return 'Suspenso'
+                        if (v === 'cancelado') return 'Cancelado'
+                        return cliente.status_pagamento
+                      })()}
+                    </Badge>
                   </div>
                 </div>
                 <div className="text-sm text-slate-700">{cliente.nome_completo}</div>
@@ -399,11 +456,12 @@ export function AdminClienteDetalhesPage() {
                           ? planoDefaultLimite[nextPlano]
                           : null
                         setLimiteFuncionarios(nextLimite === null ? '' : String(nextLimite))
+                        setCheckoutFuncionariosTotal(nextPlano === 'pro' ? 8 : 1)
                       }}
                     >
                       {planoOptions.map((p) => (
                         <option key={p} value={p}>
-                          {p.toUpperCase()}
+                          {normalizePlanoLabel(p)}
                         </option>
                       ))}
                     </select>
@@ -445,8 +503,49 @@ export function AdminClienteDetalhesPage() {
                   />
                 </div>
 
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Input
+                    label="Limite de agendamentos/mês (vazio = sem limite)"
+                    value={limiteAgendamentosMes}
+                    onChange={(e) => setLimiteAgendamentosMes(e.target.value)}
+                    inputMode="numeric"
+                  />
+                  <div className="flex items-end justify-end gap-2">
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        const base = limiteAgMesParsed === null ? 0 : Math.max(0, Math.floor(limiteAgMesParsed))
+                        setLimiteAgendamentosMes(String(base + 50))
+                      }}
+                    >
+                      +50
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        const base = limiteAgMesParsed === null ? 0 : Math.max(0, Math.floor(limiteAgMesParsed))
+                        setLimiteAgendamentosMes(String(base + 100))
+                      }}
+                    >
+                      +100
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        setLimiteAgendamentosMes('')
+                      }}
+                    >
+                      Ilimitado
+                    </Button>
+                  </div>
+                </div>
+
                 {limiteFuncionarios.trim() !== '' && limiteParsed === null ? (
                   <div className="text-sm text-rose-700">Limite de funcionários inválido.</div>
+                ) : null}
+
+                {limiteAgendamentosMes.trim() !== '' && limiteAgMesParsed === null ? (
+                  <div className="text-sm text-rose-700">Limite de agendamentos/mês inválido.</div>
                 ) : null}
 
                 <div className="flex justify-end">
@@ -460,11 +559,38 @@ export function AdminClienteDetalhesPage() {
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="text-sm text-slate-600">Gera um link de checkout para o plano selecionado.</div>
                     <div className="flex flex-wrap items-center gap-2">
+                      <Input
+                        label="Profissionais"
+                        type="number"
+                        min={8}
+                        max={12}
+                        value={String(checkoutFuncionariosTotal)}
+                        disabled={plano !== 'pro'}
+                        onChange={(e) => {
+                          const raw = e.target.value
+                          const n = raw.trim() === '' ? 8 : Number(raw)
+                          if (!Number.isFinite(n)) return
+                          const i = Math.floor(n)
+                          if (i > 12) {
+                            setPlano('enterprise')
+                            setLimiteFuncionarios('')
+                            setCheckoutFuncionariosTotal(1)
+                            setError('Para mais de 12 profissionais, use o plano EMPRESA.')
+                            return
+                          }
+                          const clamped = Math.max(8, Math.min(12, i))
+                          setCheckoutFuncionariosTotal(clamped)
+                        }}
+                        className="w-28"
+                      />
                       <Button variant="secondary" onClick={() => void refreshPagamento()} disabled={refreshingPagamento || !cliente}>
                         {refreshingPagamento ? 'Atualizando…' : 'Atualizar status'}
                       </Button>
-                      <Button variant="secondary" onClick={gerarCheckout} disabled={creatingCheckout || !plano}>
-                        {creatingCheckout ? 'Gerando…' : 'Gerar link de pagamento'}
+                      <Button variant="secondary" onClick={() => void gerarCheckout('pix')} disabled={creatingCheckout || !plano}>
+                        {creatingCheckout ? 'Gerando…' : 'PIX (30 dias)'}
+                      </Button>
+                      <Button variant="secondary" onClick={() => void gerarCheckout('card')} disabled={creatingCheckout || !plano}>
+                        {creatingCheckout ? 'Gerando…' : 'Cartão (assinatura)'}
                       </Button>
                     </div>
                   </div>

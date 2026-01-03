@@ -4,10 +4,19 @@ import { AppShell } from '../../components/layout/AppShell'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
+import { Input } from '../../components/ui/Input'
 import { checkJwtProject, supabase, supabaseEnv } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
 
 type FnResult = { ok: true; status: number; body: unknown } | { ok: false; status: number; body: unknown }
+
+function safeJson(value: unknown) {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return null
+  }
+}
 
 async function callPaymentsFn(body: Record<string, unknown>): Promise<FnResult> {
   if (!supabaseEnv.ok) {
@@ -22,25 +31,6 @@ async function callPaymentsFn(body: Record<string, unknown>): Promise<FnResult> 
     .trim()
     .replace(/^['"`\s]+|['"`\s]+$/g, '')
   const fnUrl = `${supabaseUrl}/functions/v1/payments`
-
-  try {
-    const probe = await fetch(fnUrl, { method: 'GET' })
-    if (probe.status === 404) {
-      const text = await probe.text().catch(() => '')
-      if (text.includes('Requested function was not found')) {
-        return {
-          ok: false as const,
-          status: 404,
-          body: {
-            error: 'function_not_deployed',
-            message: 'A função payments não está publicada no Supabase. Faça deploy da Edge Function `payments` no seu projeto.',
-          },
-        }
-      }
-    }
-  } catch {
-    return { ok: false as const, status: 0, body: { error: 'network_error', message: 'Falha de rede' } }
-  }
 
   const tryRefresh = async () => {
     const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession()
@@ -103,6 +93,20 @@ async function callPaymentsFn(body: Record<string, unknown>): Promise<FnResult> 
       parsed = text
     }
 
+    if (!res.ok && res.status === 404) {
+      const raw = typeof parsed === 'string' ? parsed : text
+      if (typeof raw === 'string' && raw.includes('Requested function was not found')) {
+        return {
+          ok: false as const,
+          status: 404,
+          body: {
+            error: 'function_not_deployed',
+            message: 'A função payments não está publicada no Supabase. Faça deploy da Edge Function `payments` no seu projeto.',
+          },
+        }
+      }
+    }
+
     if (
       !res.ok &&
       res.status === 401 &&
@@ -113,6 +117,8 @@ async function callPaymentsFn(body: Record<string, unknown>): Promise<FnResult> 
     ) {
       return { ok: false as const, status: 401, body: { error: 'supabase_gateway_invalid_jwt' } }
     }
+
+    if (!res.ok) console.error('payments error', { status: res.status, body: parsed, body_json: safeJson(parsed) })
 
     if (!res.ok) return { ok: false as const, status: res.status, body: parsed }
     return { ok: true as const, status: res.status, body: parsed }
@@ -137,8 +143,15 @@ async function callPaymentsFn(body: Record<string, unknown>): Promise<FnResult> 
   return first
 }
 
-async function createCheckoutPagamento(usuarioId: string, item: string): Promise<FnResult> {
-  return callPaymentsFn({ action: 'create_checkout', usuario_id: usuarioId, plano: item })
+async function createCheckoutPagamento(
+  usuarioId: string,
+  item: string,
+  metodo: 'card' | 'pix',
+  funcionariosTotal?: number | null
+): Promise<FnResult> {
+  const payload: Record<string, unknown> = { action: 'create_checkout', usuario_id: usuarioId, plano: item, metodo }
+  if (typeof funcionariosTotal === 'number' && Number.isFinite(funcionariosTotal)) payload.funcionarios_total = funcionariosTotal
+  return callPaymentsFn(payload)
 }
 
 async function syncCheckoutSessionPagamento(sessionId: string, usuarioId: string | null): Promise<FnResult> {
@@ -176,18 +189,33 @@ export function PagamentoPage() {
   const [selectedService, setSelectedService] = useState<ServiceCard['key'] | null>(null)
   const [creatingCheckout, setCreatingCheckout] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [funcionariosTotal, setFuncionariosTotal] = useState<number | null>(null)
 
   const formatCheckoutError = (status: number, body: unknown) => {
     if (typeof body === 'string' && body.trim()) return body
     if (body && typeof body === 'object') {
       const obj = body as Record<string, unknown>
-      if (typeof obj.message === 'string' && obj.message.trim()) return obj.message
       const err = typeof obj.error === 'string' ? obj.error : null
+      const message = typeof obj.message === 'string' && obj.message.trim() ? obj.message.trim() : null
+      if (message) {
+        const stripeStatus = typeof obj.stripe_status === 'number' && Number.isFinite(obj.stripe_status) ? obj.stripe_status : null
+        if (err === 'stripe_error') {
+          const mode = typeof obj.stripe_key_mode === 'string' && obj.stripe_key_mode.trim() ? obj.stripe_key_mode.trim() : 'unknown'
+          if (stripeStatus) return `Stripe (${mode}, HTTP ${stripeStatus}): ${message}`
+          return `Stripe (${mode}): ${message}`
+        }
+        return message
+      }
       if (err === 'missing_supabase_env') return 'Configuração do Supabase ausente no ambiente.'
       if (err === 'network_error') return typeof obj.message === 'string' && obj.message.trim() ? obj.message : 'Falha de rede ao iniciar pagamento.'
       if (err === 'session_expired' || err === 'invalid_jwt') return 'Sessão expirada no Supabase. Saia e entre novamente.'
       if (err === 'jwt_project_mismatch') return 'Sessão do Supabase pertence a outro projeto. Saia e entre novamente.'
       if (err === 'supabase_gateway_invalid_jwt') return 'A Edge Function está exigindo JWT no gateway. Faça deploy com verify_jwt=false.'
+      if (err === 'function_not_deployed') return 'A função payments não está publicada no Supabase.'
+      const asJson = safeJson(body)
+      if (err && asJson) return `Erro ao iniciar pagamento: ${err} (HTTP ${status}): ${asJson}`
+      if (err) return `Erro ao iniciar pagamento: ${err} (HTTP ${status}).`
+      if (asJson) return `Erro ao iniciar pagamento (HTTP ${status}): ${asJson}`
     }
     return `Erro ao iniciar pagamento (HTTP ${status}).`
   }
@@ -211,30 +239,23 @@ export function PagamentoPage() {
         {
           key: 'basic',
           title: 'BASIC',
-          priceLabel: 'R$ 49,90/mês',
+          priceLabel: 'R$ 34,99/mês',
           subtitle: '',
-          bullets: ['Agendamentos 60 por mês', '1 profissional', 'Lembretes automáticos via WhatsApp', 'Até 3 serviços', 'Personalização básica da página', 'Suporte prioritário'],
+          bullets: ['Agendamentos 60 por mês', '1 profissional incluído', 'Lembretes automáticos via WhatsApp', 'Até 3 serviços', 'Página pública personalizável', 'Suporte por email'],
         },
         {
           key: 'pro',
           title: 'PRO',
-          priceLabel: 'R$ 79,90/mês',
-          subtitle: '',
-          bullets: ['Tudo do Basic +', 'Agendamentos 180 por mês', 'Serviços ilimitados', 'Gestão de clientes (histórico completo)', 'Relatórios avançados', 'Bloqueios recorrentes', 'Até 3 funcionários', 'Logo e galeria de fotos', 'Suporte via WhatsApp'],
-        },
-        {
-          key: 'team',
-          title: 'TEAM',
-          priceLabel: 'R$ 119,90/mês',
-          subtitle: 'NOVO',
-          bullets: ['Tudo do Pro +', 'Até 5 funcionários', 'Agendamentos 300 por mês', 'Agenda unificada (filtro por profissional)', 'Relatórios por funcionário', 'Controle de permissões detalhado', 'Cliente escolhe o profissional', 'Suporte prioritário'],
+          priceLabel: 'R$ 59,99/mês',
+          subtitle: 'Até 12 profissionais (8 inclusos + até 4 adicionais de R$ 7)',
+          bullets: ['Até 8 profissionais incluídos', 'Serviços ilimitados', 'Logo e fotos de serviços', 'Relatórios', 'Bloqueios recorrentes', 'Suporte via WhatsApp'],
         },
         {
           key: 'enterprise',
-          title: 'ENTERPRISE',
-          priceLabel: 'R$ 199,90/mês',
-          subtitle: 'NOVO',
-          bullets: ['Tudo do Team +', 'Agendamentos ilimitados', 'Funcionários ilimitados', 'Multi-unidades (filiais)', 'Suporte dedicado via WhatsApp', 'Treinamento da equipe incluso'],
+          title: 'EMPRESA',
+          priceLabel: 'R$ 98,99/mês',
+          subtitle: 'Ilimitado',
+          bullets: ['Profissionais ilimitados', 'Multi-unidades', 'Agendamentos ilimitados', 'Serviços ilimitados', 'Logo e fotos de serviços', 'Suporte via WhatsApp'],
         },
       ] satisfies PlanCard[],
     [canShowFree]
@@ -252,11 +273,27 @@ export function PagamentoPage() {
   const currentPlan = useMemo<PlanKey>(() => {
     const current = (usuario?.plano ?? '').trim().toLowerCase() as PlanKey
     if (current === 'free') return canShowFree ? 'free' : 'basic'
-    if (current === 'basic' || current === 'pro' || current === 'team' || current === 'enterprise') return current
+    if (current === 'enterprise') return 'enterprise'
+    if (current === 'team') return 'pro'
+    if (current === 'basic' || current === 'pro') return current
     return 'basic'
   }, [canShowFree, usuario?.plano])
 
   const selectedPlan = userSelectedPlan ?? currentPlan
+
+  const defaultFuncionariosTotal = useMemo(() => {
+    const raw = usuario?.limite_funcionarios
+    const n = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 1
+    return Math.max(1, Math.min(200, n))
+  }, [usuario?.limite_funcionarios])
+
+  const includedPro = 8
+  const maxPro = 12
+  const defaultProFuncionariosTotal = useMemo(() => {
+    return Math.min(maxPro, Math.max(includedPro, defaultFuncionariosTotal))
+  }, [defaultFuncionariosTotal, includedPro, maxPro])
+
+  const effectiveFuncionariosTotal = funcionariosTotal ?? (selectedPlan === 'pro' ? defaultProFuncionariosTotal : defaultFuncionariosTotal)
 
   useEffect(() => {
     const run = async () => {
@@ -300,7 +337,7 @@ export function PagamentoPage() {
     run().catch(() => undefined)
   }, [location.search, navigate, refresh])
 
-  const startPlanCheckout = async () => {
+  const startPlanCheckout = async (metodo: 'card' | 'pix') => {
     if (!usuarioId) return
     const plan = selectedPlan
     if (!plan || plan === 'free') {
@@ -308,9 +345,19 @@ export function PagamentoPage() {
       return
     }
 
+    const requested = plan === 'pro' ? Math.floor(effectiveFuncionariosTotal || includedPro) : 1
+    if (plan === 'pro' && requested > maxPro) {
+      setUserSelectedPlan('enterprise')
+      setFuncionariosTotal(null)
+      setError('Para mais de 12 profissionais, selecione o plano EMPRESA.')
+      return
+    }
+
+    const total = plan === 'pro' ? Math.max(includedPro, Math.min(maxPro, requested)) : 1
+
     setCreatingCheckout(true)
     setError(null)
-    const res = await createCheckoutPagamento(usuarioId, plan)
+    const res = await createCheckoutPagamento(usuarioId, plan, metodo, total)
     if (!res.ok) {
       setError(formatCheckoutError(res.status, res.body))
       setCreatingCheckout(false)
@@ -326,11 +373,11 @@ export function PagamentoPage() {
     window.location.href = url
   }
 
-  const startServiceCheckout = async () => {
+  const startServiceCheckout = async (metodo: 'card' | 'pix') => {
     if (!usuarioId || !selectedService) return
     setCreatingCheckout(true)
     setError(null)
-    const res = await createCheckoutPagamento(usuarioId, selectedService)
+    const res = await createCheckoutPagamento(usuarioId, selectedService, metodo)
     if (!res.ok) {
       setError(formatCheckoutError(res.status, res.body))
       setCreatingCheckout(false)
@@ -354,7 +401,28 @@ export function PagamentoPage() {
     )
   }
 
+  const formatStatusPagamento = (value: string) => {
+    const v = String(value ?? '').trim().toLowerCase()
+    if (!v) return '—'
+    if (v === 'ativo') return 'Ativo'
+    if (v === 'trial') return 'Trial'
+    if (v === 'inadimplente') return 'Inadimplente'
+    if (v === 'suspenso') return 'Suspenso'
+    if (v === 'cancelado') return 'Cancelado'
+    return value
+  }
+
   const statusTone = usuario.status_pagamento === 'inadimplente' ? 'red' : usuario.status_pagamento === 'ativo' ? 'green' : 'slate'
+
+  const planoLabel = (planoRaw: string) => {
+    const p = String(planoRaw ?? '').trim().toLowerCase()
+    if (p === 'enterprise') return 'EMPRESA'
+    if (p === 'team') return 'PRO'
+    if (p === 'pro') return 'PRO'
+    if (p === 'basic') return 'BASIC'
+    if (p === 'free') return 'FREE'
+    return planoRaw
+  }
 
   return (
     <AppShell>
@@ -369,7 +437,9 @@ export function PagamentoPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="space-y-1">
                 <div className="font-semibold">{checkoutNotice.kind === 'success' ? 'Pagamento concluído' : 'Pagamento cancelado'}</div>
-                <div>{checkoutNotice.item ? `Item: ${checkoutNotice.item.toUpperCase()}. ` : ''}Status: {usuario.status_pagamento}.</div>
+                <div>
+                  {checkoutNotice.item ? `Item: ${checkoutNotice.item.toUpperCase()}. ` : ''}Status: {formatStatusPagamento(usuario.status_pagamento)}.
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <Button variant="secondary" onClick={() => void refresh()}>
@@ -390,11 +460,13 @@ export function PagamentoPage() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-slate-900">Pagamento</div>
-                <div className="text-sm text-slate-600">Plano atual: {usuario.plano.toUpperCase()}</div>
+                <div className="text-sm text-slate-600">
+                  Plano atual: {planoLabel(usuario.plano)}
+                </div>
               </div>
               <div className="flex items-center gap-2">
-                <Badge tone={usuario.ativo ? 'green' : 'red'}>{usuario.ativo ? 'Ativo' : 'Inativo'}</Badge>
-                <Badge tone={statusTone}>{usuario.status_pagamento}</Badge>
+                <Badge tone={usuario.ativo ? 'green' : 'red'}>{usuario.ativo ? 'Conta: Ativa' : 'Conta: Inativa'}</Badge>
+                <Badge tone={statusTone}>Pagamento: {formatStatusPagamento(usuario.status_pagamento)}</Badge>
                 <Button variant="secondary" onClick={() => void refresh()}>
                   Atualizar status
                 </Button>
@@ -405,6 +477,7 @@ export function PagamentoPage() {
               {plans.map((p) => {
                 const selected = selectedPlan === p.key
                 const clickable = p.key !== 'free'
+                const best = p.key === 'pro'
                 return (
                   <button
                     key={p.key}
@@ -412,10 +485,17 @@ export function PagamentoPage() {
                     onClick={() => {
                       if (!clickable) return
                       setUserSelectedPlan(p.key)
+                      setFuncionariosTotal(null)
                     }}
                     className={[
                       'text-left rounded-xl border bg-white p-4 transition',
-                      selected ? 'border-slate-900 ring-2 ring-slate-900/10' : 'border-slate-200 hover:bg-slate-50',
+                      best
+                        ? selected
+                          ? 'border-slate-900 ring-2 ring-slate-900/10 bg-amber-50'
+                          : 'border-amber-300 hover:bg-amber-50'
+                        : selected
+                          ? 'border-slate-900 ring-2 ring-slate-900/10'
+                          : 'border-slate-200 hover:bg-slate-50',
                       clickable ? '' : 'cursor-default',
                     ].join(' ')}
                   >
@@ -424,7 +504,10 @@ export function PagamentoPage() {
                         <div className="text-sm font-semibold text-slate-900">{p.title}</div>
                         <div className="text-xs text-slate-600">{p.priceLabel}{p.subtitle ? ` • ${p.subtitle}` : ''}</div>
                       </div>
-                      {selected ? <Badge tone="slate">Selecionado</Badge> : null}
+                      <div className="flex items-center gap-2">
+                        {best ? <Badge tone="yellow">Melhor opção</Badge> : null}
+                        {selected ? <Badge tone="slate">Selecionado</Badge> : null}
+                      </div>
                     </div>
                     <div className="mt-3 space-y-1">
                       {p.bullets.map((b) => (
@@ -438,9 +521,41 @@ export function PagamentoPage() {
               })}
             </div>
 
-            <div className="flex justify-end">
-              <Button onClick={startPlanCheckout} disabled={creatingCheckout || selectedPlan === 'free'}>
-                {creatingCheckout ? 'Abrindo…' : 'Alterar plano'}
+            {selectedPlan === 'pro' ? (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Input
+                  label="Profissionais"
+                  type="number"
+                  min={includedPro}
+                  max={maxPro}
+                  value={String(effectiveFuncionariosTotal)}
+                  onChange={(e) => {
+                    const raw = e.target.value
+                    const n = raw.trim() === '' ? includedPro : Number(raw)
+                    if (!Number.isFinite(n)) return
+                    const i = Math.floor(n)
+                    if (i > maxPro) {
+                      setUserSelectedPlan('enterprise')
+                      setFuncionariosTotal(null)
+                      setError('Para mais de 12 profissionais, selecione o plano EMPRESA.')
+                      return
+                    }
+                    const clamped = Math.max(includedPro, Math.min(maxPro, i))
+                    setFuncionariosTotal(clamped)
+                  }}
+                />
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-700 flex items-center">
+                  O checkout calcula 8 profissionais inclusos + adicional por profissional acima de 8 (máximo 12 no PRO).
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button variant="secondary" onClick={() => void startPlanCheckout('pix')} disabled={creatingCheckout || selectedPlan === 'free'}>
+                {creatingCheckout ? 'Abrindo…' : 'PIX (30 dias)'}
+              </Button>
+              <Button onClick={() => void startPlanCheckout('card')} disabled={creatingCheckout || selectedPlan === 'free'}>
+                {creatingCheckout ? 'Abrindo…' : 'Cartão (assinatura)'}
               </Button>
             </div>
           </div>
@@ -485,9 +600,12 @@ export function PagamentoPage() {
               })}
             </div>
 
-            <div className="flex justify-end">
-              <Button onClick={startServiceCheckout} disabled={creatingCheckout || !selectedService}>
-                {creatingCheckout ? 'Abrindo…' : 'Comprar serviço'}
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button variant="secondary" onClick={() => void startServiceCheckout('pix')} disabled={creatingCheckout || !selectedService}>
+                {creatingCheckout ? 'Abrindo…' : 'Pagar com PIX'}
+              </Button>
+              <Button onClick={() => void startServiceCheckout('card')} disabled={creatingCheckout || !selectedService}>
+                {creatingCheckout ? 'Abrindo…' : 'Pagar com cartão'}
               </Button>
             </div>
           </div>

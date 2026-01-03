@@ -18,6 +18,90 @@ function normalizeSlug(s: string) {
   return slugify(s).slice(0, 60)
 }
 
+function toIsoDateLocal(d: Date) {
+  const x = new Date(d)
+  x.setHours(0, 0, 0, 0)
+  const yyyy = x.getFullYear()
+  const mm = String(x.getMonth() + 1).padStart(2, '0')
+  const dd = String(x.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
+
+function rpcErrText(err: unknown) {
+  const e = err && typeof err === 'object' ? (err as Record<string, unknown>) : null
+  const msg = typeof e?.message === 'string' ? e.message.trim() : 'Erro'
+  const code = typeof e?.code === 'string' ? e.code.trim() : ''
+  const details = typeof e?.details === 'string' ? e.details.trim() : ''
+  const hint = typeof e?.hint === 'string' ? e.hint.trim() : ''
+  const parts = [msg]
+  if (code && !msg.includes(code)) parts.push(code)
+  if (details && details !== msg) parts.push(details)
+  if (hint) parts.push(hint)
+  return parts.filter(Boolean).join(' — ')
+}
+
+function isSignatureMismatchText(lower: string) {
+  return (
+    lower.includes('does not exist') ||
+    lower.includes('function') ||
+    lower.includes('rpc') ||
+    (lower.includes('schema cache') && lower.includes('could not find'))
+  )
+}
+
+function shouldRetryWithoutKey(err: unknown, key: string) {
+  const lower = rpcErrText(err).toLowerCase()
+  return lower.includes(key.toLowerCase()) && isSignatureMismatchText(lower)
+}
+
+async function callRpcWithSignatureFallback<T>(
+  fnName: string,
+  args: Record<string, unknown>,
+  extra?: {
+    unidadeId?: string | null
+    canAddUnidadeId?: boolean
+    canDropUnidadeId?: boolean
+    canDropFuncionarioId?: boolean
+    canDropUnidadeSlug?: boolean
+  }
+): Promise<{ ok: true; data: T } | { ok: false; errorText: string }> {
+  const first = await supabase.rpc(fnName, args)
+  if (!first.error) return { ok: true as const, data: first.data as T }
+
+  const firstText = rpcErrText(first.error)
+  const firstLower = firstText.toLowerCase()
+  if (!isSignatureMismatchText(firstLower)) return { ok: false as const, errorText: firstText }
+
+  const hasUnidadeId = Object.prototype.hasOwnProperty.call(args, 'p_unidade_id')
+  const hasFuncionarioId = Object.prototype.hasOwnProperty.call(args, 'p_funcionario_id')
+  const hasUnidadeSlug = Object.prototype.hasOwnProperty.call(args, 'p_unidade_slug')
+  const unidadeId = extra?.unidadeId ?? null
+
+  const withoutKey = (o: Record<string, unknown>, key: string) => {
+    const next: Record<string, unknown> = { ...o }
+    delete (next as Record<string, unknown>)[key]
+    return next
+  }
+
+  const variants: Record<string, unknown>[] = []
+
+  if (hasUnidadeId && extra?.canDropUnidadeId !== false && shouldRetryWithoutKey(first.error, 'p_unidade_id')) variants.push(withoutKey(args, 'p_unidade_id'))
+  if (!hasUnidadeId && extra?.canAddUnidadeId && unidadeId) variants.push({ ...args, p_unidade_id: unidadeId })
+
+  if (hasFuncionarioId && extra?.canDropFuncionarioId !== false && shouldRetryWithoutKey(first.error, 'p_funcionario_id')) {
+    variants.push(withoutKey(args, 'p_funcionario_id'))
+  }
+
+  if (hasUnidadeSlug && extra?.canDropUnidadeSlug !== false && shouldRetryWithoutKey(first.error, 'p_unidade_slug')) variants.push(withoutKey(args, 'p_unidade_slug'))
+
+  for (const v of variants) {
+    const retry = await supabase.rpc(fnName, v)
+    if (!retry.error) return { ok: true as const, data: retry.data as T }
+  }
+
+  return { ok: false as const, errorText: firstText }
+}
+
 export function PaginaPublicaSettingsPage() {
   const { appPrincipal, refresh } = useAuth()
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
@@ -33,6 +117,9 @@ export function PaginaPublicaSettingsPage() {
   const [slug, setSlug] = useState('')
   const [logoUrl, setLogoUrl] = useState('')
   const [logoFile, setLogoFile] = useState<File | null>(null)
+  const [instagramUrl, setInstagramUrl] = useState('')
+
+  const [tipoNegocio, setTipoNegocio] = useState('')
 
   const [primaryColor, setPrimaryColor] = useState('#0f172a')
   const [backgroundColor, setBackgroundColor] = useState('#f8fafc')
@@ -49,7 +136,10 @@ export function PaginaPublicaSettingsPage() {
     ativo: boolean
   }
 
-  const canUseMultiUnits = Boolean(usuario && usuario.plano === 'enterprise')
+  const canUseMultiUnits = useMemo(() => {
+    const p = String(usuario?.plano ?? '').trim().toLowerCase()
+    return p === 'enterprise'
+  }, [usuario?.plano])
   const [unidades, setUnidades] = useState<Unidade[]>([])
   const [unidadesLoading, setUnidadesLoading] = useState(false)
   const [savingUnidade, setSavingUnidade] = useState(false)
@@ -57,6 +147,12 @@ export function PaginaPublicaSettingsPage() {
   const [unidadeSlug, setUnidadeSlug] = useState('')
   const [unidadeEndereco, setUnidadeEndereco] = useState('')
   const [unidadeTelefone, setUnidadeTelefone] = useState('')
+
+  const [publicTestRunning, setPublicTestRunning] = useState(false)
+  const [publicTestResult, setPublicTestResult] = useState<string | null>(null)
+  const [publicTestError, setPublicTestError] = useState<string | null>(null)
+  const [publicTestUnidadeSlug, setPublicTestUnidadeSlug] = useState('')
+  const [publicTestData, setPublicTestData] = useState(() => toIsoDateLocal(new Date()))
 
   const logoObjectUrl = useMemo(() => (logoFile ? URL.createObjectURL(logoFile) : null), [logoFile])
   const bgObjectUrl = useMemo(() => (bgFile ? URL.createObjectURL(bgFile) : null), [bgFile])
@@ -106,6 +202,8 @@ export function PaginaPublicaSettingsPage() {
       const row = (data ?? {}) as Record<string, unknown>
       const nextSlug = typeof row.slug === 'string' ? row.slug : ''
       const nextLogo = typeof row.logo_url === 'string' ? row.logo_url : ''
+      const nextInstagram = typeof row.instagram_url === 'string' ? row.instagram_url : ''
+      const nextTipoNegocio = typeof row.tipo_negocio === 'string' ? row.tipo_negocio : ''
       const nextPrimary = typeof row.public_primary_color === 'string' ? row.public_primary_color : '#0f172a'
       const nextBgColor = typeof row.public_background_color === 'string' ? row.public_background_color : '#f8fafc'
       const nextUseBgImage = typeof row.public_use_background_image === 'boolean' ? row.public_use_background_image : false
@@ -113,6 +211,8 @@ export function PaginaPublicaSettingsPage() {
 
       setSlug(nextSlug)
       setLogoUrl(nextLogo)
+      setInstagramUrl(nextInstagram)
+      setTipoNegocio(nextTipoNegocio)
       setPrimaryColor(nextPrimary)
       setBackgroundColor(nextBgColor)
       setUseBackgroundImage(nextUseBgImage)
@@ -221,7 +321,14 @@ export function PaginaPublicaSettingsPage() {
         const msg = e instanceof Error ? e.message : 'Falha ao enviar imagem'
         const lower = msg.toLowerCase()
         const missingBucket = lower.includes('bucket') || lower.includes('not found')
-        setError(missingBucket ? 'Configuração do Supabase incompleta: crie o bucket "logos" no Storage e habilite leitura pública + upload do próprio usuário.' : msg)
+        const rls = lower.includes('row-level security') || lower.includes('row level security')
+        setError(
+          missingBucket
+            ? 'Configuração do Supabase incompleta: crie o bucket "logos" no Storage e habilite leitura pública + upload do próprio usuário.'
+            : rls
+              ? 'Sem permissão para enviar ao Storage. Execute o SQL do Storage (logos) em /admin/configuracoes.'
+              : msg
+        )
         setSaving(false)
         return
       }
@@ -244,7 +351,14 @@ export function PaginaPublicaSettingsPage() {
         const msg = e instanceof Error ? e.message : 'Falha ao enviar logo'
         const lower = msg.toLowerCase()
         const missingBucket = lower.includes('bucket') || lower.includes('not found')
-        setError(missingBucket ? 'Configuração do Supabase incompleta: crie o bucket "logos" no Storage e habilite leitura pública + upload do próprio usuário.' : msg)
+        const rls = lower.includes('row-level security') || lower.includes('row level security')
+        setError(
+          missingBucket
+            ? 'Configuração do Supabase incompleta: crie o bucket "logos" no Storage e habilite leitura pública + upload do próprio usuário.'
+            : rls
+              ? 'Sem permissão para enviar ao Storage. Execute o SQL do Storage (logos) em /admin/configuracoes.'
+              : msg
+        )
         setSaving(false)
         return
       }
@@ -253,6 +367,8 @@ export function PaginaPublicaSettingsPage() {
     const payload: Record<string, unknown> = {
       slug: nextSlug,
       logo_url: nextLogoUrl,
+      instagram_url: instagramUrl.trim() ? instagramUrl.trim() : null,
+      tipo_negocio: tipoNegocio.trim() ? tipoNegocio.trim() : null,
       public_primary_color: primaryColor.trim() ? primaryColor.trim() : null,
       public_background_color: backgroundColor.trim() ? backgroundColor.trim() : null,
       public_use_background_image: useBackgroundImage,
@@ -264,12 +380,15 @@ export function PaginaPublicaSettingsPage() {
       const msg = updateErr.message
       const lower = msg.toLowerCase()
       const duplicate = lower.includes('duplicate') || lower.includes('unique')
-      const missingColumn = lower.includes('column') && lower.includes('public_use_background_image')
+      const missingColumn = (lower.includes('schema cache') && lower.includes('column')) || (lower.includes('does not exist') && lower.includes('column'))
+      const rls = lower.includes('row-level security') || lower.includes('row level security')
       setError(
         duplicate
           ? 'Esse slug já está em uso. Tente outro.'
           : missingColumn
             ? 'Configuração do Supabase incompleta: atualize o SQL do link público (listar + agendar).'
+            : rls
+              ? 'Sem permissão para atualizar seu perfil (RLS). Execute o SQL de políticas (Usuário / Funcionário) em /admin/configuracoes.'
             : msg
       )
       setSaving(false)
@@ -377,7 +496,30 @@ export function PaginaPublicaSettingsPage() {
               </div>
             </div>
 
+            <label className="block">
+              <div className="text-sm font-medium text-slate-700 mb-1">Tipo de negócio</div>
+              <select
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                value={tipoNegocio}
+                onChange={(e) => setTipoNegocio(e.target.value)}
+              >
+                <option value="">Geral</option>
+                <option value="lava_jatos">Lava-jato</option>
+                <option value="barbearia">Barbearia</option>
+                <option value="salao">Salão de beleza</option>
+                <option value="estetica">Estética</option>
+                <option value="odontologia">Odontologia</option>
+              </select>
+            </label>
+
             <Input label="URL pública" value={publicLink} readOnly />
+
+            <Input
+              label="Instagram (opcional)"
+              value={instagramUrl}
+              onChange={(e) => setInstagramUrl(e.target.value)}
+              placeholder="@seuusuario ou https://instagram.com/seuusuario"
+            />
 
             <div className="flex gap-3">
               <Button
@@ -402,6 +544,178 @@ export function PaginaPublicaSettingsPage() {
                 Abrir
               </Button>
             </div>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="p-6 space-y-4">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Validação do link público</div>
+              <div className="text-sm text-slate-600">Testa o carregamento e o GET de horários via RPC do Supabase.</div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Input
+                label="Data (para buscar horários)"
+                type="date"
+                value={publicTestData}
+                onChange={(e) => setPublicTestData(e.target.value)}
+              />
+              <Input
+                label="Unidade slug (opcional)"
+                value={publicTestUnidadeSlug}
+                onChange={(e) => setPublicTestUnidadeSlug(normalizeSlug(e.target.value))}
+                placeholder="centro"
+              />
+            </div>
+
+            {canUseMultiUnits && unidades.length > 0 ? (
+              <label className="block">
+                <div className="text-sm font-medium text-slate-700 mb-1">Selecionar unidade (EMPRESA)</div>
+                <select
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                  value={publicTestUnidadeSlug}
+                  onChange={(e) => setPublicTestUnidadeSlug(e.target.value)}
+                >
+                  <option value="">Sem unidade</option>
+                  {unidades
+                    .filter((u) => u.ativo)
+                    .map((u) => (
+                      <option key={u.id} value={u.slug}>
+                        {u.nome} ({u.slug})
+                      </option>
+                    ))}
+                </select>
+              </label>
+            ) : null}
+
+            <div className="flex flex-wrap gap-3">
+              <Button
+                onClick={async () => {
+                  if (!slug.trim()) return
+
+                  setPublicTestRunning(true)
+                  setPublicTestError(null)
+                  setPublicTestResult(null)
+
+                  try {
+                    const wantsUnidade = Boolean(publicTestUnidadeSlug.trim())
+                    const userArgs: Record<string, unknown> = { p_slug: slug.trim() }
+                    if (wantsUnidade) userArgs.p_unidade_slug = publicTestUnidadeSlug.trim()
+
+                    const userRes = await callRpcWithSignatureFallback<unknown>('public_get_usuario_publico', userArgs, {
+                      canDropUnidadeSlug: true,
+                    })
+                    if (!userRes.ok) throw new Error(userRes.errorText)
+                    const userDataRaw = userRes.data
+                    const userData = Array.isArray(userDataRaw)
+                      ? ((userDataRaw[0] ?? null) as Record<string, unknown> | null)
+                      : ((userDataRaw ?? null) as Record<string, unknown> | null)
+                    if (!userData) throw new Error('Usuário público não encontrado')
+
+                    const usuarioPublico = userData as unknown as Record<string, unknown>
+                    const publicUsuarioId =
+                      typeof usuarioPublico.usuario_id === 'string'
+                        ? usuarioPublico.usuario_id
+                        : typeof usuarioPublico.id === 'string'
+                          ? usuarioPublico.id
+                          : null
+                    if (!publicUsuarioId) throw new Error('Resposta sem usuario_id')
+
+                    const unidadeId = typeof usuarioPublico.unidade_id === 'string' ? usuarioPublico.unidade_id : null
+
+                    const { data: servicesData, error: servicesErr } = await supabase.rpc('public_get_servicos_publicos', { p_usuario_id: publicUsuarioId })
+                    if (servicesErr) throw servicesErr
+                    const servicesList = Array.isArray(servicesData) ? (servicesData as unknown as Array<Record<string, unknown>>) : []
+                    const firstServicoId = typeof servicesList[0]?.id === 'string' ? String(servicesList[0].id) : null
+                    if (!firstServicoId) throw new Error('Nenhum serviço público encontrado')
+
+                    const staffArgs: Record<string, unknown> = { p_usuario_master_id: publicUsuarioId }
+                    if (unidadeId) staffArgs.p_unidade_id = unidadeId
+                    const staffRes = await callRpcWithSignatureFallback<unknown>('public_get_funcionarios_publicos', staffArgs, {
+                      unidadeId,
+                      canDropUnidadeId: true,
+                      canAddUnidadeId: false,
+                    })
+                    if (!staffRes.ok) throw new Error(staffRes.errorText)
+                    const staffList = Array.isArray(staffRes.data) ? (staffRes.data as unknown as Array<Record<string, unknown>>) : []
+
+                    const planoPublico = String(usuarioPublico.plano ?? '').trim().toLowerCase()
+                    const canChooseProfessional = planoPublico === 'pro' || planoPublico === 'team' || planoPublico === 'enterprise'
+                    const hasStaff = canChooseProfessional && staffList.length > 0
+                    const firstFuncionarioId = hasStaff && typeof staffList[0]?.id === 'string' ? String(staffList[0].id) : null
+
+                    const slotsArgs: Record<string, unknown> = {
+                      p_usuario_id: publicUsuarioId,
+                      p_data: publicTestData,
+                      p_servico_id: firstServicoId,
+                      p_funcionario_id: hasStaff ? firstFuncionarioId : null,
+                    }
+                    if (unidadeId) slotsArgs.p_unidade_id = unidadeId
+
+                    const slotsRes = await callRpcWithSignatureFallback<unknown>('public_get_slots_publicos', slotsArgs, {
+                      unidadeId,
+                      canAddUnidadeId: false,
+                      canDropUnidadeId: true,
+                      canDropFuncionarioId: true,
+                    })
+                    if (!slotsRes.ok) throw new Error(slotsRes.errorText)
+
+                    const rawSlots = (slotsRes.data ?? []) as unknown
+                    const rows = Array.isArray(rawSlots) ? rawSlots : []
+                    const list = rows
+                      .map((r) => {
+                        if (typeof r === 'string') return r.trim()
+                        if (!r || typeof r !== 'object') return ''
+                        const obj = r as Record<string, unknown>
+                        if (typeof obj.hora_inicio === 'string') return obj.hora_inicio.trim()
+                        if (typeof obj.hora === 'string') return obj.hora.trim()
+                        return ''
+                      })
+                      .filter(Boolean)
+                    const uniqueSorted = Array.from(new Set(list)).sort((a, b) => a.localeCompare(b))
+
+                    const resumo = {
+                      slug: slug.trim(),
+                      unidade_slug: wantsUnidade ? publicTestUnidadeSlug.trim() : null,
+                      usuario_id: publicUsuarioId,
+                      unidade_id: unidadeId,
+                      servicos: servicesList.length,
+                      funcionarios_publicos: staffList.length,
+                      usa_profissional: hasStaff,
+                      slots: uniqueSorted.length,
+                      slots_preview: uniqueSorted.slice(0, 24),
+                    }
+                    setPublicTestResult(JSON.stringify(resumo, null, 2))
+                  } catch (e: unknown) {
+                    const msg = e instanceof Error ? e.message : 'Falha ao validar'
+                    setPublicTestError(msg)
+                  } finally {
+                    setPublicTestRunning(false)
+                  }
+                }}
+                disabled={publicTestRunning || loading || saving || !slug.trim()}
+              >
+                {publicTestRunning ? 'Validando…' : 'Validar agora'}
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  const wantsUnidade = Boolean(publicTestUnidadeSlug.trim())
+                  const url = wantsUnidade ? unidadeLink(publicTestUnidadeSlug.trim()) : publicLink
+                  if (!url) return
+                  window.open(url, '_blank', 'noopener,noreferrer')
+                }}
+                disabled={!publicLink}
+              >
+                Abrir link
+              </Button>
+            </div>
+
+            {publicTestError ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{publicTestError}</div> : null}
+            {publicTestResult ? (
+              <pre className="rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-800 overflow-auto">{publicTestResult}</pre>
+            ) : null}
           </div>
         </Card>
 

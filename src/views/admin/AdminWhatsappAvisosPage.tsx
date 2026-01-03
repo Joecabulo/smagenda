@@ -18,6 +18,15 @@ type ClienteRow = {
   whatsapp_habilitado?: boolean | null
 }
 
+function normalizePlanoLabel(planoRaw: string) {
+  const p = String(planoRaw ?? '').trim().toLowerCase()
+  if (p === 'enterprise') return 'EMPRESA'
+  if (p === 'pro' || p === 'team') return 'PRO'
+  if (p === 'basic') return 'BASIC'
+  if (p === 'free') return 'FREE'
+  return planoRaw
+}
+
 type SuperAdminConfigRow = {
   id: string
   whatsapp_api_url: string | null
@@ -799,7 +808,7 @@ export function AdminWhatsappAvisosPage() {
                         <div className="flex items-center gap-2">
                           {c.whatsapp_habilitado === true ? <Badge tone="green">WhatsApp</Badge> : <Badge tone="yellow">Sem WhatsApp</Badge>}
                           {c.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}
-                          <Badge tone="slate">{c.plano}</Badge>
+                          <Badge tone="slate">{normalizePlanoLabel(c.plano)}</Badge>
                           <Badge tone={c.status_pagamento === 'inadimplente' ? 'red' : 'slate'}>{c.status_pagamento}</Badge>
                         </div>
                         </div>

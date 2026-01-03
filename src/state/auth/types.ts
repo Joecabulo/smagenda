@@ -3,6 +3,7 @@ export type UsuarioProfile = {
   nome_completo: string
   nome_negocio: string
   slug: string
+  tipo_negocio: string | null
   logo_url: string | null
   telefone: string | null
   email: string

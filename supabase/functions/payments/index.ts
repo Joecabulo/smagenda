@@ -1,7 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.89.0'
 
 type Payload =
-  | { action: 'create_checkout'; usuario_id: string; plano: string }
+  | { action: 'create_checkout'; usuario_id: string; plano: string; metodo?: 'card' | 'pix' | null; funcionarios_total?: number | null }
   | { action: 'sync_checkout_session'; session_id: string; usuario_id?: string | null }
 
 type StripeEvent = {
@@ -36,6 +36,12 @@ function cleanUrl(input: string) {
   if (!raw) return ''
   const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
   return withProto.replace(/\/+$/g, '')
+}
+
+function cleanEnvValue(input: string) {
+  return String(input ?? '')
+    .trim()
+    .replace(/^['"`\s]+|['"`\s]+$/g, '')
 }
 
 function toHex(bytes: ArrayBuffer) {
@@ -137,10 +143,71 @@ async function stripeApiRequest(path: string, opts: { method: 'GET' | 'POST'; ke
   return { ok: res.ok, status: res.status, body: parsed }
 }
 
+async function resolveActivePriceIdForProduct(input: {
+  productId: string
+  key: string
+  expectedMode: 'subscription' | 'payment'
+  currency?: string
+}) {
+  const productId = (input.productId ?? '').trim()
+  if (!productId) return null
+  const currency = (input.currency ?? 'brl').trim().toLowerCase()
+  const expectedType = input.expectedMode === 'subscription' ? 'recurring' : 'one_time'
+
+  const res = await stripeApiRequest(`/prices?active=true&product=${encodeURIComponent(productId)}&limit=100`, {
+    method: 'GET',
+    key: input.key,
+  })
+  if (!res.ok || !res.body || typeof res.body !== 'object') return null
+  const obj = res.body as Record<string, unknown>
+  const data = obj.data
+  if (!Array.isArray(data) || data.length === 0) return null
+
+  const candidates: Array<{ id: string; unitAmount: number; intervalRank: number }> = []
+
+  for (const p of data) {
+    if (!p || typeof p !== 'object') continue
+    const price = p as Record<string, unknown>
+    const id = typeof price.id === 'string' ? price.id : ''
+    if (!id) continue
+    if (price.active !== true) continue
+    if (typeof price.type !== 'string' || price.type !== expectedType) continue
+    const cur = typeof price.currency === 'string' ? price.currency.toLowerCase() : ''
+    if (currency && cur && cur !== currency) continue
+
+    let intervalRank = 0
+    if (expectedType === 'recurring') {
+      const recurring = price.recurring && typeof price.recurring === 'object' ? (price.recurring as Record<string, unknown>) : null
+      const interval = typeof recurring?.interval === 'string' ? recurring.interval : ''
+      intervalRank = interval === 'month' ? 2 : interval ? 1 : 0
+    }
+
+    const unitAmount = typeof price.unit_amount === 'number' && Number.isFinite(price.unit_amount) ? price.unit_amount : Number.POSITIVE_INFINITY
+    candidates.push({ id, unitAmount, intervalRank })
+  }
+
+  if (candidates.length === 0) return null
+  candidates.sort((a, b) => {
+    if (b.intervalRank !== a.intervalRank) return b.intervalRank - a.intervalRank
+    if (a.unitAmount !== b.unitAmount) return a.unitAmount - b.unitAmount
+    return a.id.localeCompare(b.id)
+  })
+  return candidates[0]?.id ?? null
+}
+
 function toIsoDateFromUnixSeconds(value: unknown) {
   const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN
   if (!Number.isFinite(n) || n <= 0) return null
   return new Date(n * 1000).toISOString().slice(0, 10)
+}
+
+function toIsoDatePlusDays(days: number) {
+  const n = Number(days)
+  if (!Number.isFinite(n) || n <= 0) return null
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  d.setDate(d.getDate() + Math.floor(n))
+  return d.toISOString().slice(0, 10)
 }
 
 function mapStripeSubscriptionToPagamentoStatus(statusRaw: unknown) {
@@ -156,8 +223,8 @@ function resolveLimiteFuncionariosFromPlano(planoRaw: unknown) {
   const plano = typeof planoRaw === 'string' ? planoRaw.trim().toLowerCase() : ''
   if (!plano) return undefined
   if (plano === 'enterprise') return null
-  if (plano === 'team') return 5
-  if (plano === 'pro') return 3
+  if (plano === 'team') return 8
+  if (plano === 'pro') return 8
   if (plano === 'basic') return 1
   if (plano === 'free') return 1
   return undefined
@@ -181,6 +248,106 @@ function resolvePlanoFromMetadata(metadataRaw: unknown) {
   if (!item) return { item: null as string | null, plano: null as string | null }
   const plano = ['basic', 'pro', 'team', 'enterprise'].includes(item) ? item : null
   return { item, plano }
+}
+
+function parsePositiveInt(value: unknown) {
+  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN
+  if (!Number.isFinite(n)) return null
+  const i = Math.floor(n)
+  if (i <= 0) return null
+  return i
+}
+
+function clampInt(value: number, min: number, max: number) {
+  const n = Math.floor(value)
+  if (n < min) return min
+  if (n > max) return max
+  return n
+}
+
+function resolveFuncionariosTotalFromMetadata(metadataRaw: unknown) {
+  const metadata = (metadataRaw ?? null) as Record<string, unknown> | null
+  const raw = metadata?.funcionarios_total ?? metadata?.funcionarios ?? metadata?.qtd_funcionarios
+  const parsed = parsePositiveInt(raw)
+  if (!parsed) return null
+  return clampInt(parsed, 1, 200)
+}
+
+function resolveExtraEmployeesQtyFromSubscription(subscriptionRaw: unknown, opts: { extraPriceId?: string; extraProductId?: string }) {
+  if (!subscriptionRaw || typeof subscriptionRaw !== 'object') return null
+  const subscription = subscriptionRaw as Record<string, unknown>
+  const items = subscription.items
+  if (!items || typeof items !== 'object') return null
+  const data = (items as Record<string, unknown>).data
+  if (!Array.isArray(data)) return null
+
+  const extraPriceId = (opts.extraPriceId ?? '').trim()
+  const extraProductId = (opts.extraProductId ?? '').trim()
+  if (!extraPriceId && !extraProductId) return null
+
+  let sum = 0
+  for (const it of data) {
+    if (!it || typeof it !== 'object') continue
+    const row = it as Record<string, unknown>
+    const qty = parsePositiveInt(row.quantity) ?? 0
+    if (qty <= 0) continue
+
+    const priceRaw = row.price
+    const priceObj = priceRaw && typeof priceRaw === 'object' ? (priceRaw as Record<string, unknown>) : null
+    const priceId = typeof priceRaw === 'string' ? priceRaw : typeof priceObj?.id === 'string' ? priceObj.id : ''
+
+    const productRaw = priceObj?.product
+    const productObj = productRaw && typeof productRaw === 'object' ? (productRaw as Record<string, unknown>) : null
+    const productId = typeof productRaw === 'string' ? productRaw : typeof productObj?.id === 'string' ? productObj.id : ''
+
+    const matchesPrice = extraPriceId && priceId === extraPriceId
+    const matchesProduct = extraProductId && productId === extraProductId
+    if (!matchesPrice && !matchesProduct) continue
+
+    sum += qty
+  }
+
+  return sum
+}
+
+function resolveLimiteFuncionariosFromStripe(input: {
+  plano: string | null
+  metadata: unknown
+  subscription?: unknown
+  extraPriceId?: string
+  extraProductId?: string
+}) {
+  const plano = typeof input.plano === 'string' ? input.plano.trim().toLowerCase() : ''
+  if (!plano) return resolveLimiteFuncionariosFromPlano(input.plano)
+  if (plano === 'basic' || plano === 'free') return resolveLimiteFuncionariosFromPlano(plano)
+
+  const base = resolveLimiteFuncionariosFromPlano(plano)
+  if (base === null) return null
+  const baseIncluded = typeof base === 'number' && Number.isFinite(base) && base > 0 ? Math.floor(base) : 1
+
+  const fromMeta = resolveFuncionariosTotalFromMetadata(input.metadata)
+  const extraQty = resolveExtraEmployeesQtyFromSubscription(input.subscription, {
+    extraPriceId: input.extraPriceId,
+    extraProductId: input.extraProductId,
+  })
+
+  const max = plano === 'pro' || plano === 'team' ? 12 : 200
+
+  if (typeof extraQty === 'number') {
+    const total = baseIncluded + Math.max(0, extraQty)
+    return clampInt(total, 1, max)
+  }
+
+  if (fromMeta) return clampInt(Math.max(baseIncluded, fromMeta), 1, max)
+  return resolveLimiteFuncionariosFromPlano(plano)
+}
+
+function resolvePaymentStatus(value: unknown) {
+  const v = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (!v) return null
+  if (v === 'paid' || v === 'no_payment_required') return 'paid'
+  if (v === 'unpaid') return 'unpaid'
+  return null
 }
 
 async function findUsuarioIdByStripe(adminClient: ReturnType<typeof createClient>, input: { subscriptionId?: string | null; customerId?: string | null }) {
@@ -270,17 +437,32 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return jsonResponse(200, { ok: true })
   if (req.method !== 'POST') return jsonResponse(405, { error: 'method_not_allowed' })
 
-  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
-  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
-  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-  const stripeKey = (Deno.env.get('STRIPE_SECRET_KEY') ?? '').trim()
-  const stripeWebhookSecret = (Deno.env.get('STRIPE_WEBHOOK_SECRET') ?? '').trim()
+  const supabaseUrl = cleanEnvValue(Deno.env.get('SUPABASE_URL') ?? '')
+  const anonKey = cleanEnvValue(Deno.env.get('SUPABASE_ANON_KEY') ?? '')
+  const serviceRoleKey = cleanEnvValue(Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '')
+  const stripeKey = cleanEnvValue(Deno.env.get('STRIPE_SECRET_KEY') ?? '')
+  const stripeWebhookSecret = cleanEnvValue(Deno.env.get('STRIPE_WEBHOOK_SECRET') ?? '')
+  const stripeKeyMode =
+    stripeKey.startsWith('sk_live_') || stripeKey.startsWith('rk_live_')
+      ? 'live'
+      : stripeKey.startsWith('sk_test_') || stripeKey.startsWith('rk_test_')
+        ? 'test'
+        : null
 
   if (!supabaseUrl || !anonKey || !serviceRoleKey) {
     return jsonResponse(500, { error: 'missing_env' })
   }
   if (!stripeKey) {
     return jsonResponse(500, { error: 'missing_env', message: 'STRIPE_SECRET_KEY não configurada.' })
+  }
+
+  const stripeKeyHasQuery = stripeKey.includes('?') || stripeKey.includes('&') || stripeKey.includes('=') || stripeKey.includes('://')
+  if (!stripeKeyMode || stripeKeyHasQuery) {
+    return jsonResponse(500, {
+      error: 'invalid_env',
+      message: 'STRIPE_SECRET_KEY inválida. Use sk_live_... (ou rk_live_...) sem aspas, URL ou parâmetros.',
+      stripe_key_mode: stripeKeyMode,
+    })
   }
 
   const signatureHeader = req.headers.get('stripe-signature') ?? req.headers.get('Stripe-Signature')
@@ -312,15 +494,12 @@ Deno.serve(async (req) => {
 
     const nowIso = new Date().toISOString()
 
-    if (eventType === 'checkout.session.completed') {
+    if (eventType === 'checkout.session.completed' || eventType === 'checkout.session.async_payment_succeeded') {
       const metadata = (obj.metadata ?? null) as Record<string, unknown> | null
       const usuarioId = normalizeUuid(metadata?.usuario_id)
-      const itemRaw = typeof metadata?.item === 'string' ? metadata.item : typeof metadata?.plano === 'string' ? metadata.plano : null
-      const item = typeof itemRaw === 'string' ? itemRaw.trim().toLowerCase() : null
-      const plano = item && ['basic', 'pro', 'team', 'enterprise'].includes(item) ? item : null
-      const limiteFuncionarios = resolveLimiteFuncionariosFromPlano(plano)
-      const limiteAgendamentosMes = resolveLimiteAgendamentosMesFromPlano(plano)
+      const { plano } = resolvePlanoFromMetadata(metadata)
 
+      const paymentStatus = resolvePaymentStatus(obj.payment_status)
       const customerId = typeof obj.customer === 'string' ? obj.customer : null
       const subscriptionId = typeof obj.subscription === 'string' ? obj.subscription : null
       const sessionId = typeof obj.id === 'string' ? obj.id : null
@@ -331,33 +510,53 @@ Deno.serve(async (req) => {
         finalUsuarioId = found.ok ? found.usuarioId : null
       }
 
-      if (finalUsuarioId) {
+      if (finalUsuarioId && plano) {
         let venc: string | null = null
         let statusPagamento: string | null = null
+        let subscriptionObj: Record<string, unknown> | null = null
 
-        if (subscriptionId && plano) {
+        if (subscriptionId) {
           statusPagamento = 'ativo'
-          const subRes = await stripeApiRequest(`/subscriptions/${encodeURIComponent(subscriptionId)}`, { method: 'GET', key: stripeKey })
+          const subRes = await stripeApiRequest(`/subscriptions/${encodeURIComponent(subscriptionId)}?expand[]=items.data.price.product`, {
+            method: 'GET',
+            key: stripeKey,
+          })
           if (subRes.ok && subRes.body && typeof subRes.body === 'object') {
-            const sub = subRes.body as Record<string, unknown>
-            statusPagamento = mapStripeSubscriptionToPagamentoStatus(sub.status)
-            venc = toIsoDateFromUnixSeconds(sub.current_period_end)
+            subscriptionObj = subRes.body as Record<string, unknown>
+            statusPagamento = mapStripeSubscriptionToPagamentoStatus(subscriptionObj.status)
+            venc = toIsoDateFromUnixSeconds(subscriptionObj.current_period_end)
           }
+        } else if (paymentStatus === 'paid') {
+          statusPagamento = 'ativo'
+          venc = toIsoDatePlusDays(30)
         }
 
-        await applyUsuarioPaymentUpdate(adminClient, finalUsuarioId, {
-          plano: plano ?? undefined,
-          limite_funcionarios: plano ? limiteFuncionarios : undefined,
-          limite_agendamentos_mes: plano ? limiteAgendamentosMes : undefined,
-          status_pagamento: statusPagamento ?? undefined,
-          data_vencimento: venc ?? undefined,
-          free_trial_consumido: plano ? true : undefined,
-          stripe_customer_id: customerId,
-          stripe_subscription_id: subscriptionId,
-          stripe_checkout_session_id: sessionId,
-          stripe_last_event_id: eventId,
-          stripe_last_event_at: nowIso,
+        const extraPriceId = (Deno.env.get('STRIPE_PRICE_FUNCIONARIO_ADICIONAL') ?? '').trim()
+        const extraProductId = 'prod_Tik80yLbCUqUhZ'
+        const limiteFuncionarios = resolveLimiteFuncionariosFromStripe({
+          plano,
+          metadata,
+          subscription: subscriptionObj,
+          extraPriceId: extraPriceId || undefined,
+          extraProductId: extraProductId || undefined,
         })
+        const limiteAgendamentosMes = resolveLimiteAgendamentosMesFromPlano(plano)
+
+        if (statusPagamento) {
+          await applyUsuarioPaymentUpdate(adminClient, finalUsuarioId, {
+            plano,
+            limite_funcionarios: limiteFuncionarios,
+            limite_agendamentos_mes: limiteAgendamentosMes,
+            status_pagamento: statusPagamento,
+            data_vencimento: venc,
+            free_trial_consumido: true,
+            stripe_customer_id: customerId,
+            stripe_subscription_id: subscriptionId,
+            stripe_checkout_session_id: sessionId,
+            stripe_last_event_id: eventId,
+            stripe_last_event_at: nowIso,
+          })
+        }
       }
 
       return jsonResponse(200, { ok: true })
@@ -392,7 +591,15 @@ Deno.serve(async (req) => {
       const itemRaw = typeof metadata?.item === 'string' ? metadata.item : typeof metadata?.plano === 'string' ? metadata.plano : null
       const item = typeof itemRaw === 'string' ? itemRaw.trim().toLowerCase() : null
       const plano = item && ['basic', 'pro', 'team', 'enterprise'].includes(item) ? item : null
-      const limiteFuncionarios = resolveLimiteFuncionariosFromPlano(plano)
+      const extraPriceId = (Deno.env.get('STRIPE_PRICE_FUNCIONARIO_ADICIONAL') ?? '').trim()
+      const extraProductId = 'prod_Tik80yLbCUqUhZ'
+      const limiteFuncionarios = resolveLimiteFuncionariosFromStripe({
+        plano,
+        metadata,
+        subscription: obj,
+        extraPriceId: extraPriceId || undefined,
+        extraProductId: extraProductId || undefined,
+      })
       const limiteAgendamentosMes = resolveLimiteAgendamentosMesFromPlano(plano)
 
       let finalUsuarioId = usuarioIdFromMeta
@@ -474,8 +681,6 @@ Deno.serve(async (req) => {
     if (!isSuperAdmin && callerId !== finalUsuarioId) return jsonResponse(403, { error: 'forbidden' })
 
     const { item, plano } = resolvePlanoFromMetadata(metadata)
-    const limiteFuncionarios = resolveLimiteFuncionariosFromPlano(plano)
-    const limiteAgendamentosMes = resolveLimiteAgendamentosMesFromPlano(plano)
 
     const customerId = typeof session.customer === 'string' ? session.customer : null
     const subscriptionRaw = session.subscription
@@ -488,6 +693,8 @@ Deno.serve(async (req) => {
 
     let statusPagamento: string | null = null
     let venc: string | null = null
+
+    const paymentStatus = resolvePaymentStatus(session.payment_status)
 
     if (plano && subscriptionRaw && typeof subscriptionRaw === 'object') {
       const subObj = subscriptionRaw as Record<string, unknown>
@@ -502,9 +709,23 @@ Deno.serve(async (req) => {
       } else {
         statusPagamento = 'ativo'
       }
+    } else if (plano && paymentStatus === 'paid') {
+      statusPagamento = 'ativo'
+      venc = toIsoDatePlusDays(30)
     }
 
     const nowIso = new Date().toISOString()
+
+    const extraPriceId = (Deno.env.get('STRIPE_PRICE_FUNCIONARIO_ADICIONAL') ?? '').trim()
+    const extraProductId = 'prod_Tik80yLbCUqUhZ'
+    const limiteFuncionarios = resolveLimiteFuncionariosFromStripe({
+      plano,
+      metadata,
+      subscription: subscriptionRaw && typeof subscriptionRaw === 'object' ? subscriptionRaw : null,
+      extraPriceId: extraPriceId || undefined,
+      extraProductId: extraProductId || undefined,
+    })
+    const limiteAgendamentosMes = resolveLimiteAgendamentosMesFromPlano(plano)
 
     await applyUsuarioPaymentUpdate(adminClient, finalUsuarioId, {
       plano: plano ?? undefined,
@@ -536,36 +757,57 @@ Deno.serve(async (req) => {
     return jsonResponse(403, { error: 'forbidden' })
   }
 
-  const planKeys = new Set(['basic', 'pro', 'team', 'enterprise'])
+  const planKeys = new Set(['basic', 'pro', 'enterprise'])
   const serviceKeys = new Set(['setup_completo', 'consultoria_hora'])
   if (!planKeys.has(item) && !serviceKeys.has(item)) {
     return jsonResponse(400, { error: 'invalid_plano', message: `Item inválido: ${item}.` })
   }
 
-  const productMap: Record<string, string> = {
-    basic: 'prod_ThpUYX62q9wQBO',
-    pro: 'prod_ThpVufU2LvlS6y',
-    team: 'prod_ThpXPX4bYfq9qX',
-    enterprise: 'prod_ThpZyNiWVLRdMF',
-    setup_completo: 'prod_ThpbLbCktHM6KW',
-    consultoria_hora: 'prod_ThpcTypFiXLnt3',
+  const productIdMap: Record<string, string> = {
+    basic: 'prod_Tik9tEMnGcTjdq',
+    pro: 'prod_Tik8lu4o69znQA',
+    enterprise: 'prod_Tik9hxnnoWGI6a',
+    consultoria_hora: 'prod_TikBiK2IspRhUo',
+    setup_completo: 'prod_TikBQXciLFeI6O',
   }
 
-  const productId = productMap[item] ?? null
+  const productId = productIdMap[item] ?? null
   if (!productId) {
-    return jsonResponse(400, { error: 'missing_product', message: `Produto não configurado para item ${item}.` })
+    return jsonResponse(400, {
+      error: 'missing_product',
+      message: `Produto não configurado para item ${item}.`,
+    })
   }
 
   const productRes = await stripeApiRequest(`/products/${encodeURIComponent(productId)}`, { method: 'GET', key: stripeKey })
   if (!productRes.ok || !productRes.body || typeof productRes.body !== 'object') {
-    return jsonResponse(400, { error: 'stripe_error', message: 'Falha ao consultar produto no Stripe.', stripe: productRes.body })
+    const stripeMessage = (() => {
+      if (!productRes.body || typeof productRes.body !== 'object') return null
+      const body = productRes.body as Record<string, unknown>
+      const err = body.error
+      if (!err || typeof err !== 'object') return null
+      const msg = (err as Record<string, unknown>).message
+      return typeof msg === 'string' && msg.trim() ? msg.trim() : null
+    })()
+    return jsonResponse(400, {
+      error: 'stripe_error',
+      message: stripeMessage
+        ? `Falha ao consultar produto no Stripe (item=${item}, product=${productId}): ${stripeMessage}`
+        : `Falha ao consultar produto no Stripe (item=${item}, product=${productId}).`,
+      stripe_status: productRes.status,
+      stripe_key_mode: stripeKeyMode,
+      stripe: productRes.body,
+    })
   }
 
   const product = productRes.body as Record<string, unknown>
+  if (product.active !== true) {
+    return jsonResponse(400, { error: 'inactive_product', message: `Produto inativo no Stripe (item=${item}, product=${productId}).` })
+  }
   const dp = product.default_price
   const price = typeof dp === 'string' ? dp : dp && typeof dp === 'object' && typeof (dp as Record<string, unknown>).id === 'string' ? String((dp as Record<string, unknown>).id) : null
   if (!price) {
-    return jsonResponse(400, { error: 'missing_price', message: `Produto ${productId} sem default_price no Stripe.` })
+    return jsonResponse(400, { error: 'missing_price', message: `Produto sem default_price no Stripe (item=${item}, product=${productId}).` })
   }
 
   const origin = cleanUrl(req.headers.get('origin') ?? '')
@@ -583,7 +825,25 @@ Deno.serve(async (req) => {
     return jsonResponse(404, { error: 'usuario_not_found' })
   }
 
-  const mode = planKeys.has(item) ? 'subscription' : 'payment'
+  const rawMetodo = (payload.metodo ?? null) as unknown
+  const metodo = rawMetodo === 'pix' ? 'pix' : 'card'
+  const isPlan = planKeys.has(item)
+  const mode = isPlan && metodo !== 'pix' ? 'subscription' : 'payment'
+
+  const includedPro = 8
+  const maxPro = 12
+  let funcionariosTotal = 1
+  if (item === 'pro') {
+    const parsed = parsePositiveInt((payload as Record<string, unknown> | null)?.funcionarios_total)
+    if (!parsed) {
+      funcionariosTotal = includedPro
+    } else if (parsed > maxPro) {
+      return jsonResponse(400, { error: 'invalid_funcionarios_total', message: 'Para mais de 12 profissionais, use o plano EMPRESA.' })
+    } else {
+      funcionariosTotal = clampInt(parsed, includedPro, maxPro)
+    }
+  }
+  const extraQty = item === 'pro' ? Math.max(0, funcionariosTotal - includedPro) : 0
 
   const successUrl = `${siteUrl}/pagamento?checkout=success&usuario_id=${encodeURIComponent(usuarioId)}&item=${encodeURIComponent(item)}&plano=${encodeURIComponent(item)}&session_id={CHECKOUT_SESSION_ID}`
   const cancelUrl = `${siteUrl}/pagamento?checkout=cancel&usuario_id=${encodeURIComponent(usuarioId)}&item=${encodeURIComponent(item)}&plano=${encodeURIComponent(item)}`
@@ -596,15 +856,112 @@ Deno.serve(async (req) => {
   params.set('metadata[usuario_id]', usuarioId)
   params.set('metadata[item]', item)
   params.set('metadata[plano]', item)
+  params.set('metadata[metodo]', metodo)
+  params.set('metadata[billing_mode]', mode)
   params.set('metadata[created_by]', isSuperAdmin ? 'super_admin' : 'usuario')
+  params.set('metadata[funcionarios_total]', String(funcionariosTotal))
   if (mode === 'subscription') {
     params.set('subscription_data[metadata][usuario_id]', usuarioId)
     params.set('subscription_data[metadata][item]', item)
     params.set('subscription_data[metadata][plano]', item)
+    params.set('subscription_data[metadata][metodo]', metodo)
+    params.set('subscription_data[metadata][funcionarios_total]', String(funcionariosTotal))
   }
-  params.set('payment_method_types[0]', 'card')
-  params.set('line_items[0][price]', price)
+
+  const validatePriceForProduct = async (
+    candidatePriceId: string,
+    expectedProductId: string,
+    expectedMode: 'subscription' | 'payment'
+  ) => {
+    const id = (candidatePriceId ?? '').trim()
+    if (!id) return false
+    const res = await stripeApiRequest(`/prices/${encodeURIComponent(id)}?expand[]=product`, { method: 'GET', key: stripeKey })
+    if (!res.ok || !res.body || typeof res.body !== 'object') return false
+    const priceObj = res.body as Record<string, unknown>
+    if (priceObj.active !== true) return false
+    if (expectedMode === 'subscription' && priceObj.type !== 'recurring') return false
+    if (expectedMode === 'payment' && priceObj.type !== 'one_time') return false
+    const productRaw = priceObj.product
+    const productObj = productRaw && typeof productRaw === 'object' ? (productRaw as Record<string, unknown>) : null
+    const pid = typeof productRaw === 'string' ? productRaw : typeof productObj?.id === 'string' ? String(productObj.id) : ''
+    if (!pid || pid !== expectedProductId) return false
+    if (!productObj || productObj.active !== true) return false
+    return true
+  }
+
+  const defaultPriceOk = await validatePriceForProduct(price, productId, mode)
+  if (!defaultPriceOk) {
+    const expectedType = mode === 'subscription' ? 'recurring' : 'one_time'
+    return jsonResponse(400, {
+      error: 'invalid_default_price',
+      message: `default_price inválido para o modo ${mode} (esperado ${expectedType}) (item=${item}, product=${productId}, price=${price}).`,
+    })
+  }
+
+  let finalPrice = price
+  if (metodo !== 'pix') {
+    const envKey = `STRIPE_PRICE_${item.toUpperCase()}`
+    const altEnvKey = item === 'enterprise' ? 'STRIPE_PRICE_EMPRESA' : null
+    const fromEnv = ((Deno.env.get(envKey) ?? '').trim() || (altEnvKey ? (Deno.env.get(altEnvKey) ?? '').trim() : '')).trim()
+    if (fromEnv) {
+      const ok = await validatePriceForProduct(fromEnv, productId, mode)
+      if (ok) finalPrice = fromEnv
+    }
+  }
+  if (metodo === 'pix' && isPlan) {
+    const envKey = `STRIPE_PRICE_${item.toUpperCase()}_PIX`
+    const altEnvKey = item === 'enterprise' ? 'STRIPE_PRICE_EMPRESA_PIX' : null
+    const fromEnv = ((Deno.env.get(envKey) ?? '').trim() || (altEnvKey ? (Deno.env.get(altEnvKey) ?? '').trim() : '')).trim()
+    if (!fromEnv) {
+      return jsonResponse(400, {
+        error: 'missing_env',
+        message:
+          item === 'enterprise'
+            ? `Para PIX em planos, configure ${envKey} (ou ${altEnvKey}) com um Price (one-time) em BRL.`
+            : `Para PIX em planos, configure ${envKey} com um Price (one-time) em BRL.`,
+      })
+    }
+    const ok = await validatePriceForProduct(fromEnv, productId, 'payment')
+    if (!ok) return jsonResponse(400, { error: 'invalid_price', message: `O Price informado em ${envKey} não está ativo, não é one-time, ou não pertence ao produto ${productId}.` })
+    finalPrice = fromEnv
+  }
+
+  params.set('payment_method_types[0]', metodo)
+  params.set('line_items[0][price]', finalPrice)
   params.set('line_items[0][quantity]', '1')
+
+  if (item === 'pro' && extraQty > 0) {
+    const extraProductId = 'prod_Tik80yLbCUqUhZ'
+    const extraPriceEnvKey = mode === 'subscription' ? 'STRIPE_PRICE_FUNCIONARIO_ADICIONAL' : 'STRIPE_PRICE_FUNCIONARIO_ADICIONAL_PIX'
+    let extraPrice = (Deno.env.get(extraPriceEnvKey) ?? '').trim()
+    if (!extraPrice) {
+      const resolved = await resolveActivePriceIdForProduct({
+        productId: extraProductId,
+        key: stripeKey,
+        expectedMode: mode,
+        currency: 'brl',
+      })
+      if (resolved) extraPrice = resolved
+    }
+
+    if (!extraPrice) {
+      return jsonResponse(400, {
+        error: 'missing_env',
+        message: `Não encontrei um Price ativo (BRL) para o produto ${extraProductId}. Configure ${extraPriceEnvKey} com um Price no Stripe.`,
+      })
+    }
+
+    const ok = await validatePriceForProduct(extraPrice, extraProductId, mode)
+    if (!ok) {
+      const expectedType = mode === 'subscription' ? 'recurring' : 'one_time'
+      return jsonResponse(400, {
+        error: 'invalid_price',
+        message: `O Price informado em ${extraPriceEnvKey} não está ativo, não é ${expectedType}, ou não pertence ao produto ${extraProductId}.`,
+      })
+    }
+    params.set('line_items[1][price]', extraPrice)
+    params.set('line_items[1][quantity]', String(extraQty))
+  }
 
   const email = typeof usuarioRow.email === 'string' ? usuarioRow.email.trim() : ''
   if (email) params.set('customer_email', email)

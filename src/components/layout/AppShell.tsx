@@ -10,10 +10,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isFuncionario = appPrincipal?.kind === 'funcionario'
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
 
+  const plano = String(usuario?.plano ?? '').trim().toLowerCase()
+  const isProPlus = plano === 'pro' || plano === 'team' || plano === 'enterprise'
+
   const supportNumber = getOptionalEnv('VITE_SUPPORT_WHATSAPP_NUMBER')
-  const canUseWhatsappSupport = Boolean(
-    supportNumber && usuario && (usuario.plano === 'pro' || usuario.plano === 'team' || usuario.plano === 'enterprise')
-  )
+  const canUseWhatsappSupport = Boolean(supportNumber && usuario && isProPlus)
 
   const nav = isFuncionario
     ? [
@@ -23,7 +24,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         { to: '/dashboard', label: 'Agenda' },
         { to: '/servicos', label: 'Meus Serviços' },
         { to: '/clientes', label: 'Clientes' },
-        { to: '/relatorios', label: 'Relatórios' },
+        ...(isProPlus ? [{ to: '/relatorios', label: 'Relatórios' }] : []),
         { to: '/pagamento', label: 'Pagamento' },
         { to: '/funcionarios', label: 'Funcionários' },
         { to: '/configuracoes/whatsapp', label: 'WhatsApp' },

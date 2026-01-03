@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../../components/layout/AppShell'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
@@ -67,6 +68,12 @@ export function RelatoriosPage() {
   const { appPrincipal } = useAuth()
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
   const usuarioId = usuario?.id ?? null
+  const navigate = useNavigate()
+
+  const canUseRelatorios = useMemo(() => {
+    const p = String(usuario?.plano ?? '').trim().toLowerCase()
+    return p === 'pro' || p === 'team' || p === 'enterprise'
+  }, [usuario?.plano])
 
   const today = useMemo(() => {
     const d = new Date()
@@ -127,6 +134,7 @@ export function RelatoriosPage() {
   }, [end, start, usuarioId])
 
   useEffect(() => {
+    if (!canUseRelatorios) return
     void (async () => {
       await Promise.resolve()
       await load()
@@ -134,7 +142,7 @@ export function RelatoriosPage() {
       setError(e instanceof Error ? e.message : 'Erro ao carregar relatórios')
       setLoading(false)
     })
-  }, [load])
+  }, [canUseRelatorios, load])
 
   const metrics = useMemo(() => {
     const isCancelado = (s: string) => s.trim().toLowerCase() === 'cancelado'
@@ -320,6 +328,22 @@ export function RelatoriosPage() {
     return (
       <AppShell>
         <div className="text-slate-700">Acesso restrito.</div>
+      </AppShell>
+    )
+  }
+
+  if (!canUseRelatorios) {
+    return (
+      <AppShell>
+        <Card>
+          <div className="p-6 space-y-3">
+            <div className="text-sm font-semibold text-slate-900">Relatórios</div>
+            <div className="text-sm text-slate-600">Disponível apenas nos planos PRO e EMPRESA.</div>
+            <div className="flex justify-end">
+              <Button onClick={() => navigate('/pagamento')}>Ver planos</Button>
+            </div>
+          </div>
+        </Card>
       </AppShell>
     )
   }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AppShell } from '../../components/layout/AppShell'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
@@ -6,7 +6,62 @@ import { checkJwtProject, supabase, supabaseEnv } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
 
 const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nLocal: {endereco}\n\nNos vemos em breve!\n{nome_negocio}`
-const defaultLembrete = `Oi {nome}!\n\nLembrete: você tem agendamento amanhã às {hora}.\n\nSe não puder comparecer, me avise!\n{telefone_profissional}`
+const defaultLembrete = `Oi {nome}!\n\nLembrete: você tem agendamento em {data} às {hora}.\n\nSe não puder comparecer, me avise!\n{telefone_profissional}`
+
+type TemplatePreset = {
+  key: string
+  title: string
+  confirmacao: string
+  lembrete: string
+}
+
+const templatePresets: TemplatePreset[] = [
+  {
+    key: 'padrao_servicos',
+    title: 'Padrão (serviços)',
+    confirmacao: defaultConfirmacao,
+    lembrete: defaultLembrete,
+  },
+  {
+    key: 'salao',
+    title: 'Salão / Barbearia',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Seu horário está confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté já!\n{nome_negocio}`,
+    lembrete:
+      `Oi {nome}!\n\n⏰ Lembrete do seu horário:\n📅 {data} às {hora}\n✂️ {servico}\nProfissional: {profissional_nome}\n\nSe precisar remarcar, fale com a gente: {telefone_profissional}`,
+  },
+  {
+    key: 'odontologia',
+    title: 'Odontologia',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Sua consulta está confirmada:\n📅 {data} às {hora}\n🦷 {servico}\n\nDoutor(a): {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nQualquer dúvida: {telefone_profissional}\n{nome_negocio}`,
+    lembrete:
+      `Olá {nome}!\n\n🦷 Lembrete da sua consulta:\n📅 {data} às {hora}\nProcedimento: {servico}\nProfissional: {profissional_nome}\n\nSe precisar remarcar: {telefone_profissional}`,
+  },
+  {
+    key: 'estetica',
+    title: 'Estética / Bem-estar',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Seu atendimento está confirmado:\n📅 {data} às {hora}\n💆 {servico}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté breve!\n{nome_negocio}`,
+    lembrete:
+      `Oi {nome}!\n\n✨ Lembrete do seu atendimento:\n📅 {data} às {hora}\n💆 {servico}\n\nQualquer ajuste: {telefone_profissional}`,
+  },
+]
+
+const templateVars: Array<{ key: string; label: string }> = [
+  { key: 'nome', label: 'Cliente' },
+  { key: 'data', label: 'Data' },
+  { key: 'hora', label: 'Hora' },
+  { key: 'servico', label: 'Serviço' },
+  { key: 'preco', label: 'Preço' },
+  { key: 'profissional_nome', label: 'Profissional' },
+  { key: 'telefone_profissional', label: 'Telefone' },
+  { key: 'unidade_nome', label: 'Unidade' },
+  { key: 'unidade_endereco', label: 'Endereço unidade' },
+  { key: 'unidade_telefone', label: 'Telefone unidade' },
+  { key: 'endereco', label: 'Endereço (fallback)' },
+  { key: 'nome_negocio', label: 'Nome do negócio' },
+]
 
 type AgendamentoConfirmadoRow = {
   id: string
@@ -134,6 +189,10 @@ export function MensagensSettingsPage() {
 
   const [mensagemConfirmacao, setMensagemConfirmacao] = useState(defaultConfirmacao)
   const [mensagemLembrete, setMensagemLembrete] = useState(defaultLembrete)
+  const [presetKey, setPresetKey] = useState(templatePresets[0]?.key ?? 'padrao_servicos')
+  const [lastField, setLastField] = useState<'confirmacao' | 'lembrete'>('confirmacao')
+  const confirmacaoRef = useRef<HTMLTextAreaElement | null>(null)
+  const lembreteRef = useRef<HTMLTextAreaElement | null>(null)
   const [enviarConfirmacao, setEnviarConfirmacao] = useState(true)
   const [enviarLembrete, setEnviarLembrete] = useState(false)
   const [lembreteHorasAntes, setLembreteHorasAntes] = useState(24)
@@ -320,6 +379,34 @@ export function MensagensSettingsPage() {
     setTimeout(() => setSaved(false), 2000)
   }
 
+  const applyPreset = (target: 'confirmacao' | 'lembrete' | 'both') => {
+    const preset = templatePresets.find((p) => p.key === presetKey) ?? templatePresets[0]
+    if (!preset) return
+    if (target === 'confirmacao' || target === 'both') setMensagemConfirmacao(preset.confirmacao)
+    if (target === 'lembrete' || target === 'both') setMensagemLembrete(preset.lembrete)
+  }
+
+  const insertVar = (key: string) => {
+    const token = `{${key}}`
+    const active = lastField === 'confirmacao' ? confirmacaoRef.current : lembreteRef.current
+    const getter = lastField === 'confirmacao' ? mensagemConfirmacao : mensagemLembrete
+    const setter = lastField === 'confirmacao' ? setMensagemConfirmacao : setMensagemLembrete
+    if (!active) {
+      setter(`${getter}${getter ? ' ' : ''}${token}`)
+      return
+    }
+
+    const start = active.selectionStart ?? getter.length
+    const end = active.selectionEnd ?? getter.length
+    const next = `${getter.slice(0, start)}${token}${getter.slice(end)}`
+    setter(next)
+    requestAnimationFrame(() => {
+      active.focus()
+      const pos = start + token.length
+      active.setSelectionRange(pos, pos)
+    })
+  }
+
   return (
     <AppShell>
       <div className="space-y-6">
@@ -497,6 +584,58 @@ export function MensagensSettingsPage() {
 
         <Card>
           <div className="p-6 space-y-4">
+            <div className="text-sm font-semibold text-slate-900">Modelos prontos</div>
+            <div className="text-sm text-slate-600">Escolha um modelo e ajuste se quiser. As variáveis são preenchidas automaticamente com dados reais do agendamento.</div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="block">
+                <div className="text-sm font-medium text-slate-700 mb-1">Modelo</div>
+                <select
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                  value={presetKey}
+                  onChange={(e) => setPresetKey(e.target.value)}
+                  disabled={!canEditTemplates || saving || loading}
+                >
+                  {templatePresets.map((p) => (
+                    <option key={p.key} value={p.key}>
+                      {p.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="flex items-end justify-end gap-2">
+                <Button variant="secondary" onClick={() => applyPreset('confirmacao')} disabled={!canEditTemplates || saving || loading}>
+                  Aplicar na confirmação
+                </Button>
+                <Button variant="secondary" onClick={() => applyPreset('lembrete')} disabled={!canEditTemplates || saving || loading}>
+                  Aplicar no lembrete
+                </Button>
+                <Button variant="secondary" onClick={() => applyPreset('both')} disabled={!canEditTemplates || saving || loading}>
+                  Aplicar nos dois
+                </Button>
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="p-6 space-y-4">
+            <div className="text-sm font-semibold text-slate-900">Variáveis</div>
+            <div className="text-sm text-slate-600">Clique para inserir no campo selecionado (confirmação/lembrete).</div>
+
+            <div className="flex flex-wrap gap-2">
+              {templateVars.map((v) => (
+                <Button key={v.key} variant="secondary" onClick={() => insertVar(v.key)} disabled={!canEditTemplates || saving || loading}>
+                  {v.label}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <div className="p-6 space-y-4">
             <div className="text-sm font-semibold text-slate-900">Mensagem de confirmação</div>
             {loading ? (
               <div className="text-sm text-slate-600">Carregando…</div>
@@ -506,6 +645,8 @@ export function MensagensSettingsPage() {
                 value={mensagemConfirmacao}
                 onChange={(e) => setMensagemConfirmacao(e.target.value)}
                 disabled={!canEditTemplates || saving}
+                ref={confirmacaoRef}
+                onFocus={() => setLastField('confirmacao')}
               />
             )}
           </div>
@@ -522,6 +663,8 @@ export function MensagensSettingsPage() {
                 value={mensagemLembrete}
                 onChange={(e) => setMensagemLembrete(e.target.value)}
                 disabled={!canEditTemplates || saving}
+                ref={lembreteRef}
+                onFocus={() => setLastField('lembrete')}
               />
             )}
           </div>

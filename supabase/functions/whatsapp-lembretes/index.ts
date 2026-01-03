@@ -35,6 +35,10 @@ type SuperAdminConfigRow = {
 
 type ServicoRow = { nome: string | null; preco: number | null }
 
+type FuncionarioRow = { nome_completo: string | null; telefone: string | null }
+
+type UnidadeRow = { nome: string | null; endereco: string | null; telefone: string | null }
+
 type AgendamentoRow = {
   id: string
   usuario_id: string
@@ -46,6 +50,8 @@ type AgendamentoRow = {
   lembrete_enviado: boolean | null
   confirmacao_enviada?: boolean | null
   servico: ServicoRow | null
+  funcionario?: FuncionarioRow | null
+  unidade?: UnidadeRow | null
 }
 
 type UsuarioPartialRow = {
@@ -97,6 +103,17 @@ function sanitizeInstanceName(input: string) {
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '')
   return normalized.slice(0, 50) || 'smagenda'
+}
+
+function normalizePlanoLabel(planoRaw: unknown) {
+  const raw = typeof planoRaw === 'string' ? planoRaw.trim() : ''
+  if (!raw) return ''
+  const p = raw.toLowerCase()
+  if (p === 'enterprise') return 'EMPRESA'
+  if (p === 'pro' || p === 'team') return 'PRO'
+  if (p === 'basic') return 'BASIC'
+  if (p === 'free') return 'FREE'
+  return raw.toUpperCase()
 }
 
 function sanitizePhoneDigits(input: string) {
@@ -411,6 +428,7 @@ Deno.serve(async (req) => {
 
   const isMissingColumnError = (message: string) => message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
   const isMissingTableError = (message: string) => message.includes('schema cache') || message.includes("Could not find the table 'public.")
+  const isMissingRelationshipError = (message: string) => message.toLowerCase().includes('could not find a relationship between')
 
   const { data: saRaw, error: saErr } = await adminClient
     .from('super_admin')
@@ -472,7 +490,7 @@ Deno.serve(async (req) => {
 
     const venc = (u.data_vencimento ?? '').trim()
     const vencPart = venc ? `\n\nVencimento: ${formatBRDate(venc)}` : ''
-    const plano = (u.plano ?? '').trim().toUpperCase()
+    const plano = normalizePlanoLabel(u.plano)
     const planoPart = plano ? `\nPlano: ${plano}` : ''
     const business = (u.nome_negocio ?? '').trim()
     const header = business ? `Olá! Aqui é o SMagenda (${business}).` : 'Olá! Aqui é o SMagenda.'
@@ -595,7 +613,7 @@ Deno.serve(async (req) => {
 
       const instanceNameRaw = u.whatsapp_instance_name ?? u.slug ?? ''
       const instanceName = sanitizeInstanceName(instanceNameRaw)
-      const plano = (u.plano ?? '').trim().toUpperCase()
+      const plano = normalizePlanoLabel(u.plano)
       const planoPart = plano ? `\nPlano: ${plano}` : ''
       const business = (u.nome_negocio ?? '').trim()
       const header = business ? `Olá! Aqui é o SMagenda (${business}).` : 'Olá! Aqui é o SMagenda.'
@@ -644,20 +662,43 @@ Deno.serve(async (req) => {
 
   if (agendamentoId) {
     let canUpdateConfirmacao = true
-    const agSel = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco)'
-    const agFallbackSel = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,servico:servicos(nome,preco)'
+    const agSelFull =
+      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+    const agSelFullNoFlag =
+      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+    const agSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco)'
+    const agSelBaseNoFlag = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,servico:servicos(nome,preco)'
 
-    const agFirst = await adminClient.from('agendamentos').select(agSel).eq('id', agendamentoId).maybeSingle()
-    if (agFirst.error) {
-      if (!isMissingColumnError(agFirst.error.message)) {
-        return jsonResponse(400, { error: 'load_agendamento_failed', message: agFirst.error.message })
+    const first = await adminClient.from('agendamentos').select(agSelFull).eq('id', agendamentoId).maybeSingle()
+    const agData = await (async () => {
+      if (!first.error) return first
+
+      const msg = first.error.message
+      const missingFlag = isMissingColumnError(msg)
+      const missingJoin = isMissingTableError(msg) || isMissingRelationshipError(msg)
+
+      if (missingFlag) {
+        canUpdateConfirmacao = false
+        const second = await adminClient.from('agendamentos').select(agSelFullNoFlag).eq('id', agendamentoId).maybeSingle()
+        if (!second.error) return second
+        if (isMissingTableError(second.error.message) || isMissingRelationshipError(second.error.message) || isMissingColumnError(second.error.message)) {
+          return await adminClient.from('agendamentos').select(agSelBaseNoFlag).eq('id', agendamentoId).maybeSingle()
+        }
+        return second
       }
-      canUpdateConfirmacao = false
-    }
 
-    const agData = agFirst.error
-      ? await adminClient.from('agendamentos').select(agFallbackSel).eq('id', agendamentoId).maybeSingle()
-      : agFirst
+      if (missingJoin || isMissingColumnError(msg)) {
+        const second = await adminClient.from('agendamentos').select(agSelBase).eq('id', agendamentoId).maybeSingle()
+        if (!second.error) return second
+        if (isMissingColumnError(second.error.message)) {
+          canUpdateConfirmacao = false
+          return await adminClient.from('agendamentos').select(agSelBaseNoFlag).eq('id', agendamentoId).maybeSingle()
+        }
+        return second
+      }
+
+      return first
+    })()
 
     if (agData.error) {
       return jsonResponse(400, { error: 'load_agendamento_failed', message: agData.error.message })
@@ -685,15 +726,24 @@ Deno.serve(async (req) => {
     const instanceName = sanitizeInstanceName(instanceNameRaw)
 
     const tmpl = (uRow.mensagem_confirmacao ?? '').trim() ? (uRow.mensagem_confirmacao ?? '') : defaultConfirmacao
+
+    const unidadeEndereco = (agRow.unidade?.endereco ?? '').trim()
+    const endereco = unidadeEndereco || (uRow.endereco ?? '')
+    const telefoneProfissional = (agRow.funcionario?.telefone ?? '').trim() || (uRow.telefone ?? '')
+
     const vars = {
       nome: agRow.cliente_nome ?? '',
       data: formatBRDate(agRow.data),
       hora: agRow.hora_inicio ?? '',
       servico: agRow.servico?.nome ?? '',
       preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
-      endereco: uRow.endereco ?? '',
+      endereco,
       nome_negocio: uRow.nome_negocio ?? '',
-      telefone_profissional: uRow.telefone ?? '',
+      telefone_profissional: telefoneProfissional,
+      profissional_nome: agRow.funcionario?.nome_completo ?? '',
+      unidade_nome: agRow.unidade?.nome ?? '',
+      unidade_endereco: unidadeEndereco,
+      unidade_telefone: agRow.unidade?.telefone ?? '',
     }
     const text = interpolateTemplate(tmpl, vars).trim()
     const phoneRaw = agRow.cliente_telefone ?? ''
@@ -772,15 +822,36 @@ Deno.serve(async (req) => {
       const confirmStartDate = confirmStart.toISOString().slice(0, 10)
       const confirmEndDate = confirmEnd.toISOString().slice(0, 10)
 
-      const { data: confirmAgs, error: confirmErr } = await adminClient
+      const confirmSelFull =
+        'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+      const confirmSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco)'
+
+      const confirmFirst = await adminClient
         .from('agendamentos')
-        .select('id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco)')
+        .select(confirmSelFull)
         .eq('usuario_id', uRow.id)
         .eq('status', 'confirmado')
         .eq('confirmacao_enviada', false)
         .gte('data', confirmStartDate)
         .lte('data', confirmEndDate)
         .limit(200)
+
+      const confirmSecond =
+        confirmFirst.error &&
+        (isMissingTableError(confirmFirst.error.message) || isMissingRelationshipError(confirmFirst.error.message) || isMissingColumnError(confirmFirst.error.message))
+          ? await adminClient
+              .from('agendamentos')
+              .select(confirmSelBase)
+              .eq('usuario_id', uRow.id)
+              .eq('status', 'confirmado')
+              .eq('confirmacao_enviada', false)
+              .gte('data', confirmStartDate)
+              .lte('data', confirmEndDate)
+              .limit(200)
+          : null
+
+      const confirmAgs = (confirmSecond ? confirmSecond.data : confirmFirst.data) as unknown as AgendamentoRow[] | null
+      const confirmErr = confirmSecond ? confirmSecond.error : confirmFirst.error
 
       if (confirmErr) {
         confirmFailed++
@@ -793,15 +864,24 @@ Deno.serve(async (req) => {
           }
 
           const tmpl = (uRow.mensagem_confirmacao ?? '').trim() ? (uRow.mensagem_confirmacao ?? '') : defaultConfirmacao
+
+          const unidadeEndereco = (agRow.unidade?.endereco ?? '').trim()
+          const endereco = unidadeEndereco || (uRow.endereco ?? '')
+          const telefoneProfissional = (agRow.funcionario?.telefone ?? '').trim() || (uRow.telefone ?? '')
+
           const vars = {
             nome: agRow.cliente_nome ?? '',
             data: formatBRDate(agRow.data),
             hora: agRow.hora_inicio ?? '',
             servico: agRow.servico?.nome ?? '',
             preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
-            endereco: uRow.endereco ?? '',
+            endereco,
             nome_negocio: uRow.nome_negocio ?? '',
-            telefone_profissional: uRow.telefone ?? '',
+            telefone_profissional: telefoneProfissional,
+            profissional_nome: agRow.funcionario?.nome_completo ?? '',
+            unidade_nome: agRow.unidade?.nome ?? '',
+            unidade_endereco: unidadeEndereco,
+            unidade_telefone: agRow.unidade?.telefone ?? '',
           }
           const text = interpolateTemplate(tmpl, vars).trim()
           const phoneRaw = agRow.cliente_telefone ?? ''
@@ -850,15 +930,36 @@ Deno.serve(async (req) => {
       const startDate = targetStart.toISOString().slice(0, 10)
       const endDate = targetEnd.toISOString().slice(0, 10)
 
-      const { data: ags, error: agErr } = await adminClient
+      const reminderSelFull =
+        'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,lembrete_enviado,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+      const reminderSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,lembrete_enviado,servico:servicos(nome,preco)'
+
+      const reminderFirst = await adminClient
         .from('agendamentos')
-        .select('id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,lembrete_enviado,servico:servicos(nome,preco)')
+        .select(reminderSelFull)
         .eq('usuario_id', uRow.id)
         .eq('status', 'confirmado')
         .eq('lembrete_enviado', false)
         .gte('data', startDate)
         .lte('data', endDate)
         .limit(200)
+
+      const reminderSecond =
+        reminderFirst.error &&
+        (isMissingTableError(reminderFirst.error.message) || isMissingRelationshipError(reminderFirst.error.message) || isMissingColumnError(reminderFirst.error.message))
+          ? await adminClient
+              .from('agendamentos')
+              .select(reminderSelBase)
+              .eq('usuario_id', uRow.id)
+              .eq('status', 'confirmado')
+              .eq('lembrete_enviado', false)
+              .gte('data', startDate)
+              .lte('data', endDate)
+              .limit(200)
+          : null
+
+      const ags = (reminderSecond ? reminderSecond.data : reminderFirst.data) as unknown as AgendamentoRow[] | null
+      const agErr = reminderSecond ? reminderSecond.error : reminderFirst.error
 
       if (agErr) {
         reminderFailed++
@@ -880,14 +981,24 @@ Deno.serve(async (req) => {
           }
 
           const tmpl = uRow.mensagem_lembrete ?? ''
+
+          const unidadeEndereco = (agRow.unidade?.endereco ?? '').trim()
+          const endereco = unidadeEndereco || (uRow.endereco ?? '')
+          const telefoneProfissional = (agRow.funcionario?.telefone ?? '').trim() || (uRow.telefone ?? '')
+
           const vars = {
             nome: agRow.cliente_nome ?? '',
             data: formatBRDate(agRow.data),
             hora: agRow.hora_inicio ?? '',
             servico: agRow.servico?.nome ?? '',
             preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
+            endereco,
             nome_negocio: uRow.nome_negocio ?? '',
-            telefone_profissional: uRow.telefone ?? '',
+            telefone_profissional: telefoneProfissional,
+            profissional_nome: agRow.funcionario?.nome_completo ?? '',
+            unidade_nome: agRow.unidade?.nome ?? '',
+            unidade_endereco: unidadeEndereco,
+            unidade_telefone: agRow.unidade?.telefone ?? '',
           }
           const text = interpolateTemplate(tmpl, vars).trim()
           const phoneRaw = agRow.cliente_telefone ?? ''

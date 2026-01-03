@@ -257,6 +257,11 @@ export function DashboardPage() {
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
   const usuarioId = usuario?.id ?? null
 
+  const canUseRecurringBlocks = useMemo(() => {
+    const p = String(usuario?.plano ?? '').trim().toLowerCase()
+    return p === 'pro' || p === 'team' || p === 'enterprise'
+  }, [usuario?.plano])
+
   useEffect(() => {
     const search = location.search ?? ''
     if (!search) return
@@ -596,9 +601,12 @@ export function DashboardPage() {
     return candidates[0] ?? null
   }
 
+  const effectiveBlockRepeat = canUseRecurringBlocks ? blockRepeat : 'none'
+  const effectiveBlockRepeatUntil = canUseRecurringBlocks ? blockRepeatUntil : ''
+
   const repeatPreview = useMemo(() => {
-    return buildRepeatKeys(dayKey, blockRepeat, blockRepeatUntil.trim() ? blockRepeatUntil : null)
-  }, [blockRepeat, blockRepeatUntil, dayKey])
+    return buildRepeatKeys(dayKey, effectiveBlockRepeat, effectiveBlockRepeatUntil.trim() ? effectiveBlockRepeatUntil : null)
+  }, [dayKey, effectiveBlockRepeat, effectiveBlockRepeatUntil])
 
   const canSaveBlock = useMemo(() => {
     if (!usuarioId) return false
@@ -658,7 +666,11 @@ export function DashboardPage() {
     const funcionarioId = blockFuncionarioId.trim() ? blockFuncionarioId : null
     const motivo = blockMotivo.trim() ? blockMotivo.trim() : null
 
-    const { keys, error: repeatErr } = buildRepeatKeys(dayKey, blockRepeat, blockRepeatUntil.trim() ? blockRepeatUntil : null)
+    const { keys, error: repeatErr } = buildRepeatKeys(
+      dayKey,
+      effectiveBlockRepeat,
+      effectiveBlockRepeatUntil.trim() ? effectiveBlockRepeatUntil : null
+    )
     if (repeatErr) {
       setError(repeatErr)
       setSavingBlock(false)
@@ -925,7 +937,9 @@ export function DashboardPage() {
                 <select
                   className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
                   value={blockRepeat}
+                  disabled={!canUseRecurringBlocks}
                   onChange={(e) => {
+                    if (!canUseRecurringBlocks) return
                     const next = e.target.value as RepeatKind
                     setBlockRepeat(next)
                     if (next === 'none') {
@@ -938,9 +952,9 @@ export function DashboardPage() {
                   }}
                 >
                   <option value="none">Não repetir</option>
-                  <option value="daily">Diariamente</option>
-                  <option value="weekly">Semanalmente</option>
-                  <option value="monthly">Mensalmente</option>
+                  {canUseRecurringBlocks ? <option value="daily">Diariamente</option> : null}
+                  {canUseRecurringBlocks ? <option value="weekly">Semanalmente</option> : null}
+                  {canUseRecurringBlocks ? <option value="monthly">Mensalmente</option> : null}
                 </select>
               </label>
               <div className="sm:col-span-3">
@@ -1017,7 +1031,7 @@ export function DashboardPage() {
                         <div key={ag.id} className="p-3 flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="text-sm font-semibold text-slate-900 truncate">
-                              {normalizeTimeHHMM(ag.hora_inicio)} — {ag.cliente_nome}
+                              {(normalizeTimeHHMM(ag.hora_inicio) || '—')} — {ag.cliente_nome}
                             </div>
                             <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
                             <div className="text-sm text-slate-700">
@@ -1042,7 +1056,8 @@ export function DashboardPage() {
                   const isStart = Boolean(agStart)
                   const visible = isStart && matchesFilters(agCover)
                   const statusUi = resolveStatusUi(agCover.status)
-                  const timeLabel = isStart ? normalizeTimeHHMM(agCover.hora_inicio) : time
+                  const startLabel = normalizeTimeHHMM(agCover.hora_inicio)
+                  const timeLabel = isStart && startLabel ? startLabel : time
                   return (
                     <div key={time} className="p-4 flex items-start justify-between gap-3">
                       <div>
