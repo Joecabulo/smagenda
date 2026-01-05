@@ -24,6 +24,16 @@ type ServicoOption = { id: string; nome: string; cor: string | null }
 
 type Bloqueio = { id: string; data: string; hora_inicio: string; hora_fim: string; motivo: string | null; funcionario_id: string | null }
 
+const weekdayOptions = [
+  { value: 1, label: 'S' },
+  { value: 2, label: 'T' },
+  { value: 3, label: 'Q' },
+  { value: 4, label: 'Q' },
+  { value: 5, label: 'S' },
+  { value: 6, label: 'S' },
+  { value: 0, label: 'D' },
+]
+
 function formatSupabaseError(err: { message: string; details?: string | null; hint?: string | null; code?: string | null }) {
   const parts = [err.message]
   if (err.code) parts.push(`code=${err.code}`)
@@ -237,7 +247,7 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
 }
 
 export function FuncionarioAgendaPage() {
-  const { appPrincipal } = useAuth()
+  const { appPrincipal, refresh } = useAuth()
   const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
   const funcionarioId = funcionario?.id ?? null
   const usuarioMasterId = funcionario?.usuario_master_id ?? null
@@ -247,9 +257,18 @@ export function FuncionarioAgendaPage() {
     horario_fim: string | null
     intervalo_inicio: string | null
     intervalo_fim: string | null
+    dias_trabalho: number[] | null
   } | null>(null)
 
   const [usuarioMasterPlano, setUsuarioMasterPlano] = useState<string | null>(null)
+
+  const [horarioStart, setHorarioStart] = useState('')
+  const [horarioEnd, setHorarioEnd] = useState('')
+  const [horarioDays, setHorarioDays] = useState<number[]>([])
+  const [horarioIntervalStart, setHorarioIntervalStart] = useState('')
+  const [horarioIntervalEnd, setHorarioIntervalEnd] = useState('')
+  const [horarioTouched, setHorarioTouched] = useState(false)
+  const [horarioSaving, setHorarioSaving] = useState(false)
 
   const [date, setDate] = useState(() => {
     const now = new Date()
@@ -337,6 +356,101 @@ export function FuncionarioAgendaPage() {
     usuarioMasterHorario?.intervalo_fim,
   ])
 
+  const effectiveHorario = useMemo(() => {
+    const baseStart = funcionario?.horario_inicio ?? usuarioMasterHorario?.horario_inicio ?? ''
+    const baseEnd = funcionario?.horario_fim ?? usuarioMasterHorario?.horario_fim ?? ''
+    const baseDays = funcionario?.dias_trabalho ?? usuarioMasterHorario?.dias_trabalho ?? [1, 2, 3, 4, 5]
+    const baseIvStart = funcionario?.intervalo_inicio ?? usuarioMasterHorario?.intervalo_inicio ?? ''
+    const baseIvEnd = funcionario?.intervalo_fim ?? usuarioMasterHorario?.intervalo_fim ?? ''
+    return { baseStart, baseEnd, baseDays, baseIvStart, baseIvEnd }
+  }, [
+    funcionario?.dias_trabalho,
+    funcionario?.horario_fim,
+    funcionario?.horario_inicio,
+    funcionario?.intervalo_fim,
+    funcionario?.intervalo_inicio,
+    usuarioMasterHorario?.dias_trabalho,
+    usuarioMasterHorario?.horario_fim,
+    usuarioMasterHorario?.horario_inicio,
+    usuarioMasterHorario?.intervalo_fim,
+    usuarioMasterHorario?.intervalo_inicio,
+  ])
+
+  const currentHorario = useMemo(() => {
+    if (horarioTouched) {
+      return {
+        start: horarioStart,
+        end: horarioEnd,
+        days: horarioDays,
+        intervalStart: horarioIntervalStart,
+        intervalEnd: horarioIntervalEnd,
+      }
+    }
+    return {
+      start: effectiveHorario.baseStart,
+      end: effectiveHorario.baseEnd,
+      days: effectiveHorario.baseDays,
+      intervalStart: effectiveHorario.baseIvStart,
+      intervalEnd: effectiveHorario.baseIvEnd,
+    }
+  }, [
+    effectiveHorario.baseDays,
+    effectiveHorario.baseEnd,
+    effectiveHorario.baseIvEnd,
+    effectiveHorario.baseIvStart,
+    effectiveHorario.baseStart,
+    horarioDays,
+    horarioEnd,
+    horarioIntervalEnd,
+    horarioIntervalStart,
+    horarioStart,
+    horarioTouched,
+  ])
+
+  const touchHorario = () => {
+    if (horarioTouched) return
+    setHorarioStart(effectiveHorario.baseStart)
+    setHorarioEnd(effectiveHorario.baseEnd)
+    setHorarioDays(effectiveHorario.baseDays)
+    setHorarioIntervalStart(effectiveHorario.baseIvStart)
+    setHorarioIntervalEnd(effectiveHorario.baseIvEnd)
+    setHorarioTouched(true)
+  }
+
+  const horarioValidationError = useMemo(() => {
+    const start = currentHorario.start.trim()
+    const end = currentHorario.end.trim()
+    if (!start || !end) return 'Informe início e fim.'
+    const startMin = parseTimeToMinutes(start)
+    const endMin = parseTimeToMinutes(end)
+    if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return 'Horário inválido.'
+    if (endMin <= startMin) return 'O fim deve ser após o início.'
+    if (!currentHorario.days || currentHorario.days.length === 0) return 'Selecione ao menos um dia.'
+    const invalidDay = currentHorario.days.some((d) => !Number.isFinite(d) || d < 0 || d > 6)
+    if (invalidDay) return 'Dias inválidos.'
+
+    const ivStart = currentHorario.intervalStart.trim()
+    const ivEnd = currentHorario.intervalEnd.trim()
+    const hasIvStart = Boolean(ivStart)
+    const hasIvEnd = Boolean(ivEnd)
+    if (hasIvStart !== hasIvEnd) return 'Informe início e fim do intervalo (ou deixe ambos vazios).'
+    if (hasIvStart && hasIvEnd) {
+      const ivStartMin = parseTimeToMinutes(ivStart)
+      const ivEndMin = parseTimeToMinutes(ivEnd)
+      if (!Number.isFinite(ivStartMin) || !Number.isFinite(ivEndMin)) return 'Intervalo inválido.'
+      if (ivEndMin <= ivStartMin) return 'O fim do intervalo deve ser após o início.'
+      if (ivStartMin < startMin || ivEndMin > endMin) return 'Intervalo deve estar dentro do horário de trabalho.'
+    }
+
+    return null
+  }, [currentHorario.days, currentHorario.end, currentHorario.intervalEnd, currentHorario.intervalStart, currentHorario.start])
+
+  const canSaveHorario = useMemo(() => {
+    if (!funcionarioId) return false
+    if (horarioSaving) return false
+    return !horarioValidationError
+  }, [funcionarioId, horarioSaving, horarioValidationError])
+
   const totalDia = useMemo(() => {
     if (!funcionario?.pode_ver_financeiro) return 0
     return agendamentos
@@ -352,7 +466,7 @@ export function FuncionarioAgendaPage() {
 
       const { data: masterHorarioData } = await supabase
         .from('usuarios')
-        .select('horario_inicio,horario_fim,intervalo_inicio,intervalo_fim,plano')
+        .select('horario_inicio,horario_fim,intervalo_inicio,intervalo_fim,dias_trabalho,plano')
         .eq('id', usuarioMasterId)
         .maybeSingle()
       if (masterHorarioData) {
@@ -362,6 +476,7 @@ export function FuncionarioAgendaPage() {
           horario_fim: typeof row.horario_fim === 'string' ? row.horario_fim : null,
           intervalo_inicio: typeof row.intervalo_inicio === 'string' ? row.intervalo_inicio : null,
           intervalo_fim: typeof row.intervalo_fim === 'string' ? row.intervalo_fim : null,
+          dias_trabalho: Array.isArray(row.dias_trabalho) ? (row.dias_trabalho as number[]) : null,
         })
         setUsuarioMasterPlano(typeof row.plano === 'string' ? row.plano : null)
       } else {
@@ -670,6 +785,44 @@ export function FuncionarioAgendaPage() {
     setBloqueios((prev) => prev.filter((x) => x.id !== b.id))
   }
 
+  const toggleHorarioDay = (day: number) => {
+    touchHorario()
+    setHorarioDays((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]))
+  }
+
+  const saveHorario = async () => {
+    if (!funcionarioId) return
+    if (horarioValidationError) return
+    setHorarioSaving(true)
+    setError(null)
+
+    const payload = {
+      p_horario_inicio: currentHorario.start.trim(),
+      p_horario_fim: currentHorario.end.trim(),
+      p_dias_trabalho: currentHorario.days.slice().sort((a, b) => a - b),
+      p_intervalo_inicio: currentHorario.intervalStart.trim() ? currentHorario.intervalStart.trim() : null,
+      p_intervalo_fim: currentHorario.intervalEnd.trim() ? currentHorario.intervalEnd.trim() : null,
+    }
+
+    const { error: err } = await supabase.rpc('funcionario_update_horarios', payload)
+    if (err) {
+      const msg = err.message
+      const lower = msg.toLowerCase()
+      const missingFn = lower.includes('funcionario_update_horarios') && (lower.includes('function') || lower.includes('rpc'))
+      setError(
+        missingFn
+          ? 'Configuração do Supabase incompleta: crie a função funcionario_update_horarios no SQL Editor (Admin > Configurações).'
+          : msg
+      )
+      setHorarioSaving(false)
+      return
+    }
+
+    await refresh()
+    setHorarioTouched(false)
+    setHorarioSaving(false)
+  }
+
   if (!funcionario) {
     return (
       <AppShell>
@@ -760,6 +913,92 @@ export function FuncionarioAgendaPage() {
         </Card>
 
         {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
+
+        <Card>
+          <div className="p-6 space-y-4">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Meu horário de funcionamento</div>
+              <div className="text-xs text-slate-600">Define seus horários e dias disponíveis para a agenda e o link público.</div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Input
+                label="Início"
+                type="time"
+                value={currentHorario.start}
+                step={900}
+                onChange={(e) => {
+                  touchHorario()
+                  setHorarioStart(e.target.value)
+                }}
+              />
+              <Input
+                label="Fim"
+                type="time"
+                value={currentHorario.end}
+                step={900}
+                onChange={(e) => {
+                  touchHorario()
+                  setHorarioEnd(e.target.value)
+                }}
+              />
+            </div>
+
+            <div>
+              <div className="text-sm font-medium text-slate-700 mb-2">Dias</div>
+              <div className="flex flex-wrap gap-2">
+                {weekdayOptions.map((d) => (
+                  <button
+                    type="button"
+                    key={d.value}
+                    onClick={() => toggleHorarioDay(d.value)}
+                    className={[
+                      'h-9 w-9 rounded-lg border text-sm font-semibold',
+                      currentHorario.days.includes(d.value)
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-700 border-slate-200',
+                    ].join(' ')}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Input
+                label="Intervalo início (opcional)"
+                type="time"
+                value={currentHorario.intervalStart}
+                step={900}
+                onChange={(e) => {
+                  touchHorario()
+                  setHorarioIntervalStart(e.target.value)
+                }}
+              />
+              <Input
+                label="Intervalo fim (opcional)"
+                type="time"
+                value={currentHorario.intervalEnd}
+                step={900}
+                onChange={(e) => {
+                  touchHorario()
+                  setHorarioIntervalEnd(e.target.value)
+                }}
+              />
+            </div>
+
+            <div className={['text-xs', horarioValidationError ? 'text-rose-700' : 'text-slate-600'].join(' ')}>
+              {horarioValidationError ? horarioValidationError : 'Salve para aplicar na geração de horários.'}
+            </div>
+
+            <div className="flex justify-end">
+              <Button onClick={saveHorario} disabled={!canSaveHorario}>
+                {horarioSaving ? 'Salvando…' : 'Salvar horário'}
+              </Button>
+            </div>
+          </div>
+        </Card>
 
         {funcionario.pode_bloquear_horarios ? (
           <Card>

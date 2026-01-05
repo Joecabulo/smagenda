@@ -482,6 +482,89 @@ with check (
   or public.is_super_admin()
 );
 
+create or replace function public.funcionario_update_horarios(
+  p_horario_inicio text,
+  p_horario_fim text,
+  p_dias_trabalho int[],
+  p_intervalo_inicio text default null,
+  p_intervalo_fim text default null
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid;
+  v_exists boolean;
+  v_start time;
+  v_end time;
+  v_iv_start time;
+  v_iv_end time;
+begin
+  v_uid := auth.uid();
+  if v_uid is null then
+    raise exception 'unauthenticated';
+  end if;
+
+  select true
+  into v_exists
+  from public.funcionarios f
+  where f.id = v_uid
+    and f.ativo = true;
+
+  if v_exists is distinct from true then
+    raise exception 'funcionario_invalido';
+  end if;
+
+  if nullif(trim(p_horario_inicio), '') is null or nullif(trim(p_horario_fim), '') is null then
+    raise exception 'horarios_invalidos';
+  end if;
+
+  v_start := p_horario_inicio::time;
+  v_end := p_horario_fim::time;
+
+  if v_end <= v_start then
+    raise exception 'horarios_invalidos';
+  end if;
+
+  if p_dias_trabalho is null or array_length(p_dias_trabalho, 1) is null or array_length(p_dias_trabalho, 1) = 0 then
+    raise exception 'dias_invalidos';
+  end if;
+
+  if exists (select 1 from unnest(p_dias_trabalho) d where d is null or d < 0 or d > 6) then
+    raise exception 'dias_invalidos';
+  end if;
+
+  if nullif(trim(coalesce(p_intervalo_inicio, '')), '') is null and nullif(trim(coalesce(p_intervalo_fim, '')), '') is null then
+    v_iv_start := null;
+    v_iv_end := null;
+  elsif nullif(trim(coalesce(p_intervalo_inicio, '')), '') is null or nullif(trim(coalesce(p_intervalo_fim, '')), '') is null then
+    raise exception 'intervalo_invalido';
+  else
+    v_iv_start := p_intervalo_inicio::time;
+    v_iv_end := p_intervalo_fim::time;
+    if v_iv_end <= v_iv_start then
+      raise exception 'intervalo_invalido';
+    end if;
+    if v_iv_start < v_start or v_iv_end > v_end then
+      raise exception 'intervalo_invalido';
+    end if;
+  end if;
+
+  update public.funcionarios
+  set
+    horario_inicio = v_start::text,
+    horario_fim = v_end::text,
+    dias_trabalho = p_dias_trabalho,
+    intervalo_inicio = v_iv_start::text,
+    intervalo_fim = v_iv_end::text
+  where id = v_uid;
+end;
+$$;
+
+revoke all on function public.funcionario_update_horarios(text, text, int[], text, text) from public;
+grant execute on function public.funcionario_update_horarios(text, text, int[], text, text) to authenticated;
+
 drop policy if exists "funcionarios_delete_master" on public.funcionarios;
 create policy "funcionarios_delete_master" on public.funcionarios
 for delete to authenticated
