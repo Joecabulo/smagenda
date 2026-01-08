@@ -100,6 +100,7 @@
 
 - [ ] Carregar dados via RPCs públicas (link público) (`smagenda/src/views/public/PublicBookingPage.tsx:150-215`).
 - [ ] Labels dinâmicos por `tipo_negocio` (`smagenda/src/views/public/PublicBookingPage.tsx:62-70`).
+- [ ] Implementado labels e opções de `tipo_negocio` adicionais: manicure, pilates e faxina (`smagenda/src/views/public/PublicBookingPage.tsx`, `smagenda/src/views/app/PaginaPublicaSettingsPage.tsx`).
 - [ ] Lava-jato: exigir placa e embutir no nome do cliente (compatibilidade) (`smagenda/src/views/public/PublicBookingPage.tsx:137-138`, `smagenda/src/views/public/PublicBookingPage.tsx:326-352`).
 - [ ] (Standby) Cobrança de taxa no agendamento público (checkout + retorno `paid=1&session_id=...`) é habilitada por flag e usa a Edge Function `payments` (`smagenda/src/views/public/PublicBookingPage.tsx:333-862`, `smagenda/supabase/functions/payments/index.ts:883-1105`).
 

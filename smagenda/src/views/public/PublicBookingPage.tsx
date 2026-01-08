@@ -112,6 +112,9 @@ function resolvePublicLabels(tipoNegocio: string | null | undefined) {
   if (key === 'salao') return { servico: 'Serviço', servicos: 'Serviços', profissional: 'Profissional', profissionais: 'Profissionais' }
   if (key === 'estetica') return { servico: 'Procedimento', servicos: 'Procedimentos', profissional: 'Especialista', profissionais: 'Especialistas' }
   if (key === 'odontologia') return { servico: 'Procedimento', servicos: 'Procedimentos', profissional: 'Dentista', profissionais: 'Dentistas' }
+  if (key === 'manicure') return { servico: 'Serviço', servicos: 'Serviços', profissional: 'Manicure', profissionais: 'Manicures' }
+  if (key === 'pilates') return { servico: 'Aula', servicos: 'Aulas', profissional: 'Instrutor', profissionais: 'Instrutores' }
+  if (key === 'faxina') return { servico: 'Diária', servicos: 'Diárias', profissional: 'Profissional', profissionais: 'Profissionais' }
   return { servico: 'Serviço', servicos: 'Serviços', profissional: 'Profissional', profissionais: 'Profissionais' }
 }
 
