@@ -18,6 +18,7 @@
 
 ## 1) Repositório e comandos
 
+- [ ] Git: repositório inicializado na raiz e branch `main` pronta para push.
 - [ ] Rodar local: `npm run dev` (Vite) (`smagenda/package.json:7-11`).
 - [ ] Validar qualidade: `npm run lint` (ESLint) (`smagenda/package.json:8-10`).
 - [ ] Validar build: `npm run build` (TypeScript + Vite) (`smagenda/package.json:8-10`).
