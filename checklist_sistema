@@ -95,3 +95,7 @@
 - Lint (eslint .): OK
 - Smoke-test em preview (vite preview): OK (home abre sem erros no browser)
 - Varredura por mocks/simulações no front: não encontrado (mock/fake/stub/simula)
+
+2026-01-11 (GitHub)
+- Upload realizado para https://github.com/Joecabulo/smagenda (branch main)
+- Commit enviado: b273437
