@@ -232,6 +232,11 @@
 - [ ] Backups/retention do Postgres do Supabase (ou estratégia equivalente).
 - [ ] Confirmar headers/cache no deploy (assets com cache longo; HTML sem cache) (`smagenda/public/_headers:1-8`).
 
+### 7.1) Deploy (Cloudflare Pages)
+
+- [ ] Build command: `npm run build` (na raiz do repositório).
+- [ ] Build output directory: `dist` (na raiz do repositório).
+
 ## 8) “Não usar simulação em produção”
 
 - [ ] Stripe em modo Live: `STRIPE_SECRET_KEY` e `STRIPE_WEBHOOK_SECRET` do Live + webhook Live.
