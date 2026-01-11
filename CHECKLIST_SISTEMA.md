@@ -72,6 +72,12 @@
 - [ ] Criar/editar/cancelar agendamentos e bloqueios (UI principal) (`smagenda/src/views/app/DashboardPage.tsx`).
 - [ ] Redirecionar checkout para `/pagamento` quando query tiver `checkout=success|cancel` (`smagenda/src/views/app/DashboardPage.tsx:264-265`).
 
+### 2.5.1) Agenda do funcionário
+
+- [ ] Funcionário pode ajustar o próprio horário (início/fim/dias/intervalo) e salvar via RPC `funcionario_update_horarios` (`smagenda/src/views/app/FuncionarioAgendaPage.tsx:793-824`).
+- [ ] Card “Meu horário de funcionamento” fica no topo da tela do funcionário (`smagenda/src/views/app/FuncionarioAgendaPage.tsx:834-1000`).
+- [ ] Bloqueio de horários do funcionário continua separado do ajuste de horário (UI e SQL) (`smagenda/src/views/app/FuncionarioAgendaPage.tsx`).
+
 ### 2.6) Serviços
 
 - [ ] CRUD de serviços (preço/duração/cor) (`smagenda/src/views/app/ServicosPage.tsx`).
@@ -127,6 +133,7 @@
 - [ ] Blocos relevantes (mínimo para rodar 100%):
   - [ ] SQL base (tabelas app + RLS + helpers como `is_super_admin`).
   - [ ] SQL do link público (listar + agendar) + grants para `anon`.
+  - [ ] SQL do horário do funcionário: cria a função `public.funcionario_update_horarios(...)` e libera `execute` para `authenticated` (`smagenda/src/views/admin/AdminConfiguracoesPage.tsx:2283-2366`).
   - [ ] (Standby) SQL da taxa de agendamento (créditos): adiciona `servicos.taxa_agendamento`, cria `taxa_agendamento_pagamentos` e atualiza RPCs públicas (`smagenda/src/views/admin/AdminConfiguracoesPage.tsx:3378-3390`, `smagenda/src/views/admin/AdminConfiguracoesPage.tsx:777-923`).
   - [ ] SQL do Storage (logos) (`smagenda/src/views/admin/AdminConfiguracoesPage.tsx`).
   - [ ] SQL do Storage (fotos de serviços) (`smagenda/src/views/admin/AdminConfiguracoesPage.tsx`).
