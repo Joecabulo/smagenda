@@ -108,3 +108,4 @@
 
 2026-01-11 (site)
 - Landing page pública adicionada na rota / com CTA para cadastro/login
+- Landing page: correção do rodapé (© {ano} SMagenda)
