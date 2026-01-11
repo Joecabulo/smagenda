@@ -20,6 +20,7 @@ type AgendamentoRow = {
 type ClienteResumo = {
   telefone: string
   nome: string
+  nomes: string[]
   total: number
   noShows: number
   cancelados: number
@@ -34,8 +35,10 @@ function normalizeText(value: string) {
 }
 
 export function ClientesPage() {
-  const { appPrincipal } = useAuth()
-  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
+  const { appPrincipal, masterUsuario, masterUsuarioLoading } = useAuth()
+  const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
+  const isGerente = appPrincipal?.kind === 'funcionario' && appPrincipal.profile.permissao === 'admin'
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isGerente ? masterUsuario : null
   const usuarioId = usuario?.id ?? null
   const navigate = useNavigate()
 
@@ -113,11 +116,15 @@ export function ClientesPage() {
       const cancelado = status === 'cancelado'
       const noShow = status === 'nao_compareceu' || status === 'não_compareceu' || status === 'no_show'
 
+      const nomesPrev = prev?.nomes ?? []
+      const nomesNext = nome && !nomesPrev.some((n) => n.toLowerCase() === nome.toLowerCase()) ? [...nomesPrev, nome] : nomesPrev
+
       const next: ClienteResumo = prev
         ? { ...prev }
         : {
             telefone,
             nome: nome || 'Cliente',
+            nomes: nome ? [nome] : [],
             total: 0,
             noShows: 0,
             cancelados: 0,
@@ -125,6 +132,7 @@ export function ClientesPage() {
           }
 
       if (nome && (!prev || prev.nome === 'Cliente')) next.nome = nome
+      if (nomesNext !== next.nomes) next.nomes = nomesNext
       if (a.data > next.ultimoDia) next.ultimoDia = a.data
       if (cancelado) next.cancelados += 1
       else next.total += 1
@@ -140,12 +148,20 @@ export function ClientesPage() {
     const q = normalizeText(search.trim())
     if (!q) return clientes
     return clientes.filter((c) => {
-      const hay = normalizeText(`${c.nome} ${c.telefone}`)
+      const hay = normalizeText(`${c.nome} ${c.nomes.join(' ')} ${c.telefone}`)
       return hay.includes(q)
     })
   }, [clientes, search])
 
   if (!usuario) {
+    return (
+      <AppShell>
+        <div className="text-slate-700">{isGerente && masterUsuarioLoading ? 'Carregando…' : 'Acesso restrito.'}</div>
+      </AppShell>
+    )
+  }
+
+  if (funcionario && !funcionario.pode_ver_clientes_de_outros) {
     return (
       <AppShell>
         <div className="text-slate-700">Acesso restrito.</div>
@@ -212,6 +228,7 @@ export function ClientesPage() {
                   ) : (
                     filtered.map((c) => {
                       const recorrente = c.total >= 2
+                      const hasNomes = c.nomes.length > 1
                       return (
                         <Link key={c.telefone} to={`/clientes/${encodeURIComponent(c.telefone)}`} className="block p-4 hover:bg-slate-50">
                           <div className="flex items-start justify-between gap-3">
@@ -223,6 +240,7 @@ export function ClientesPage() {
                             <div className="flex items-center gap-2">
                               {recorrente ? <Badge tone="green">Recorrente</Badge> : <Badge>Novo</Badge>}
                               {c.noShows > 0 ? <Badge tone="red">No-show {c.noShows}</Badge> : null}
+                              {hasNomes ? <Badge tone="yellow">Nomes {c.nomes.length}</Badge> : null}
                               <Badge tone="slate">{c.total}</Badge>
                             </div>
                           </div>

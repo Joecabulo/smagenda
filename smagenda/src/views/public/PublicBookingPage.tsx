@@ -44,10 +44,157 @@ type Servico = {
   nome: string
   descricao?: string | null
   duracao_minutos: number
+  buffer_antes_min?: number
+  buffer_depois_min?: number
+  antecedencia_minutos?: number
+  janela_max_dias?: number
+  dia_inteiro?: boolean
   preco: number
   taxa_agendamento: number
   cor: string | null
   foto_url: string | null
+}
+
+function startOfMonth(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth(), 1)
+}
+
+function endOfMonth(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0)
+}
+
+function addMonths(d: Date, months: number) {
+  return new Date(d.getFullYear(), d.getMonth() + months, 1)
+}
+
+function monthLabelPTBR(d: Date) {
+  const months = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
+  return `${months[d.getMonth()] ?? ''} ${d.getFullYear()}`.trim()
+}
+
+function DiaInteiroCalendar(args: {
+  primaryColor: string
+  selectedIso: string
+  setSelectedIso: (iso: string) => void
+  dateOptionIsos: string[]
+  isDayDisabled: (d: Date) => boolean
+  diaInteiroDisponibilidade: Record<string, string>
+  calendarioLoading: boolean
+}) {
+  const minIso = args.dateOptionIsos[0] ?? ''
+  const maxIso = args.dateOptionIsos[args.dateOptionIsos.length - 1] ?? ''
+
+  const minDate = useMemo(() => {
+    if (!minIso) return null
+    const d = new Date(`${minIso}T00:00:00`)
+    return Number.isFinite(d.getTime()) ? d : null
+  }, [minIso])
+
+  const maxDate = useMemo(() => {
+    if (!maxIso) return null
+    const d = new Date(`${maxIso}T00:00:00`)
+    return Number.isFinite(d.getTime()) ? d : null
+  }, [maxIso])
+
+  const initialMonthIso = useMemo(() => {
+    const fromSelected = args.selectedIso ? new Date(`${args.selectedIso}T00:00:00`) : null
+    const base = fromSelected && Number.isFinite(fromSelected.getTime()) ? fromSelected : minDate
+    if (base) return toIsoDateLocal(startOfMonth(base))
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    return toIsoDateLocal(startOfMonth(today))
+  }, [args.selectedIso, minDate])
+
+  const [monthIso, setMonthIso] = useState(() => initialMonthIso)
+
+  const calendarMonth = useMemo(() => {
+    const base = monthIso ? new Date(`${monthIso}T00:00:00`) : null
+    if (!base || !Number.isFinite(base.getTime())) return startOfMonth(new Date())
+    return startOfMonth(base)
+  }, [monthIso])
+
+  const calendarGridDays = useMemo(() => {
+    const monthStart = startOfMonth(calendarMonth)
+    const monthEnd = endOfMonth(calendarMonth)
+    const startWeekday = monthStart.getDay()
+    const gridStart = addDays(monthStart, -startWeekday)
+    const gridDays: Date[] = []
+    for (let i = 0; i < 42; i += 1) gridDays.push(addDays(gridStart, i))
+    return { monthStart, monthEnd, gridDays }
+  }, [calendarMonth])
+
+  const goPrevMonth = () => {
+    const prev = addMonths(calendarMonth, -1)
+    if (minDate && Number.isFinite(minDate.getTime()) && prev < startOfMonth(minDate)) return
+    setMonthIso(toIsoDateLocal(prev))
+  }
+
+  const goNextMonth = () => {
+    const next = addMonths(calendarMonth, 1)
+    if (maxDate && Number.isFinite(maxDate.getTime()) && startOfMonth(next) > startOfMonth(maxDate)) return
+    setMonthIso(toIsoDateLocal(next))
+  }
+
+  return (
+    <div className="mt-3 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={goPrevMonth}
+          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+        >
+          ◀
+        </button>
+        <div className="text-sm font-semibold text-slate-900">{monthLabelPTBR(calendarMonth)}</div>
+        <button
+          type="button"
+          onClick={goNextMonth}
+          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+        >
+          ▶
+        </button>
+      </div>
+
+      <div className="grid grid-cols-7 gap-1">
+        {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map((w) => (
+          <div key={w} className="px-1 py-1 text-center text-[11px] font-semibold text-slate-500">
+            {w}
+          </div>
+        ))}
+
+        {calendarGridDays.gridDays.map((dObj) => {
+          const inMonth = dObj.getMonth() === calendarGridDays.monthStart.getMonth()
+          if (!inMonth) {
+            return <div key={toIsoDateLocal(dObj)} className="h-10 sm:h-12 md:h-14" />
+          }
+          const iso = toIsoDateLocal(dObj)
+          const disabledByRule = args.isDayDisabled(dObj)
+          const slot = args.diaInteiroDisponibilidade[iso] ?? ''
+          const disabled = disabledByRule || !slot
+          const selected = args.selectedIso === iso && !disabled
+          return (
+            <button
+              key={iso}
+              type="button"
+              disabled={disabled}
+              onClick={() => {
+                args.setSelectedIso(iso)
+              }}
+              className={[
+                'h-10 sm:h-12 md:h-14 rounded-xl border text-sm font-semibold',
+                disabled ? 'opacity-40 cursor-not-allowed bg-white border-slate-200 text-slate-500' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
+              ].join(' ')}
+              style={selected ? { backgroundColor: args.primaryColor, borderColor: args.primaryColor, color: '#fff' } : undefined}
+            >
+              {dObj.getDate()}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="text-xs text-slate-600">{args.calendarioLoading ? 'Carregando disponibilidade…' : 'Selecione um dia disponível.'}</div>
+    </div>
+  )
 }
 
 async function callPublicPaymentsFn(body: Record<string, unknown>) {
@@ -103,6 +250,13 @@ type Funcionario = {
 
 function normalizePhone(value: string) {
   return value.replace(/[^0-9+]/g, '').trim()
+}
+
+function normalizeEmail(value: string) {
+  const v = String(value ?? '').trim().toLowerCase()
+  if (!v) return ''
+  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)
+  return ok ? v : ''
 }
 
 function resolvePublicLabels(tipoNegocio: string | null | undefined) {
@@ -194,11 +348,26 @@ function shouldRetryWithoutFuncionario(err: unknown) {
   return mentionsFuncionarioArg && looksLikeSignatureMismatch
 }
 
+function shouldRetryWithoutExtras(err: unknown) {
+  const lower = rpcErrText(err).toLowerCase()
+  const mentionsExtrasArg = lower.includes('p_extras')
+  const looksLikeSignatureMismatch = isSignatureMismatchText(lower)
+  return mentionsExtrasArg && looksLikeSignatureMismatch
+}
+
+function isMissingRpcFnText(lower: string, fnName: string) {
+  const needle = fnName.toLowerCase()
+  if (!lower.includes(needle)) return false
+  return lower.includes('could not find the function') || lower.includes('does not exist') || (lower.includes('schema cache') && lower.includes('could not find'))
+}
+
 function isSignatureMismatchText(lower: string) {
   return (
+    lower.includes('pgrst202') ||
+    lower.includes('pgrst203') ||
+    lower.includes('could not find the function') ||
     lower.includes('does not exist') ||
-    lower.includes('function') ||
-    lower.includes('rpc') ||
+    lower.includes('could not choose the best candidate function between') ||
     (lower.includes('schema cache') && lower.includes('could not find'))
   )
 }
@@ -208,8 +377,13 @@ async function callPublicRpc<T>(fnName: string, args: Record<string, unknown>) {
     return { ok: false as const, errorText: `Supabase não configurado. Faltando: ${supabaseEnv.missing.join(', ')}` }
   }
 
-  const base = supabaseEnv.values.VITE_SUPABASE_URL.replace(/\/+$/, '')
-  const key = supabaseEnv.values.VITE_SUPABASE_ANON_KEY
+  const base = String(supabaseEnv.values.VITE_SUPABASE_URL ?? '')
+    .trim()
+    .replace(/^['"`\s]+|['"`\s]+$/g, '')
+    .replace(/\/+$/g, '')
+  const key = String(supabaseEnv.values.VITE_SUPABASE_ANON_KEY ?? '')
+    .trim()
+    .replace(/^['"`\s]+|['"`\s]+$/g, '')
   const url = `${base}/rest/v1/rpc/${fnName}`
 
   let res: Response
@@ -269,6 +443,7 @@ async function callPublicRpcWithSignatureFallback<T>(
 
   const hasUnidadeKey = Object.prototype.hasOwnProperty.call(args, 'p_unidade_id')
   const hasFuncionarioKey = Object.prototype.hasOwnProperty.call(args, 'p_funcionario_id')
+  const hasExtrasKey = Object.prototype.hasOwnProperty.call(args, 'p_extras')
 
   const stableKey = (o: Record<string, unknown>) => {
     const keys = Object.keys(o).sort()
@@ -296,6 +471,10 @@ async function callPublicRpcWithSignatureFallback<T>(
     if (shouldRetryWithoutFuncionario({ message: first.errorText })) variants.push(withoutKey(args, 'p_funcionario_id'))
   } else {
     variants.push({ ...args, p_funcionario_id: null })
+  }
+
+  if (hasExtrasKey) {
+    if (shouldRetryWithoutExtras({ message: first.errorText })) variants.push(withoutKey(args, 'p_extras'))
   }
 
   if (hasUnidadeKey && hasFuncionarioKey) {
@@ -355,7 +534,9 @@ export function PublicBookingPage() {
   const [hora, setHora] = useState('')
   const [clienteNome, setClienteNome] = useState('')
   const [clienteTelefone, setClienteTelefone] = useState('')
+  const [clienteEmail, setClienteEmail] = useState('')
   const [clientePlaca, setClientePlaca] = useState('')
+  const [clienteEndereco, setClienteEndereco] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [successId, setSuccessId] = useState<string | null>(null)
   const [logoFailed, setLogoFailed] = useState(false)
@@ -388,6 +569,8 @@ export function PublicBookingPage() {
 
   const needsPlaca = useMemo(() => String(usuario?.tipo_negocio ?? '').trim().toLowerCase() === 'lava_jatos', [usuario?.tipo_negocio])
 
+  const needsEndereco = useMemo(() => String(usuario?.tipo_negocio ?? '').trim().toLowerCase() === 'faxina', [usuario?.tipo_negocio])
+
   const hasStaff = useMemo(() => canChooseProfessional && funcionarios.length > 0, [canChooseProfessional, funcionarios.length])
 
   const primaryColor = useMemo(() => coerceHexColor(usuario?.public_primary_color ?? null, '#0f172a'), [usuario?.public_primary_color])
@@ -417,7 +600,7 @@ export function PublicBookingPage() {
       if (userErr) {
         const msg = userErr.message
         const lower = msg.toLowerCase()
-        const missingFn = lower.includes('public_get_usuario_publico') && (lower.includes('function') || lower.includes('rpc'))
+        const missingFn = isMissingRpcFnText(lower, 'public_get_usuario_publico')
         setError(
           missingFn
             ? wantsUnidade
@@ -447,7 +630,7 @@ export function PublicBookingPage() {
       if (servicesErr) {
         const msg = servicesErr.message
         const lower = msg.toLowerCase()
-        const missingFn = lower.includes('public_get_servicos_publicos') && (lower.includes('function') || lower.includes('rpc'))
+        const missingFn = isMissingRpcFnText(lower, 'public_get_servicos_publicos')
         setError(missingFn ? 'Configuração do Supabase incompleta: crie o SQL do link público (listar + agendar).' : msg)
         setLoading(false)
         return
@@ -462,7 +645,7 @@ export function PublicBookingPage() {
       if (staffErr) {
         const msg = staffErr.message
         const lower = msg.toLowerCase()
-        const missingFn = lower.includes('public_get_funcionarios_publicos') && (lower.includes('function') || lower.includes('rpc'))
+        const missingFn = isMissingRpcFnText(lower, 'public_get_funcionarios_publicos')
         setError(missingFn ? 'Configuração do Supabase incompleta: crie o SQL do link público (listar + agendar).' : msg)
         setLoading(false)
         return
@@ -482,10 +665,19 @@ export function PublicBookingPage() {
   const selectedServico = useMemo(() => servicos.find((s) => s.id === servicoId) ?? null, [servicos, servicoId])
   const selectedFuncionario = useMemo(() => funcionarios.find((f) => f.id === funcionarioId) ?? null, [funcionarios, funcionarioId])
 
+  const isDiaInteiro = selectedServico?.dia_inteiro === true
+
   const usuarioId = usuario?.id ?? null
 
-  const maxDays = 15
-  const minLeadMinutes = 120
+  const maxDays = useMemo(() => {
+    const v = selectedServico?.janela_max_dias
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 15
+  }, [selectedServico?.janela_max_dias])
+
+  const minLeadMinutes = useMemo(() => {
+    const v = selectedServico?.antecedencia_minutos
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 120
+  }, [selectedServico?.antecedencia_minutos])
 
   const [availableSlots, setAvailableSlots] = useState<string[]>([])
   const [slotsLoading, setSlotsLoading] = useState(false)
@@ -528,6 +720,75 @@ export function PublicBookingPage() {
     return days
   }, [maxDate, maxDays, today])
 
+  const [diaInteiroDisponibilidade, setDiaInteiroDisponibilidade] = useState<Record<string, string>>({})
+  const [calendarioLoading, setCalendarioLoading] = useState(false)
+
+  const dateOptionIsos = useMemo(() => dateOptions.map((d) => toIsoDateLocal(d)), [dateOptions])
+
+  useEffect(() => {
+    let alive = true
+    const run = async () => {
+      if (!isDiaInteiro) {
+        setDiaInteiroDisponibilidade({})
+        setCalendarioLoading(false)
+        return
+      }
+      if (!usuarioId || !selectedServico) return
+      if (hasStaff && !funcionarioId) return
+
+      setCalendarioLoading(true)
+      const entries = await Promise.all(
+        dateOptionIsos.map(async (iso) => {
+          const dObj = new Date(`${iso}T00:00:00`)
+          if (!Number.isFinite(dObj.getTime()) || isDayDisabled(dObj)) return null
+
+          const slotsArgs: Record<string, unknown> = {
+            p_usuario_id: usuarioId,
+            p_data: iso,
+            p_servico_id: selectedServico.id,
+            p_funcionario_id: hasStaff ? funcionarioId : null,
+          }
+          if (usuario?.unidade_id) slotsArgs.p_unidade_id = usuario.unidade_id
+
+          const slotsRes = await callPublicRpcWithSignatureFallback<unknown>('public_get_slots_publicos', slotsArgs, usuario?.unidade_id ?? null)
+          if (!slotsRes.ok) return null
+
+          const raw = (slotsRes.data ?? []) as unknown
+          const rows = Array.isArray(raw) ? raw : []
+          const list = rows
+            .map((r) => {
+              if (typeof r === 'string') return r.trim()
+              if (!r || typeof r !== 'object') return ''
+              const obj = r as Record<string, unknown>
+              if (typeof obj.hora_inicio === 'string') return obj.hora_inicio.trim()
+              if (typeof obj.hora === 'string') return obj.hora.trim()
+              return ''
+            })
+            .filter(Boolean)
+          const slot = list[0] ?? ''
+          if (!slot) return null
+          return { iso, slot }
+        })
+      )
+
+      if (!alive) return
+      const next: Record<string, string> = {}
+      for (const e of entries) {
+        if (!e) continue
+        next[e.iso] = e.slot
+      }
+      setDiaInteiroDisponibilidade(next)
+      setCalendarioLoading(false)
+    }
+    run().catch(() => {
+      if (!alive) return
+      setCalendarioLoading(false)
+    })
+    return () => {
+      alive = false
+    }
+  }, [dateOptionIsos, funcionarioId, hasStaff, isDayDisabled, isDiaInteiro, selectedServico, usuario?.unidade_id, usuarioId])
+
   useEffect(() => {
     if (!usuario) return
     if (!data) return
@@ -559,7 +820,6 @@ export function PublicBookingPage() {
 
       setSlotsLoading(true)
       setError(null)
-      setHora('')
 
       const slotsArgs: Record<string, unknown> = {
         p_usuario_id: usuarioId,
@@ -574,9 +834,16 @@ export function PublicBookingPage() {
       if (!slotsRes.ok) {
         const msg = slotsRes.errorText
         const lower = msg.toLowerCase()
-        const missingFn = lower.includes('public_get_slots_publicos') && (lower.includes('function') || lower.includes('rpc'))
-        if (missingFn) {
-          setError('Configuração do Supabase incompleta: atualize o SQL do link público (listar + agendar).')
+        const missingSlotsFn = lower.includes('public_get_slots_publicos') && (lower.includes('function') || lower.includes('rpc'))
+        const missingOcupacoesFn = lower.includes('public_get_ocupacoes') && isSignatureMismatchText(lower)
+        if (missingSlotsFn) {
+          setError(
+            (unidadeSlug ?? '').trim()
+              ? 'Configuração do Supabase incompleta: atualize o SQL do link público e o SQL de Multi-unidades (EMPRESA).'
+              : 'Configuração do Supabase incompleta: atualize o SQL do link público (listar + agendar).'
+          )
+        } else if (missingOcupacoesFn) {
+          setError('Configuração do Supabase incompleta: crie o SQL de horários públicos (ocupações + bloqueios).')
         } else if (lower.includes('data_passada')) {
           setError('Selecione uma data futura.')
         } else if (lower.includes('data_muito_futura')) {
@@ -718,9 +985,17 @@ export function PublicBookingPage() {
     }
   }, [data, debugEnabled, funcionarioId, hasStaff, isDayDisabled, maxDays, minLeadMinutes, selectedFuncionario, selectedServico, slug, unidadeSlug, usuario, usuarioId])
 
+  const effectiveHora = useMemo(() => {
+    if (!isDiaInteiro) return hora
+    if (!data) return ''
+    const slot = diaInteiroDisponibilidade[data] ?? ''
+    return slot || ''
+  }, [data, diaInteiroDisponibilidade, hora, isDiaInteiro])
+
   const submit = async () => {
-    if (!usuarioId || !selectedServico || !hora || !clienteNome.trim() || !clienteTelefone.trim()) return
+    if (!usuarioId || !selectedServico || !effectiveHora || !clienteNome.trim() || !clienteTelefone.trim()) return
     if (needsPlaca && !clientePlaca.trim()) return
+    if (needsEndereco && !clienteEndereco.trim()) return
     setSubmitting(true)
     setError(null)
     setSuccessId(null)
@@ -732,8 +1007,21 @@ export function PublicBookingPage() {
       return
     }
 
+    const email = normalizeEmail(clienteEmail)
+    if (clienteEmail.trim() && !email) {
+      setError('Email inválido.')
+      setSubmitting(false)
+      return
+    }
+
     const placa = clientePlaca.trim().replace(/[^a-zA-Z0-9-]/g, '').toUpperCase()
     const clienteNomeFinal = needsPlaca && placa ? `${clienteNome.trim()} (Placa: ${placa})` : clienteNome.trim()
+
+    const extras: Record<string, unknown> = {}
+    if (needsEndereco) extras.endereco = clienteEndereco.trim()
+    if (needsPlaca && placa) extras.placa = placa
+    if (email) extras.email = email
+    const extrasFinal = Object.keys(extras).length > 0 ? extras : null
 
     const taxa = typeof selectedServico.taxa_agendamento === 'number' && Number.isFinite(selectedServico.taxa_agendamento) ? selectedServico.taxa_agendamento : 0
     const normalizedTaxa = Math.max(0, taxa)
@@ -746,9 +1034,11 @@ export function PublicBookingPage() {
         hora_inicio: hora,
         cliente_nome: clienteNomeFinal,
         cliente_telefone: telefone,
+        cliente_endereco: needsEndereco ? clienteEndereco.trim() : null,
         slug: slug ?? null,
         unidade_slug: unidadeSlug ?? null,
       }
+      if (extrasFinal) payload.extras = extrasFinal
       if (hasStaff) payload.funcionario_id = funcionarioId
       if (usuario?.unidade_id) payload.unidade_id = usuario.unidade_id
 
@@ -790,21 +1080,26 @@ export function PublicBookingPage() {
     const createArgs: Record<string, unknown> = {
       p_usuario_id: usuarioId,
       p_data: data,
-      p_hora_inicio: hora,
+      p_hora_inicio: effectiveHora,
       p_servico_id: selectedServico.id,
       p_cliente_nome: clienteNomeFinal,
       p_cliente_telefone: telefone,
       p_funcionario_id: hasStaff ? funcionarioId : null,
     }
+    if (extrasFinal) createArgs.p_extras = extrasFinal
     if (usuario?.unidade_id) createArgs.p_unidade_id = usuario.unidade_id
 
     const createRes = await callPublicRpcWithSignatureFallback<unknown>('public_create_agendamento_publico', createArgs, usuario?.unidade_id ?? null)
     if (!createRes.ok) {
       const msg = createRes.errorText
       const lower = msg.toLowerCase()
-      const missingFn = lower.includes('public_create_agendamento_publico') && (lower.includes('function') || lower.includes('rpc'))
+      const missingFn = isMissingRpcFnText(lower, 'public_create_agendamento_publico')
       if (missingFn) {
-        setError('Configuração do Supabase incompleta: crie o SQL do link público (listar + agendar).')
+        setError(
+          (unidadeSlug ?? '').trim()
+            ? 'Configuração do Supabase incompleta: crie o SQL do link público e o SQL de Multi-unidades (EMPRESA).'
+            : 'Configuração do Supabase incompleta: crie o SQL do link público (listar + agendar).'
+        )
       } else if (lower.includes('data_passada')) {
         setError('Selecione uma data futura.')
       } else if (lower.includes('data_muito_futura')) {
@@ -815,6 +1110,8 @@ export function PublicBookingPage() {
         setError('Esse horário acabou de ser ocupado. Selecione outro horário.')
       } else if (lower.includes('limite_mensal_atingido')) {
         setError('Este estabelecimento atingiu o limite de agendamentos do mês. Tente novamente no próximo mês.')
+      } else if (needsEndereco && lower.includes('p_extras')) {
+        setError('Atualização necessária no Supabase: aplique o SQL do link público para salvar o endereço.')
       } else {
         setError(msg)
       }
@@ -867,11 +1164,12 @@ export function PublicBookingPage() {
   const canSubmit = Boolean(
     usuarioId &&
       selectedServico &&
-      hora &&
+      effectiveHora &&
       clienteNome.trim() &&
       clienteTelefone.trim() &&
       (!hasStaff || funcionarioId) &&
-      (!needsPlaca || clientePlaca.trim())
+      (!needsPlaca || clientePlaca.trim()) &&
+      (!needsEndereco || clienteEndereco.trim())
   )
 
   const closeModal = () => {
@@ -879,15 +1177,16 @@ export function PublicBookingPage() {
     setError(null)
   }
 
+
   const summary = useMemo(() => {
     const servicoNome = selectedServico?.nome ?? null
     const servicoPreco = typeof selectedServico?.preco === 'number' ? selectedServico.preco : null
     const servicoTaxa = typeof selectedServico?.taxa_agendamento === 'number' ? selectedServico.taxa_agendamento : null
     const profissionalNome = hasStaff ? (selectedFuncionario?.nome_completo ?? null) : null
-    const canContinue = Boolean(usuarioId && selectedServico && hora && (!hasStaff || funcionarioId))
+    const canContinue = Boolean(usuarioId && selectedServico && effectiveHora && (!hasStaff || funcionarioId))
     const actionLabel = canContinue ? 'Continuar' : 'Escolher horário'
     return { servicoNome, servicoPreco, servicoTaxa, profissionalNome, canContinue, actionLabel }
-  }, [funcionarioId, hasStaff, hora, selectedFuncionario?.nome_completo, selectedServico, usuarioId])
+  }, [effectiveHora, funcionarioId, hasStaff, selectedFuncionario?.nome_completo, selectedServico, usuarioId])
 
   const openFromFooter = () => {
     if (!usuario) return
@@ -1214,131 +1513,167 @@ export function PublicBookingPage() {
                 <div className="p-4 space-y-4">
                   <div>
                     <div className="text-xs font-semibold tracking-wide text-slate-500">Data</div>
-                    <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
-                      {dateOptions.map((dObj) => {
-                        const iso = toIsoDateLocal(dObj)
-                        const disabled = isDayDisabled(dObj)
-                        const selected = data === iso && !disabled
-                        return (
-                          <button
-                            key={iso}
-                            type="button"
-                            disabled={disabled}
-                            onClick={() => {
-                              setError(null)
-                              setSuccessId(null)
-                              setHora('')
-                              setData(iso)
-                              setStep('quando')
-                            }}
-                            className={[
-                              'min-w-[4.5rem] rounded-xl border px-3 py-2 text-left',
-                              disabled ? 'opacity-40 cursor-not-allowed bg-white border-slate-200 text-slate-500' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
-                            ].join(' ')}
-                            style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : undefined}
-                          >
-                            <div className={['text-xs font-semibold', selected ? 'text-white/90' : 'text-slate-600'].join(' ')}>{weekdayShortLabel(dObj)}</div>
-                            <div className="text-sm font-semibold">{formatShortDayMonth(dObj)}</div>
-                          </button>
-                        )
-                      })}
-                    </div>
+                    {isDiaInteiro ? (
+                      <DiaInteiroCalendar
+                        key={`${servicoId}:${funcionarioId ?? ''}:${usuarioId ?? ''}`}
+                        primaryColor={primaryColor}
+                        selectedIso={data}
+                        setSelectedIso={(iso) => {
+                          setError(null)
+                          setSuccessId(null)
+                          setHora('')
+                          setData(iso)
+                          setStep('quando')
+                        }}
+                        dateOptionIsos={dateOptionIsos}
+                        isDayDisabled={isDayDisabled}
+                        diaInteiroDisponibilidade={diaInteiroDisponibilidade}
+                        calendarioLoading={calendarioLoading}
+                      />
+                    ) : (
+                      <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+                        {dateOptions.map((dObj) => {
+                          const iso = toIsoDateLocal(dObj)
+                          const disabled = isDayDisabled(dObj)
+                          const selected = data === iso && !disabled
+                          return (
+                            <button
+                              key={iso}
+                              type="button"
+                              disabled={disabled}
+                              onClick={() => {
+                                setError(null)
+                                setSuccessId(null)
+                                setHora('')
+                                setData(iso)
+                                setStep('quando')
+                              }}
+                              className={[
+                                'min-w-[4.5rem] rounded-xl border px-3 py-2 text-left',
+                                disabled ? 'opacity-40 cursor-not-allowed bg-white border-slate-200 text-slate-500' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
+                              ].join(' ')}
+                              style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : undefined}
+                            >
+                              <div className={['text-xs font-semibold', selected ? 'text-white/90' : 'text-slate-600'].join(' ')}>{weekdayShortLabel(dObj)}</div>
+                              <div className="text-sm font-semibold">{formatShortDayMonth(dObj)}</div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
                     <div className="mt-2 text-xs text-slate-600">
                       Janela de agendamento: hoje até {maxDays} dias. Antecedência mínima: {Math.round(minLeadMinutes / 60)}h.
                     </div>
                   </div>
 
-                  <div>
-                    <div className="text-xs font-semibold tracking-wide text-slate-500">Horário</div>
-                    {!selectedServico ? (
-                      <div className="mt-2 text-sm text-slate-600">Selecione um {labels.servico.toLowerCase()}.</div>
-                    ) : hasStaff && !selectedFuncionario ? (
-                      <div className="mt-2 text-sm text-slate-600">Selecione um {labels.profissional.toLowerCase()}.</div>
-                    ) : slotsLoading ? (
-                      <div className="mt-2 text-sm text-slate-600">Buscando horários…</div>
-                    ) : availableSlots.length === 0 ? (
-                      <div className="mt-2 text-sm text-slate-600">Sem horários disponíveis.</div>
-                    ) : (
-                      <div className="mt-3 space-y-4">
-                        {slotGroups.manha.length > 0 ? (
-                          <div className="space-y-2">
-                            <div className="text-xs font-semibold text-slate-700">Manhã</div>
-                            <div className="grid grid-cols-3 gap-2">
-                              {slotGroups.manha.map((t) => {
-                                const selected = hora === t
-                                return (
-                                  <button
-                                    key={t}
-                                    type="button"
-                                    onClick={() => setHora(t)}
-                                    className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
-                                    style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
-                                  >
-                                    {t}
-                                  </button>
-                                )
-                              })}
+                  {!isDiaInteiro ? (
+                    <div>
+                      <div className="text-xs font-semibold tracking-wide text-slate-500">Horário</div>
+                      {!selectedServico ? (
+                        <div className="mt-2 text-sm text-slate-600">Selecione um {labels.servico.toLowerCase()}.</div>
+                      ) : hasStaff && !selectedFuncionario ? (
+                        <div className="mt-2 text-sm text-slate-600">Selecione um {labels.profissional.toLowerCase()}.</div>
+                      ) : slotsLoading ? (
+                        <div className="mt-2 text-sm text-slate-600">Buscando horários…</div>
+                      ) : availableSlots.length === 0 ? (
+                        <div className="mt-2 text-sm text-slate-600">Sem horários disponíveis.</div>
+                      ) : (
+                        <div className="mt-3 space-y-4">
+                          {slotGroups.manha.length > 0 ? (
+                            <div className="space-y-2">
+                              <div className="text-xs font-semibold text-slate-700">Manhã</div>
+                              <div className="grid grid-cols-3 gap-2">
+                                {slotGroups.manha.map((t) => {
+                                  const selected = hora === t
+                                  return (
+                                    <button
+                                      key={t}
+                                      type="button"
+                                      onClick={() => setHora(t)}
+                                      className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
+                                      style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
+                                    >
+                                      {t}
+                                    </button>
+                                  )
+                                })}
+                              </div>
                             </div>
-                          </div>
-                        ) : null}
+                          ) : null}
 
-                        {slotGroups.tarde.length > 0 ? (
-                          <div className="space-y-2">
-                            <div className="text-xs font-semibold text-slate-700">Tarde</div>
-                            <div className="grid grid-cols-3 gap-2">
-                              {slotGroups.tarde.map((t) => {
-                                const selected = hora === t
-                                return (
-                                  <button
-                                    key={t}
-                                    type="button"
-                                    onClick={() => setHora(t)}
-                                    className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
-                                    style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
-                                  >
-                                    {t}
-                                  </button>
-                                )
-                              })}
+                          {slotGroups.tarde.length > 0 ? (
+                            <div className="space-y-2">
+                              <div className="text-xs font-semibold text-slate-700">Tarde</div>
+                              <div className="grid grid-cols-3 gap-2">
+                                {slotGroups.tarde.map((t) => {
+                                  const selected = hora === t
+                                  return (
+                                    <button
+                                      key={t}
+                                      type="button"
+                                      onClick={() => setHora(t)}
+                                      className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
+                                      style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
+                                    >
+                                      {t}
+                                    </button>
+                                  )
+                                })}
+                              </div>
                             </div>
-                          </div>
-                        ) : null}
+                          ) : null}
 
-                        {slotGroups.noite.length > 0 ? (
-                          <div className="space-y-2">
-                            <div className="text-xs font-semibold text-slate-700">Noite</div>
-                            <div className="grid grid-cols-3 gap-2">
-                              {slotGroups.noite.map((t) => {
-                                const selected = hora === t
-                                return (
-                                  <button
-                                    key={t}
-                                    type="button"
-                                    onClick={() => setHora(t)}
-                                    className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
-                                    style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
-                                  >
-                                    {t}
-                                  </button>
-                                )
-                              })}
+                          {slotGroups.noite.length > 0 ? (
+                            <div className="space-y-2">
+                              <div className="text-xs font-semibold text-slate-700">Noite</div>
+                              <div className="grid grid-cols-3 gap-2">
+                                {slotGroups.noite.map((t) => {
+                                  const selected = hora === t
+                                  return (
+                                    <button
+                                      key={t}
+                                      type="button"
+                                      onClick={() => setHora(t)}
+                                      className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
+                                      style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
+                                    >
+                                      {t}
+                                    </button>
+                                  )
+                                })}
+                              </div>
                             </div>
-                          </div>
-                        ) : null}
-                      </div>
-                    )}
+                          ) : null}
+                        </div>
+                      )}
 
-                    {debugEnabled && debugSlotsText ? (
-                      <div className="mt-4">
-                        <Card>
-                          <div className="p-4 space-y-2">
-                            <div className="text-xs font-semibold tracking-wide text-slate-500">Debug (slots)</div>
-                            <pre className="text-[11px] leading-4 text-slate-700 whitespace-pre-wrap break-words font-mono">{debugSlotsText}</pre>
-                          </div>
-                        </Card>
-                      </div>
-                    ) : null}
-                  </div>
+                      {debugEnabled && debugSlotsText ? (
+                        <div className="mt-4">
+                          <Card>
+                            <div className="p-4 space-y-2">
+                              <div className="text-xs font-semibold tracking-wide text-slate-500">Debug (slots)</div>
+                              <pre className="text-[11px] leading-4 text-slate-700 whitespace-pre-wrap break-words font-mono">{debugSlotsText}</pre>
+                            </div>
+                          </Card>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="text-xs font-semibold tracking-wide text-slate-500">Diária</div>
+                      {!selectedServico ? (
+                        <div className="mt-2 text-sm text-slate-600">Selecione um {labels.servico.toLowerCase()}.</div>
+                      ) : hasStaff && !selectedFuncionario ? (
+                        <div className="mt-2 text-sm text-slate-600">Selecione um {labels.profissional.toLowerCase()}.</div>
+                      ) : slotsLoading ? (
+                        <div className="mt-2 text-sm text-slate-600">Buscando disponibilidade…</div>
+                      ) : hora ? (
+                        <div className="mt-2 text-sm text-slate-700">Dia selecionado com disponibilidade.</div>
+                      ) : (
+                        <div className="mt-2 text-sm text-slate-600">Selecione um dia disponível no calendário.</div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </Card>
             </div>
@@ -1413,6 +1748,12 @@ export function PublicBookingPage() {
                         <div className="font-semibold">{clientePlaca.trim().replace(/[^a-zA-Z0-9-]/g, '').toUpperCase()}</div>
                       </div>
                     ) : null}
+                    {needsEndereco && clienteEndereco.trim() ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <div>Endereço</div>
+                        <div className="font-semibold text-right">{clienteEndereco.trim()}</div>
+                      </div>
+                    ) : null}
                     <div className="flex items-center justify-between gap-2">
                       <div>{labels.servico}</div>
                       <div className="font-semibold">{selectedServico?.nome ?? '—'}</div>
@@ -1427,7 +1768,9 @@ export function PublicBookingPage() {
 
                   <Input label="Nome" value={clienteNome} onChange={(e) => setClienteNome(e.target.value)} />
                   <Input label="WhatsApp" value={clienteTelefone} onChange={(e) => setClienteTelefone(e.target.value)} />
+                  <Input label="Email (opcional)" value={clienteEmail} onChange={(e) => setClienteEmail(e.target.value)} />
                   {needsPlaca ? <Input label="Placa do carro" value={clientePlaca} onChange={(e) => setClientePlaca(e.target.value)} /> : null}
+                  {needsEndereco ? <Input label="Endereço" value={clienteEndereco} onChange={(e) => setClienteEndereco(e.target.value)} /> : null}
 
                   <div className="flex justify-between">
                     <Button variant="secondary" onClick={closeModal}>

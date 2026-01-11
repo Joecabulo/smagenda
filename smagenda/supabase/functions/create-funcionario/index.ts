@@ -5,7 +5,7 @@ type Payload = {
   email: string
   senha: string
   telefone?: string | null
-  permissao: 'admin' | 'funcionario'
+  permissao: 'admin' | 'funcionario' | 'atendente'
   horario_inicio?: string | null
   horario_fim?: string | null
   dias_trabalho?: number[] | null
@@ -76,14 +76,14 @@ Deno.serve(async (req) => {
   if (senha.trim().length < 8) {
     return jsonResponse(400, { error: 'weak_password' })
   }
-  if (payload.permissao !== 'admin' && payload.permissao !== 'funcionario') {
+  if (payload.permissao !== 'admin' && payload.permissao !== 'funcionario' && payload.permissao !== 'atendente') {
     return jsonResponse(400, { error: 'invalid_permissao' })
   }
 
   const masterId = userData.user.id
   const { data: masterRow, error: masterErr } = await userClient
     .from('usuarios')
-    .select('id,limite_funcionarios,ativo,status_pagamento,data_vencimento')
+    .select('id,plano,limite_funcionarios,ativo,status_pagamento,data_vencimento')
     .eq('id', masterId)
     .maybeSingle()
 
@@ -121,8 +121,24 @@ Deno.serve(async (req) => {
     return jsonResponse(400, { error: 'cannot_check_limit' })
   }
 
-  const limite = masterRow.limite_funcionarios
-  if (typeof limite === 'number' && limite > 0 && (activeCount ?? 0) >= limite) {
+  const plano = String((masterRow as { plano?: unknown }).plano ?? '')
+    .trim()
+    .toLowerCase()
+
+  let limiteEfetivo: number | null | undefined = masterRow.limite_funcionarios
+  if (plano === 'enterprise') {
+    limiteEfetivo = null
+  } else if (plano === 'pro' || plano === 'team') {
+    const raw = masterRow.limite_funcionarios
+    const n = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null
+    const base = 4
+    const max = 6
+    limiteEfetivo = !n || n < base ? base : Math.min(max, n)
+  } else if (plano === 'basic' || plano === 'free') {
+    limiteEfetivo = 1
+  }
+
+  if (typeof limiteEfetivo === 'number' && limiteEfetivo > 0 && (activeCount ?? 0) >= limiteEfetivo) {
     return jsonResponse(400, { error: 'limit_reached' })
   }
 

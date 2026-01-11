@@ -188,18 +188,8 @@ export function WhatsappSettingsPage() {
           target: 'status' as const,
         },
         {
-          title: 'Escolha o modo de conexão',
-          body: 'Se o WhatsApp está em outro aparelho, use "Conectar (QR Code)". Se você usa o sistema no mesmo celular do WhatsApp, use "Conectar (código)".',
-          target: 'status' as const,
-        },
-        {
-          title: 'Pareamento no mesmo celular',
-          body: 'No mesmo celular não dá para escanear o QR Code. Preencha o número com DDD e clique em "Conectar (código)". No WhatsApp: Dispositivos conectados → conectar com número/código e finalize.',
-          target: 'status' as const,
-        },
-        {
-          title: 'QR Code / código de pareamento',
-          body: 'Quando aparecer o QR Code ou o código de pareamento, conclua a vinculação no WhatsApp. Depois a conexão deve ficar como "Conectado".',
+          title: 'Conectar com QR Code',
+          body: 'Clique em "Conectar (QR Code)" e escaneie o QR Code no WhatsApp para vincular a instância.',
           target: 'qr' as const,
         },
         {
@@ -216,15 +206,14 @@ export function WhatsappSettingsPage() {
   const [loading, setLoading] = useState(true)
   const [connecting, setConnecting] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
-  const [pairingNumber, setPairingNumber] = useState('')
   const [checkingStatus, setCheckingStatus] = useState(false)
+
   const [sendingTest, setSendingTest] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
 
   const [instanceState, setInstanceState] = useState<string | null>(null)
   const [qrBase64, setQrBase64] = useState<string | null>(null)
-  const [pairingCode, setPairingCode] = useState<string | null>(null)
   const [testNumber, setTestNumber] = useState('')
   const [testText, setTestText] = useState('Olá! Teste de envio do SMagenda.')
 
@@ -302,7 +291,6 @@ export function WhatsappSettingsPage() {
           setInstanceState(s)
           if (s === 'open') {
             setQrBase64(null)
-            setPairingCode(null)
           }
         }
       }
@@ -319,15 +307,14 @@ export function WhatsappSettingsPage() {
   if (!usuarioId) {
     return (
       <AppShell>
-        <div className="text-slate-700">Acesso restrito.</div>
+        <div className="text-slate-700">{appPrincipal ? 'Acesso restrito.' : 'Carregando…'}</div>
       </AppShell>
     )
   }
 
-  const connect = async (args?: { number?: string | null }) => {
+  const connect = async () => {
     setError(null)
     setQrBase64(null)
-    setPairingCode(null)
     if (!habilitado) {
       setError('WhatsApp desabilitado para sua conta. Solicite habilitação ao suporte.')
       return
@@ -336,14 +323,9 @@ export function WhatsappSettingsPage() {
       setError('WhatsApp ainda não foi configurado no painel do Super Admin.')
       return
     }
-    const pairing = (args?.number ?? '').trim()
-    if (args && args.number != null && !pairing) {
-      setError('Informe o número do WhatsApp com DDD para gerar o código de pareamento.')
-      return
-    }
     setConnecting(true)
     allowStatusRef.current = true
-    const res = await callWhatsapp({ action: 'connect', ...(pairing ? { number: pairing } : {}) })
+    const res = await callWhatsapp({ action: 'connect' })
     if (!res.ok) {
       if (isWorkerLimitResponse({ status: res.status, body: res.body })) {
         setError('O Supabase está sem recursos para executar a Edge Function agora (WORKER_LIMIT). Aguarde 1–2 minutos e tente novamente.')
@@ -393,20 +375,15 @@ export function WhatsappSettingsPage() {
 
     const initialState = getOptionalString(res.body, 'state')
     const initialQr = getOptionalString(res.body, 'qrBase64')
-    const initialPairing = getOptionalString(res.body, 'pairingCode')
     let currentState: string | null = initialState
     if (initialState) setInstanceState(initialState)
-    if (initialPairing && initialPairing.trim()) {
-      setPairingCode(initialPairing)
-      setQrBase64(null)
-    } else if (initialQr && initialQr.trim()) {
+    if (initialQr && initialQr.trim()) {
       setQrBase64(initialQr)
     }
 
     for (let i = 0; i < 30; i += 1) {
       if (currentState === 'open') {
         setQrBase64(null)
-        setPairingCode(null)
         setConnecting(false)
         return
       }
@@ -437,7 +414,6 @@ export function WhatsappSettingsPage() {
       }
       if (currentState === 'open') {
         setQrBase64(null)
-        setPairingCode(null)
         setConnecting(false)
         return
       }
@@ -546,7 +522,6 @@ export function WhatsappSettingsPage() {
     setInstanceState(nextState)
     if (nextState === 'open') {
       setQrBase64(null)
-      setPairingCode(null)
     }
     setCheckingStatus(false)
   }
@@ -667,34 +642,14 @@ export function WhatsappSettingsPage() {
                         Testar conexão
                       </Button>
                     ) : (
-                      <>
-                        <Button onClick={() => void connect()} disabled={!habilitado || !configurado || checkingStatus || connecting || disconnecting}>
-                          Conectar (QR Code)
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          onClick={() => void connect({ number: pairingNumber })}
-                          disabled={!habilitado || !configurado || checkingStatus || connecting || disconnecting}
-                        >
-                          Conectar (código)
-                        </Button>
-                      </>
+                      <Button onClick={() => void connect()} disabled={!habilitado || !configurado || checkingStatus || connecting || disconnecting}>
+                        Conectar (QR Code)
+                      </Button>
                     )}
                     <Button variant="danger" onClick={disconnect} disabled={!habilitado || !configurado || disconnecting || connecting}>
                       Desconectar
                     </Button>
                   </div>
-
-                  {!isConnected ? (
-                    <div className="pt-2">
-                      <Input
-                        label="Número do WhatsApp (para código no mesmo celular)"
-                        value={pairingNumber}
-                        onChange={(e) => setPairingNumber(e.target.value)}
-                        placeholder="11 99999-9999"
-                      />
-                    </div>
-                  ) : null}
                 </div>
               )}
             </div>
@@ -720,29 +675,6 @@ export function WhatsappSettingsPage() {
                     alt="QR Code"
                   />
                 </div>
-              </div>
-            </Card>
-          </div>
-        ) : null}
-
-        {pairingCode ? (
-          <div
-            className={
-              tutorialOpen && tutorialSteps[tutorialStep]?.target === 'qr'
-                ? 'ring-2 ring-slate-900 ring-offset-2 ring-offset-slate-50 rounded-xl'
-                : ''
-            }
-          >
-            <Card>
-              <div className="p-6 space-y-4">
-                <div className="text-sm font-semibold text-slate-900">Código de pareamento</div>
-                <div className="text-sm text-slate-600">
-                  Se você usa o sistema no celular e não consegue escanear o QR Code, use este código para conectar pelo WhatsApp.
-                </div>
-                <div className="text-sm text-slate-600">
-                  No WhatsApp: abra <span className="font-semibold">Dispositivos conectados</span> e escolha a opção de <span className="font-semibold">conectar com número/código</span>.
-                </div>
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm font-mono text-slate-900 break-all">{pairingCode}</div>
               </div>
             </Card>
           </div>

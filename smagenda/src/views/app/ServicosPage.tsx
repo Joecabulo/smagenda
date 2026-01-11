@@ -16,6 +16,11 @@ type Servico = {
   duracao_minutos: number
   preco: number
   taxa_agendamento: number
+  buffer_antes_min?: number
+  buffer_depois_min?: number
+  antecedencia_minutos?: number
+  janela_max_dias?: number
+  dia_inteiro?: boolean
   cor: string | null
   foto_url: string | null
   ativo: boolean
@@ -29,6 +34,11 @@ type FormState = {
   duracao_minutos: string
   preco: string
   taxa_agendamento: string
+  buffer_antes_min: string
+  buffer_depois_min: string
+  antecedencia_minutos: string
+  janela_max_dias: string
+  dia_inteiro: boolean
   cor: string
   foto_url: string
   ativo: boolean
@@ -42,6 +52,11 @@ function toFormState(servico?: Servico | null): FormState {
     duracao_minutos: String(servico?.duracao_minutos ?? 45),
     preco: String(servico?.preco ?? 0),
     taxa_agendamento: String(servico?.taxa_agendamento ?? 0),
+    buffer_antes_min: String(typeof servico?.buffer_antes_min === 'number' ? servico.buffer_antes_min : 0),
+    buffer_depois_min: String(typeof servico?.buffer_depois_min === 'number' ? servico.buffer_depois_min : 0),
+    antecedencia_minutos: String(typeof servico?.antecedencia_minutos === 'number' ? servico.antecedencia_minutos : 120),
+    janela_max_dias: String(typeof servico?.janela_max_dias === 'number' ? servico.janela_max_dias : 15),
+    dia_inteiro: Boolean(servico?.dia_inteiro),
     cor: servico?.cor ?? '#0f172a',
     foto_url: servico?.foto_url ?? '',
     ativo: servico?.ativo ?? true,
@@ -50,8 +65,10 @@ function toFormState(servico?: Servico | null): FormState {
 
 export function ServicosPage() {
   const enableTaxaAgendamento = (import.meta.env.VITE_ENABLE_TAXA_AGENDAMENTO as string | undefined) === '1'
-  const { appPrincipal } = useAuth()
-  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
+  const { appPrincipal, masterUsuario, masterUsuarioLoading } = useAuth()
+  const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
+  const isGerente = appPrincipal?.kind === 'funcionario' && appPrincipal.profile.permissao === 'admin'
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isGerente ? masterUsuario : null
 
   const usuarioId = usuario?.id
 
@@ -87,6 +104,7 @@ export function ServicosPage() {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [uploadingFoto, setUploadingFoto] = useState(false)
+  const [regrasPorServicoDisponivel, setRegrasPorServicoDisponivel] = useState(true)
   const [formOpen, setFormOpen] = useState(false)
   const [form, setForm] = useState<FormState>(() => toFormState(null))
 
@@ -121,21 +139,48 @@ export function ServicosPage() {
     setLoading(true)
     setError(null)
 
-    const selectCols = enableTaxaAgendamento
+    const baseCols = enableTaxaAgendamento
       ? 'id,usuario_id,nome,descricao,duracao_minutos,preco,taxa_agendamento,cor,foto_url,ativo,ordem'
       : 'id,usuario_id,nome,descricao,duracao_minutos,preco,cor,foto_url,ativo,ordem'
-    const { data, error: err } = await supabase
+    const colsWithRules = `${baseCols},buffer_antes_min,buffer_depois_min,antecedencia_minutos,janela_max_dias,dia_inteiro`
+
+    const first = await supabase
       .from('servicos')
-      .select(selectCols)
+      .select(colsWithRules)
       .eq('usuario_id', usuarioId)
       .order('ordem', { ascending: true })
       .order('criado_em', { ascending: true })
-    if (err) {
-      setError(err.message)
+
+    if (first.error) {
+      const msg = first.error.message
+      const lower = msg.toLowerCase()
+      const missingColumn = lower.includes('column') && lower.includes('does not exist')
+      if (!missingColumn) {
+        setError(msg)
+        setLoading(false)
+        return
+      }
+
+      setRegrasPorServicoDisponivel(false)
+      const second = await supabase
+        .from('servicos')
+        .select(baseCols)
+        .eq('usuario_id', usuarioId)
+        .order('ordem', { ascending: true })
+        .order('criado_em', { ascending: true })
+
+      if (second.error) {
+        setError(second.error.message)
+        setLoading(false)
+        return
+      }
+      setServicos((second.data ?? []) as unknown as Servico[])
       setLoading(false)
       return
     }
-    setServicos((data ?? []) as unknown as Servico[])
+
+    setRegrasPorServicoDisponivel(true)
+    setServicos((first.data ?? []) as unknown as Servico[])
     setLoading(false)
   }, [enableTaxaAgendamento, usuarioId])
 
@@ -150,6 +195,14 @@ export function ServicosPage() {
   }, [load])
 
   if (!usuario) {
+    return (
+      <AppShell>
+        <div className="text-slate-700">{isGerente && masterUsuarioLoading ? 'Carregando…' : 'Acesso restrito.'}</div>
+      </AppShell>
+    )
+  }
+
+  if (funcionario && !funcionario.pode_gerenciar_servicos) {
     return (
       <AppShell>
         <div className="text-slate-700">Acesso restrito.</div>
@@ -227,6 +280,19 @@ export function ServicosPage() {
 
     if (enableTaxaAgendamento) {
       payload.taxa_agendamento = Number(form.taxa_agendamento)
+    }
+
+    if (regrasPorServicoDisponivel) {
+      const bufferAntes = Number(form.buffer_antes_min)
+      const bufferDepois = Number(form.buffer_depois_min)
+      const antecedencia = Number(form.antecedencia_minutos)
+      const janela = Number(form.janela_max_dias)
+
+      payload.buffer_antes_min = Number.isFinite(bufferAntes) ? Math.max(0, Math.floor(bufferAntes)) : 0
+      payload.buffer_depois_min = Number.isFinite(bufferDepois) ? Math.max(0, Math.floor(bufferDepois)) : 0
+      payload.antecedencia_minutos = Number.isFinite(antecedencia) ? Math.max(0, Math.floor(antecedencia)) : 120
+      payload.janela_max_dias = Number.isFinite(janela) ? Math.max(1, Math.floor(janela)) : 15
+      payload.dia_inteiro = Boolean(form.dia_inteiro)
     }
 
     if (canUseFotos) {
@@ -379,6 +445,46 @@ export function ServicosPage() {
                   onChange={(e) => setForm((p) => ({ ...p, preco: e.target.value }))}
                 />
               </div>
+
+              {regrasPorServicoDisponivel ? (
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input type="checkbox" checked={form.dia_inteiro} onChange={(e) => setForm((p) => ({ ...p, dia_inteiro: e.target.checked }))} />
+                  Dura o dia inteiro (ex.: faxina)
+                </label>
+              ) : null}
+
+              {regrasPorServicoDisponivel ? (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Input
+                    label="Buffer antes (min)"
+                    type="number"
+                    value={form.buffer_antes_min}
+                    onChange={(e) => setForm((p) => ({ ...p, buffer_antes_min: e.target.value }))}
+                  />
+                  <Input
+                    label="Buffer depois (min)"
+                    type="number"
+                    value={form.buffer_depois_min}
+                    onChange={(e) => setForm((p) => ({ ...p, buffer_depois_min: e.target.value }))}
+                  />
+                  <Input
+                    label="Antecedência mínima (min)"
+                    type="number"
+                    value={form.antecedencia_minutos}
+                    onChange={(e) => setForm((p) => ({ ...p, antecedencia_minutos: e.target.value }))}
+                  />
+                  <Input
+                    label="Janela de agendamento (dias)"
+                    type="number"
+                    value={form.janela_max_dias}
+                    onChange={(e) => setForm((p) => ({ ...p, janela_max_dias: e.target.value }))}
+                  />
+                </div>
+              ) : (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  Regras por serviço (buffer/antecedência/janela) ainda não estão habilitadas no seu Supabase. Aplique o SQL do link público atualizado em /admin/configuracoes.
+                </div>
+              )}
               {enableTaxaAgendamento ? (
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Input

@@ -62,13 +62,14 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
 }
 
 function toFuncionarioProfile(row: Record<string, unknown>, userId: string): FuncionarioProfile {
+  const permissao = row.permissao === 'admin' ? 'admin' : row.permissao === 'atendente' ? 'atendente' : 'funcionario'
   return {
     id: userId,
     usuario_master_id: String(row.usuario_master_id ?? ''),
     nome_completo: String(row.nome_completo ?? ''),
     email: String(row.email ?? ''),
     telefone: typeof row.telefone === 'string' ? row.telefone : null,
-    permissao: (row.permissao === 'admin' ? 'admin' : 'funcionario') as FuncionarioProfile['permissao'],
+    permissao,
     pode_ver_agenda: row.pode_ver_agenda !== false,
     pode_criar_agendamentos: row.pode_criar_agendamentos !== false,
     pode_cancelar_agendamentos: row.pode_cancelar_agendamentos !== false,
@@ -81,6 +82,7 @@ function toFuncionarioProfile(row: Record<string, unknown>, userId: string): Fun
     dias_trabalho: Array.isArray(row.dias_trabalho) ? (row.dias_trabalho as number[]) : null,
     intervalo_inicio: typeof row.intervalo_inicio === 'string' ? row.intervalo_inicio : null,
     intervalo_fim: typeof row.intervalo_fim === 'string' ? row.intervalo_fim : null,
+    capacidade_dia_inteiro: typeof row.capacidade_dia_inteiro === 'number' && Number.isFinite(row.capacidade_dia_inteiro) ? Math.max(1, Math.min(2, Math.floor(row.capacidade_dia_inteiro))) : 1,
     ativo: row.ativo !== false,
   }
 }
@@ -130,6 +132,8 @@ async function resolvePrincipal(userId: string): Promise<Principal | null> {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<import('@supabase/supabase-js').Session | null>(null)
   const [principal, setPrincipal] = useState<Principal | null>(null)
+  const [masterUsuario, setMasterUsuario] = useState<UsuarioProfile | null>(null)
+  const [masterUsuarioLoading, setMasterUsuarioLoading] = useState(false)
   const [loading, setLoading] = useState(true)
 
   const [impersonation, setImpersonation] = useState<Impersonation | null>(() => {
@@ -255,6 +259,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [refresh])
 
+  useEffect(() => {
+    const run = async () => {
+      if (principal?.kind !== 'funcionario') {
+        setMasterUsuario(null)
+        setMasterUsuarioLoading(false)
+        return
+      }
+
+      const masterIdRaw = principal.profile.usuario_master_id
+      const masterId = typeof masterIdRaw === 'string' ? masterIdRaw.trim() : ''
+      if (!masterId) {
+        setMasterUsuario(null)
+        setMasterUsuarioLoading(false)
+        return
+      }
+
+      setMasterUsuarioLoading(true)
+      const { data, error } = await supabase.from('usuarios').select('*').eq('id', masterId).maybeSingle()
+      if (error || !data) {
+        setMasterUsuario(null)
+        setMasterUsuarioLoading(false)
+        return
+      }
+
+      setMasterUsuario(toUsuarioProfile(data as unknown as Record<string, unknown>, masterId))
+      setMasterUsuarioLoading(false)
+    }
+
+    run().catch(() => {
+      setMasterUsuario(null)
+      setMasterUsuarioLoading(false)
+    })
+  }, [principal])
+
   const appPrincipal = useMemo<Principal | null>(() => {
     if (principal?.kind === 'super_admin' && impersonation && impersonatedUsuario) {
       return { kind: 'usuario', profile: impersonatedUsuario }
@@ -267,6 +305,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       session,
       principal,
       appPrincipal,
+      masterUsuario,
+      masterUsuarioLoading,
       loading,
       refresh,
       signOut,
@@ -274,7 +314,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       startImpersonation,
       stopImpersonation,
     }),
-    [session, principal, appPrincipal, loading, refresh, signOut, impersonation, startImpersonation, stopImpersonation]
+    [session, principal, appPrincipal, masterUsuario, masterUsuarioLoading, loading, refresh, signOut, impersonation, startImpersonation, stopImpersonation]
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

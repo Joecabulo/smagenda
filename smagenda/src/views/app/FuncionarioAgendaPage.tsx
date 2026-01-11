@@ -18,22 +18,31 @@ type Agendamento = {
   hora_fim: string | null
   status: string
   funcionario_id: string | null
+  extras: Record<string, unknown> | null
   servico: { id: string; nome: string; preco: number; duracao_minutos: number; cor: string | null } | null
+}
+
+function readExtrasEndereco(extras: unknown) {
+  if (!extras || typeof extras !== 'object') return null
+  const v = (extras as Record<string, unknown>).endereco
+  if (typeof v !== 'string') return null
+  const t = v.trim()
+  return t ? t : null
 }
 
 type ServicoOption = { id: string; nome: string; cor: string | null }
 
 type Bloqueio = { id: string; data: string; hora_inicio: string; hora_fim: string; motivo: string | null; funcionario_id: string | null }
 
-const weekdayOptions = [
-  { value: 1, label: 'S' },
-  { value: 2, label: 'T' },
-  { value: 3, label: 'Q' },
-  { value: 4, label: 'Q' },
-  { value: 5, label: 'S' },
-  { value: 6, label: 'S' },
-  { value: 0, label: 'D' },
-]
+type FuncionarioOption = {
+  id: string
+  nome_completo: string
+  ativo: boolean
+  horario_inicio: string | null
+  horario_fim: string | null
+  intervalo_inicio: string | null
+  intervalo_fim: string | null
+}
 
 function formatSupabaseError(err: { message: string; details?: string | null; hint?: string | null; code?: string | null }) {
   const parts = [err.message]
@@ -250,17 +259,27 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
 export function FuncionarioAgendaPage() {
   const { appPrincipal, refresh } = useAuth()
   const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
-  const funcionarioId = funcionario?.id ?? null
-  const usuarioMasterId = funcionario?.usuario_master_id ?? null
+  const funcionarioId = funcionario?.id ? funcionario.id : null
+  const usuarioMasterId = (() => {
+    const raw = funcionario?.usuario_master_id
+    const v = typeof raw === 'string' ? raw.trim() : ''
+    return v ? v : null
+  })()
+
+  const formatQueryError = (err: { message: string; details?: string | null; hint?: string | null; code?: string | null }) => {
+    const formatted = formatSupabaseError(err)
+    const lower = formatted.toLowerCase()
+    const isRls = lower.includes('row-level security') || lower.includes('rls')
+    const isDenied = lower.includes('permission denied') || lower.includes('not allowed') || err.code === '42501'
+    if (isRls || isDenied) {
+      return `${formatted} • Verifique se o atendente está com “Ver agenda” ativo e reexecute no Supabase o “SQL de políticas (Usuário / Funcionário)”.`
+    }
+    return formatted
+  }
 
   const tutorialSteps = useMemo(
     () =>
       [
-        {
-          title: 'Seu horário',
-          body: 'Configure seu horário de funcionamento e os dias disponíveis. Isso impacta sua agenda e o link público.',
-          target: 'horario' as const,
-        },
         {
           title: 'Navegação e filtros',
           body: 'Use dia/semana, setas e filtros para encontrar agendamentos rapidamente.',
@@ -290,14 +309,6 @@ export function FuncionarioAgendaPage() {
 
   const [usuarioMasterPlano, setUsuarioMasterPlano] = useState<string | null>(null)
 
-  const [horarioStart, setHorarioStart] = useState('')
-  const [horarioEnd, setHorarioEnd] = useState('')
-  const [horarioDays, setHorarioDays] = useState<number[]>([])
-  const [horarioIntervalStart, setHorarioIntervalStart] = useState('')
-  const [horarioIntervalEnd, setHorarioIntervalEnd] = useState('')
-  const [horarioTouched, setHorarioTouched] = useState(false)
-  const [horarioSaving, setHorarioSaving] = useState(false)
-
   const [date, setDate] = useState(() => {
     const now = new Date()
     now.setHours(0, 0, 0, 0)
@@ -306,7 +317,36 @@ export function FuncionarioAgendaPage() {
 
   const [viewMode, setViewMode] = useState<'dia' | 'semana'>('dia')
 
+  const agendaLayoutKey = useMemo(() => {
+    const id = (funcionarioId ?? '').trim()
+    if (!id) return null
+    return `smagenda:agenda_layout:${id}`
+  }, [funcionarioId])
+
+  const [agendaLayoutVersion, setAgendaLayoutVersion] = useState(0)
+
+  const agendaLayout = useMemo(() => {
+    void agendaLayoutVersion
+    const fallback: 'grade' | 'lista' = funcionario?.permissao === 'atendente' ? 'lista' : 'grade'
+    if (!agendaLayoutKey) return fallback
+    try {
+      const saved = localStorage.getItem(agendaLayoutKey)
+      if (saved === 'grade' || saved === 'lista') return saved
+      return fallback
+    } catch {
+      return fallback
+    }
+  }, [agendaLayoutKey, agendaLayoutVersion, funcionario?.permissao])
+
+  const canVerAgendaTodos = useMemo(() => {
+    if (!funcionario) return false
+    if (!funcionario.pode_ver_agenda) return false
+    return funcionario.permissao === 'admin' || funcionario.permissao === 'atendente'
+  }, [funcionario])
+
   const [servicos, setServicos] = useState<ServicoOption[]>([])
+  const [funcionarios, setFuncionarios] = useState<FuncionarioOption[]>([])
+  const [filterFuncionarioId, setFilterFuncionarioId] = useState<string>('')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [servicoFilterId, setServicoFilterId] = useState('')
@@ -365,119 +405,48 @@ export function FuncionarioAgendaPage() {
 
   const slotStepMinutes = 30
 
+  const selectedFuncionario = useMemo(() => {
+    if (!canVerAgendaTodos) return null
+    if (!filterFuncionarioId) return null
+    return funcionarios.find((f) => f.id === filterFuncionarioId) ?? null
+  }, [canVerAgendaTodos, filterFuncionarioId, funcionarios])
+
   const slots = useMemo(() => {
-    const start = funcionario?.horario_inicio ?? usuarioMasterHorario?.horario_inicio ?? null
-    const end = funcionario?.horario_fim ?? usuarioMasterHorario?.horario_fim ?? null
+    const start = canVerAgendaTodos
+      ? selectedFuncionario?.horario_inicio ?? usuarioMasterHorario?.horario_inicio ?? null
+      : funcionario?.horario_inicio ?? usuarioMasterHorario?.horario_inicio ?? null
+
+    const end = canVerAgendaTodos
+      ? selectedFuncionario?.horario_fim ?? usuarioMasterHorario?.horario_fim ?? null
+      : funcionario?.horario_fim ?? usuarioMasterHorario?.horario_fim ?? null
+
     if (!start || !end) return []
-    const intervalStart = funcionario?.intervalo_inicio ?? usuarioMasterHorario?.intervalo_inicio ?? null
-    const intervalEnd = funcionario?.intervalo_fim ?? usuarioMasterHorario?.intervalo_fim ?? null
+
+    const intervalStart = canVerAgendaTodos
+      ? selectedFuncionario?.intervalo_inicio ?? usuarioMasterHorario?.intervalo_inicio ?? null
+      : funcionario?.intervalo_inicio ?? usuarioMasterHorario?.intervalo_inicio ?? null
+
+    const intervalEnd = canVerAgendaTodos
+      ? selectedFuncionario?.intervalo_fim ?? usuarioMasterHorario?.intervalo_fim ?? null
+      : funcionario?.intervalo_fim ?? usuarioMasterHorario?.intervalo_fim ?? null
+
     return buildSlots(start, end, intervalStart, intervalEnd, slotStepMinutes)
   }, [
+    canVerAgendaTodos,
     funcionario?.horario_inicio,
     funcionario?.horario_fim,
     funcionario?.intervalo_inicio,
     funcionario?.intervalo_fim,
+    selectedFuncionario?.horario_inicio,
+    selectedFuncionario?.horario_fim,
+    selectedFuncionario?.intervalo_inicio,
+    selectedFuncionario?.intervalo_fim,
     slotStepMinutes,
     usuarioMasterHorario?.horario_inicio,
     usuarioMasterHorario?.horario_fim,
     usuarioMasterHorario?.intervalo_inicio,
     usuarioMasterHorario?.intervalo_fim,
   ])
-
-  const effectiveHorario = useMemo(() => {
-    const baseStart = funcionario?.horario_inicio ?? usuarioMasterHorario?.horario_inicio ?? ''
-    const baseEnd = funcionario?.horario_fim ?? usuarioMasterHorario?.horario_fim ?? ''
-    const baseDays = funcionario?.dias_trabalho ?? usuarioMasterHorario?.dias_trabalho ?? [1, 2, 3, 4, 5]
-    const baseIvStart = funcionario?.intervalo_inicio ?? usuarioMasterHorario?.intervalo_inicio ?? ''
-    const baseIvEnd = funcionario?.intervalo_fim ?? usuarioMasterHorario?.intervalo_fim ?? ''
-    return { baseStart, baseEnd, baseDays, baseIvStart, baseIvEnd }
-  }, [
-    funcionario?.dias_trabalho,
-    funcionario?.horario_fim,
-    funcionario?.horario_inicio,
-    funcionario?.intervalo_fim,
-    funcionario?.intervalo_inicio,
-    usuarioMasterHorario?.dias_trabalho,
-    usuarioMasterHorario?.horario_fim,
-    usuarioMasterHorario?.horario_inicio,
-    usuarioMasterHorario?.intervalo_fim,
-    usuarioMasterHorario?.intervalo_inicio,
-  ])
-
-  const currentHorario = useMemo(() => {
-    if (horarioTouched) {
-      return {
-        start: horarioStart,
-        end: horarioEnd,
-        days: horarioDays,
-        intervalStart: horarioIntervalStart,
-        intervalEnd: horarioIntervalEnd,
-      }
-    }
-    return {
-      start: effectiveHorario.baseStart,
-      end: effectiveHorario.baseEnd,
-      days: effectiveHorario.baseDays,
-      intervalStart: effectiveHorario.baseIvStart,
-      intervalEnd: effectiveHorario.baseIvEnd,
-    }
-  }, [
-    effectiveHorario.baseDays,
-    effectiveHorario.baseEnd,
-    effectiveHorario.baseIvEnd,
-    effectiveHorario.baseIvStart,
-    effectiveHorario.baseStart,
-    horarioDays,
-    horarioEnd,
-    horarioIntervalEnd,
-    horarioIntervalStart,
-    horarioStart,
-    horarioTouched,
-  ])
-
-  const touchHorario = () => {
-    if (horarioTouched) return
-    setHorarioStart(effectiveHorario.baseStart)
-    setHorarioEnd(effectiveHorario.baseEnd)
-    setHorarioDays(effectiveHorario.baseDays)
-    setHorarioIntervalStart(effectiveHorario.baseIvStart)
-    setHorarioIntervalEnd(effectiveHorario.baseIvEnd)
-    setHorarioTouched(true)
-  }
-
-  const horarioValidationError = useMemo(() => {
-    const start = currentHorario.start.trim()
-    const end = currentHorario.end.trim()
-    if (!start || !end) return 'Informe início e fim.'
-    const startMin = parseTimeToMinutes(start)
-    const endMin = parseTimeToMinutes(end)
-    if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return 'Horário inválido.'
-    if (endMin <= startMin) return 'O fim deve ser após o início.'
-    if (!currentHorario.days || currentHorario.days.length === 0) return 'Selecione ao menos um dia.'
-    const invalidDay = currentHorario.days.some((d) => !Number.isFinite(d) || d < 0 || d > 6)
-    if (invalidDay) return 'Dias inválidos.'
-
-    const ivStart = currentHorario.intervalStart.trim()
-    const ivEnd = currentHorario.intervalEnd.trim()
-    const hasIvStart = Boolean(ivStart)
-    const hasIvEnd = Boolean(ivEnd)
-    if (hasIvStart !== hasIvEnd) return 'Informe início e fim do intervalo (ou deixe ambos vazios).'
-    if (hasIvStart && hasIvEnd) {
-      const ivStartMin = parseTimeToMinutes(ivStart)
-      const ivEndMin = parseTimeToMinutes(ivEnd)
-      if (!Number.isFinite(ivStartMin) || !Number.isFinite(ivEndMin)) return 'Intervalo inválido.'
-      if (ivEndMin <= ivStartMin) return 'O fim do intervalo deve ser após o início.'
-      if (ivStartMin < startMin || ivEndMin > endMin) return 'Intervalo deve estar dentro do horário de trabalho.'
-    }
-
-    return null
-  }, [currentHorario.days, currentHorario.end, currentHorario.intervalEnd, currentHorario.intervalStart, currentHorario.start])
-
-  const canSaveHorario = useMemo(() => {
-    if (!funcionarioId) return false
-    if (horarioSaving) return false
-    return !horarioValidationError
-  }, [funcionarioId, horarioSaving, horarioValidationError])
 
   const totalDia = useMemo(() => {
     if (!funcionario?.pode_ver_financeiro) return 0
@@ -488,7 +457,11 @@ export function FuncionarioAgendaPage() {
 
   useEffect(() => {
     const run = async () => {
-      if (!funcionarioId || !usuarioMasterId) return
+      if (!funcionarioId || !usuarioMasterId) {
+        setError('Este usuário não está vinculado a um usuário master (funcionarios.usuario_master_id vazio).')
+        setLoading(false)
+        return
+      }
       setLoading(true)
       setError(null)
 
@@ -519,26 +492,51 @@ export function FuncionarioAgendaPage() {
         .eq('ativo', true)
         .order('ordem', { ascending: true })
         .order('criado_em', { ascending: true })
-      if (!servicosError) {
-        setServicos((servicosData ?? []) as unknown as ServicoOption[])
+      if (servicosError) {
+        setError(formatQueryError(servicosError))
+        setLoading(false)
+        return
+      }
+      setServicos((servicosData ?? []) as unknown as ServicoOption[])
+
+      if (canVerAgendaTodos) {
+        const { data: funcionariosData, error: funcionariosError } = await supabase
+          .from('funcionarios')
+          .select('id,nome_completo,ativo,horario_inicio,horario_fim,intervalo_inicio,intervalo_fim')
+          .eq('usuario_master_id', usuarioMasterId)
+          .eq('permissao', 'funcionario')
+          .order('criado_em', { ascending: true })
+        if (funcionariosError) {
+          setError(formatQueryError(funcionariosError))
+          setLoading(false)
+          return
+        }
+        setFuncionarios((funcionariosData ?? []) as unknown as FuncionarioOption[])
+      } else {
+        setFuncionarios([])
       }
 
       const base = supabase
         .from('agendamentos')
-        .select('id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,servico:servico_id(id,nome,preco,duracao_minutos,cor)')
+        .select('id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(id,nome,preco,duracao_minutos,cor)')
         .eq('usuario_id', usuarioMasterId)
-        .eq('funcionario_id', funcionarioId)
         .order('data', { ascending: true })
         .order('hora_inicio', { ascending: true })
 
+      const baseScoped = canVerAgendaTodos
+        ? filterFuncionarioId
+          ? base.eq('funcionario_id', filterFuncionarioId)
+          : base
+        : base.eq('funcionario_id', funcionarioId)
+
       const baseWithRange =
         viewMode === 'dia'
-          ? base.eq('data', dayKey)
-          : base.gte('data', weekStartKey).lte('data', weekEndKey)
+          ? baseScoped.eq('data', dayKey)
+          : baseScoped.gte('data', weekStartKey).lte('data', weekEndKey)
 
       const { data: agData, error: agError } = await baseWithRange
       if (agError) {
-        setError(agError.message)
+        setError(formatQueryError(agError))
         setLoading(false)
         return
       }
@@ -555,7 +553,14 @@ export function FuncionarioAgendaPage() {
         .from('bloqueios')
         .select('id,data,hora_inicio,hora_fim,motivo,funcionario_id')
         .eq('usuario_id', usuarioMasterId)
-        .or(`funcionario_id.is.null,funcionario_id.eq.${funcionarioId}`)
+
+      if (canVerAgendaTodos) {
+        if (filterFuncionarioId) {
+          bloqueiosQuery = bloqueiosQuery.or(`funcionario_id.is.null,funcionario_id.eq.${filterFuncionarioId}`)
+        }
+      } else {
+        bloqueiosQuery = bloqueiosQuery.or(`funcionario_id.is.null,funcionario_id.eq.${funcionarioId}`)
+      }
 
       bloqueiosQuery =
         viewMode === 'dia'
@@ -564,7 +569,7 @@ export function FuncionarioAgendaPage() {
 
       const { data: bloqueiosData, error: bloqueiosError } = await bloqueiosQuery
       if (bloqueiosError) {
-        setError(bloqueiosError.message)
+        setError(formatQueryError(bloqueiosError))
         setLoading(false)
         return
       }
@@ -581,7 +586,7 @@ export function FuncionarioAgendaPage() {
       setError(e instanceof Error ? e.message : 'Erro ao carregar')
       setLoading(false)
     })
-  }, [funcionarioId, usuarioMasterId, dayKey, viewMode, weekEndKey, weekStartKey])
+  }, [canVerAgendaTodos, dayKey, filterFuncionarioId, funcionarioId, usuarioMasterId, viewMode, weekEndKey, weekStartKey])
 
   const prevPeriod = () => {
     if (viewMode === 'semana') {
@@ -711,6 +716,37 @@ export function FuncionarioAgendaPage() {
     return map
   }, [bloqueios])
 
+  const funcionarioNameById = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const f of funcionarios) map[f.id] = f.nome_completo
+    return map
+  }, [funcionarios])
+
+  const visibleAgendamentos = useMemo(() => {
+    return agendamentos
+      .filter(matchesFilters)
+      .slice()
+      .sort((a, b) => {
+        if (a.data !== b.data) return a.data < b.data ? -1 : 1
+        return parseTimeToMinutes(a.hora_inicio) - parseTimeToMinutes(b.hora_inicio)
+      })
+  }, [agendamentos, matchesFilters])
+
+  const listItems = useMemo(() => {
+    const items: Array<
+      | { kind: 'ag'; data: string; hora_inicio: string; ag: Agendamento }
+      | { kind: 'b'; data: string; hora_inicio: string; b: Bloqueio }
+    > = []
+
+    for (const ag of visibleAgendamentos) items.push({ kind: 'ag', data: ag.data, hora_inicio: ag.hora_inicio, ag })
+    for (const b of bloqueios) items.push({ kind: 'b', data: b.data, hora_inicio: b.hora_inicio, b })
+
+    return items.sort((a, b) => {
+      if (a.data !== b.data) return a.data < b.data ? -1 : 1
+      return parseTimeToMinutes(a.hora_inicio) - parseTimeToMinutes(b.hora_inicio)
+    })
+  }, [bloqueios, visibleAgendamentos])
+
   const repeatPreview = useMemo(() => {
     return buildRepeatKeys(dayKey, effectiveBlockRepeat, effectiveBlockRepeatUntil.trim() ? effectiveBlockRepeatUntil : null)
   }, [dayKey, effectiveBlockRepeat, effectiveBlockRepeatUntil])
@@ -813,44 +849,6 @@ export function FuncionarioAgendaPage() {
     setBloqueios((prev) => prev.filter((x) => x.id !== b.id))
   }
 
-  const toggleHorarioDay = (day: number) => {
-    touchHorario()
-    setHorarioDays((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]))
-  }
-
-  const saveHorario = async () => {
-    if (!funcionarioId) return
-    if (horarioValidationError) return
-    setHorarioSaving(true)
-    setError(null)
-
-    const payload = {
-      p_horario_inicio: currentHorario.start.trim(),
-      p_horario_fim: currentHorario.end.trim(),
-      p_dias_trabalho: currentHorario.days.slice().sort((a, b) => a - b),
-      p_intervalo_inicio: currentHorario.intervalStart.trim() ? currentHorario.intervalStart.trim() : null,
-      p_intervalo_fim: currentHorario.intervalEnd.trim() ? currentHorario.intervalEnd.trim() : null,
-    }
-
-    const { error: err } = await supabase.rpc('funcionario_update_horarios', payload)
-    if (err) {
-      const msg = err.message
-      const lower = msg.toLowerCase()
-      const missingFn = lower.includes('funcionario_update_horarios') && (lower.includes('function') || lower.includes('rpc'))
-      setError(
-        missingFn
-          ? 'Configuração do Supabase incompleta: crie a função funcionario_update_horarios no SQL Editor (Admin > Configurações).'
-          : msg
-      )
-      setHorarioSaving(false)
-      return
-    }
-
-    await refresh()
-    setHorarioTouched(false)
-    setHorarioSaving(false)
-  }
-
   if (!funcionario) {
     return (
       <AppShell>
@@ -872,100 +870,6 @@ export function FuncionarioAgendaPage() {
               <Button variant="secondary" onClick={resetTutorial}>
                 Rever tutorial
               </Button>
-            </div>
-
-            <div
-              className={
-                tutorialOpen && tutorialSteps[tutorialStep]?.target === 'horario'
-                  ? 'ring-2 ring-slate-900 ring-offset-2 ring-offset-slate-50 rounded-xl'
-                  : ''
-              }
-            >
-              <Card>
-                <div className="p-6 space-y-4">
-            <div>
-              <div className="text-sm font-semibold text-slate-900">Meu horário de funcionamento</div>
-              <div className="text-xs text-slate-600">Define seus horários e dias disponíveis para a agenda e o link público.</div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Input
-                label="Início"
-                type="time"
-                value={currentHorario.start}
-                step={900}
-                onChange={(e) => {
-                  touchHorario()
-                  setHorarioStart(e.target.value)
-                }}
-              />
-              <Input
-                label="Fim"
-                type="time"
-                value={currentHorario.end}
-                step={900}
-                onChange={(e) => {
-                  touchHorario()
-                  setHorarioEnd(e.target.value)
-                }}
-              />
-            </div>
-
-            <div>
-              <div className="text-sm font-medium text-slate-700 mb-2">Dias</div>
-              <div className="flex flex-wrap gap-2">
-                {weekdayOptions.map((d) => (
-                  <button
-                    type="button"
-                    key={d.value}
-                    onClick={() => toggleHorarioDay(d.value)}
-                    className={[
-                      'h-9 w-9 rounded-lg border text-sm font-semibold',
-                      currentHorario.days.includes(d.value)
-                        ? 'bg-slate-900 text-white border-slate-900'
-                        : 'bg-white text-slate-700 border-slate-200',
-                    ].join(' ')}
-                  >
-                    {d.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Input
-                label="Intervalo início (opcional)"
-                type="time"
-                value={currentHorario.intervalStart}
-                step={900}
-                onChange={(e) => {
-                  touchHorario()
-                  setHorarioIntervalStart(e.target.value)
-                }}
-              />
-              <Input
-                label="Intervalo fim (opcional)"
-                type="time"
-                value={currentHorario.intervalEnd}
-                step={900}
-                onChange={(e) => {
-                  touchHorario()
-                  setHorarioIntervalEnd(e.target.value)
-                }}
-              />
-            </div>
-
-            <div className={['text-xs', horarioValidationError ? 'text-rose-700' : 'text-slate-600'].join(' ')}>
-              {horarioValidationError ? horarioValidationError : 'Salve para aplicar na geração de horários.'}
-            </div>
-
-            <div className="flex justify-end">
-              <Button onClick={saveHorario} disabled={!canSaveHorario}>
-                {horarioSaving ? 'Salvando…' : 'Salvar horário'}
-              </Button>
-            </div>
-                </div>
-              </Card>
             </div>
 
             {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
@@ -1011,9 +915,85 @@ export function FuncionarioAgendaPage() {
                           Semana
                         </button>
                       </div>
+
+                      <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (agendaLayoutKey) {
+                              try {
+                                localStorage.setItem(agendaLayoutKey, 'grade')
+                              } catch {
+                                void 0
+                              }
+                            }
+                            setAgendaLayoutVersion((v) => v + 1)
+                          }}
+                          className={[
+                            'rounded-md px-3 py-1 text-sm font-medium',
+                            agendaLayout === 'grade'
+                              ? 'bg-white text-slate-900 shadow-sm'
+                              : 'text-slate-700 hover:text-slate-900',
+                          ].join(' ')}
+                        >
+                          Grade
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (agendaLayoutKey) {
+                              try {
+                                localStorage.setItem(agendaLayoutKey, 'lista')
+                              } catch {
+                                void 0
+                              }
+                            }
+                            setAgendaLayoutVersion((v) => v + 1)
+                          }}
+                          className={[
+                            'rounded-md px-3 py-1 text-sm font-medium',
+                            agendaLayout === 'lista'
+                              ? 'bg-white text-slate-900 shadow-sm'
+                              : 'text-slate-700 hover:text-slate-900',
+                          ].join(' ')}
+                        >
+                          Lista
+                        </button>
+                      </div>
                     </div>
-                    <div className="text-sm text-slate-600">Mostrando: meus agendamentos</div>
+                    <div className="text-sm text-slate-600">Mostrando: {canVerAgendaTodos ? 'agenda completa' : 'meus agendamentos'}</div>
                   </div>
+
+                  {canVerAgendaTodos ? (
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <div className="text-sm text-slate-600">Filtrar por:</div>
+                      <button
+                        type="button"
+                        onClick={() => setFilterFuncionarioId('')}
+                        className={[
+                          'rounded-lg px-3 py-1.5 text-sm font-medium',
+                          !filterFuncionarioId ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200',
+                        ].join(' ')}
+                      >
+                        Todos
+                      </button>
+                      {funcionarios
+                        .filter((f) => f.ativo)
+                        .map((f) => (
+                          <button
+                            key={f.id}
+                            type="button"
+                            onClick={() => setFilterFuncionarioId(f.id)}
+                            className={[
+                              'rounded-lg px-3 py-1.5 text-sm font-medium',
+                              filterFuncionarioId === f.id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200',
+                            ].join(' ')}
+                          >
+                            {f.nome_completo.split(' ')[0]}
+                          </button>
+                        ))}
+                    </div>
+                  ) : null}
 
                   <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-12">
                     <div className="sm:col-span-5">
@@ -1164,16 +1144,137 @@ export function FuncionarioAgendaPage() {
                 <div className="divide-y divide-slate-100">
             {loading ? (
               <div className="p-6 text-sm text-slate-600">Carregando agenda…</div>
+            ) : agendaLayout === 'lista' ? (
+              <div className="p-6 space-y-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-sm text-slate-600">
+                    {visibleAgendamentos.length} agendamentos • {bloqueios.length} bloqueios
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {hasAnyFilter ? (
+                      <Button
+                        variant="secondary"
+                        onClick={() => {
+                          setSearch('')
+                          setStatusFilter('')
+                          setServicoFilterId('')
+                        }}
+                      >
+                        Limpar filtros
+                      </Button>
+                    ) : null}
+                    <Button variant="secondary" onClick={() => void refresh()}>
+                      Recarregar
+                    </Button>
+                  </div>
+                </div>
+
+                {visibleAgendamentos.length === 0 && bloqueios.length === 0 ? (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2">
+                    <div className="text-sm font-semibold text-slate-900">Nenhum item encontrado</div>
+                    <div className="text-sm text-slate-600">Não há agendamentos/bloqueios neste período com os filtros atuais.</div>
+                    <div className="text-xs text-slate-500 space-y-1">
+                      <div>
+                        Período: <span className="font-medium text-slate-700">{rangeLabel}</span>
+                      </div>
+                      {canVerAgendaTodos ? (
+                        <div>
+                          Profissional:{' '}
+                          <span className="font-medium text-slate-700">
+                            {filterFuncionarioId
+                              ? funcionarios.find((f) => f.id === filterFuncionarioId)?.nome_completo ?? 'Selecionado'
+                              : 'Todos'}
+                          </span>
+                        </div>
+                      ) : null}
+                      <div>
+                        Filtros:{' '}
+                        <span className="font-medium text-slate-700">
+                          {[
+                            searchNorm ? 'busca' : null,
+                            statusFilter.trim() ? `status=${statusFilter.trim()}` : null,
+                            servicoFilterId.trim() ? 'serviço' : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' • ') || 'nenhum'}
+                        </span>
+                      </div>
+                      {canVerAgendaTodos ? (
+                        <div>
+                          Profissionais carregados: <span className="font-medium text-slate-700">{funcionarios.filter((f) => f.ativo).length}</span>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {canVerAgendaTodos && funcionarios.length === 0 ? (
+                      <div className="text-xs text-amber-700 rounded-lg border border-amber-200 bg-amber-50 p-2">
+                        Se existem agendamentos no período, isso normalmente indica políticas RLS antigas no Supabase (o select retorna vazio sem erro).
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
+                    {listItems.map((item) => {
+                      if (item.kind === 'b') {
+                        const labelDate =
+                          viewMode === 'semana'
+                            ? parseDateKey(item.data).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })
+                            : null
+                        return (
+                          <div key={`b:${item.b.id}`} className="p-3 flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              {labelDate ? <div className="text-xs text-slate-500">{labelDate}</div> : null}
+                              <div className="text-sm font-semibold text-slate-900">
+                                {item.b.hora_inicio}–{item.b.hora_fim} • 🔒 Bloqueado
+                              </div>
+                              {item.b.motivo ? <div className="text-sm text-slate-600">{item.b.motivo}</div> : null}
+                            </div>
+                            <Badge tone="yellow">Bloqueado</Badge>
+                          </div>
+                        )
+                      }
+
+                      const ag = item.ag
+                      const statusUi = resolveStatusUi(ag.status)
+                      const endereco = readExtrasEndereco(ag.extras)
+                      const labelDate =
+                        viewMode === 'semana'
+                          ? parseDateKey(item.data).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })
+                          : null
+
+                      const profName = ag.funcionario_id ? funcionarioNameById[ag.funcionario_id] : ''
+                      const profLabel = canVerAgendaTodos && !filterFuncionarioId ? (profName ? profName : 'Profissional') : null
+
+                      return (
+                        <div key={`ag:${ag.id}`} className="p-3 flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            {labelDate ? <div className="text-xs text-slate-500">{labelDate}</div> : null}
+                            <div className="text-sm font-semibold text-slate-900 truncate">
+                              {(normalizeTimeHHMM(ag.hora_inicio) || '—')} — {ag.cliente_nome}
+                            </div>
+                            {profLabel ? <div className="text-xs text-slate-500">{profLabel}</div> : null}
+                            <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
+                            {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
+                            <div className="text-sm text-slate-700">
+                              ✂️ {ag.servico?.nome}{' '}
+                              {funcionario.pode_ver_financeiro && ag.servico?.preco ? `- ${formatBRMoney(Number(ag.servico.preco))}` : ''}
+                            </div>
+                          </div>
+                          <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
             ) : slots.length === 0 ? (
               <div className="p-6 space-y-3">
-                <div className="text-sm text-slate-600">Horário não configurado.</div>
+                <div className="text-sm text-slate-600">
+                  {canVerAgendaTodos && filterFuncionarioId
+                    ? 'Horário não configurado para este profissional.'
+                    : 'Horário não configurado. Peça ao gerente para ajustar seu horário.'}
+                </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="secondary"
-                    onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-                  >
-                    Configurar horário
-                  </Button>
                   <Button variant="secondary" onClick={() => void refresh()}>
                     Recarregar
                   </Button>
@@ -1182,6 +1283,7 @@ export function FuncionarioAgendaPage() {
                   <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
                     {agendamentos.map((ag) => {
                       const statusUi = resolveStatusUi(ag.status)
+                      const endereco = readExtrasEndereco(ag.extras)
                       return (
                         <div key={ag.id} className="p-3 flex items-start justify-between gap-3">
                           <div className="min-w-0">
@@ -1189,6 +1291,7 @@ export function FuncionarioAgendaPage() {
                               {(normalizeTimeHHMM(ag.hora_inicio) || '—')} — {ag.cliente_nome}
                             </div>
                             <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
+                            {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
                             <div className="text-sm text-slate-700">
                               ✂️ {ag.servico?.nome}{' '}
                               {funcionario.pode_ver_financeiro && ag.servico?.preco ? `- ${formatBRMoney(Number(ag.servico.preco))}` : ''}
@@ -1202,7 +1305,30 @@ export function FuncionarioAgendaPage() {
                 ) : null}
               </div>
             ) : viewMode === 'dia' ? (
-              slots.map((time) => {
+              <>
+                {visibleAgendamentos.length === 0 && bloqueios.length === 0 ? (
+                  <div className="p-4 space-y-2">
+                    <div className="text-sm text-slate-600">Nenhum agendamento encontrado neste período.</div>
+                    <div className="flex flex-wrap gap-2">
+                      {hasAnyFilter ? (
+                        <Button
+                          variant="secondary"
+                          onClick={() => {
+                            setSearch('')
+                            setStatusFilter('')
+                            setServicoFilterId('')
+                          }}
+                        >
+                          Limpar filtros
+                        </Button>
+                      ) : null}
+                      <Button variant="secondary" onClick={() => void refresh()}>
+                        Recarregar
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                {slots.map((time) => {
                 const agStart = findAgendamentoStartInSlot(time)
                 const agCover = agStart ?? findAgendamentoAt(time)
                 const blockStart = findBloqueioStartInSlot(time)
@@ -1214,6 +1340,7 @@ export function FuncionarioAgendaPage() {
                   const statusUi = resolveStatusUi(agCover.status)
                   const startLabel = normalizeTimeHHMM(agCover.hora_inicio)
                   const timeLabel = isStart && startLabel ? startLabel : time
+                  const endereco = visible ? readExtrasEndereco(agCover.extras) : null
                   return (
                     <div key={time} className="p-4 flex items-start justify-between gap-3">
                       <div>
@@ -1226,6 +1353,7 @@ export function FuncionarioAgendaPage() {
                           </span>
                         </div>
                         {visible ? <div className="text-sm text-slate-600">📱 {agCover.cliente_telefone}</div> : null}
+                        {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
                         {visible ? (
                           <div className="text-sm text-slate-700">
                             ✂️ {agCover.servico?.nome}{' '}
@@ -1367,9 +1495,32 @@ export function FuncionarioAgendaPage() {
                     <div className="text-sm text-slate-600">{time} - LIVRE</div>
                   </div>
                 )
-              })
+              })}
+              </>
             ) : (
               <div className="p-4">
+                {visibleAgendamentos.length === 0 && bloqueios.length === 0 ? (
+                  <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50 p-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="text-sm text-slate-700">Nenhum agendamento encontrado nesta semana.</div>
+                    <div className="flex flex-wrap gap-2">
+                      {hasAnyFilter ? (
+                        <Button
+                          variant="secondary"
+                          onClick={() => {
+                            setSearch('')
+                            setStatusFilter('')
+                            setServicoFilterId('')
+                          }}
+                        >
+                          Limpar filtros
+                        </Button>
+                      ) : null}
+                      <Button variant="secondary" onClick={() => void refresh()}>
+                        Recarregar
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="overflow-x-auto">
                   <div className="grid grid-cols-7 gap-3 min-w-[980px]">
                     {weekDays.map((d) => {
@@ -1441,6 +1592,10 @@ export function FuncionarioAgendaPage() {
                                           </span>
                                         </div>
                                         {visible ? <div className="text-slate-600">{a.servico?.nome ?? 'Serviço'}</div> : null}
+                                        {visible ? (() => {
+                                          const endereco = readExtrasEndereco(a.extras)
+                                          return endereco ? <div className="text-slate-600">📍 {endereco}</div> : null
+                                        })() : null}
                                       </div>
                                       <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
                                     </div>
@@ -1459,17 +1614,19 @@ export function FuncionarioAgendaPage() {
               </Card>
             </div>
 
-            <Card>
-              <div className="p-6 flex items-center justify-between">
-                <div>
-                  <div className="text-sm font-semibold text-slate-900">Resumo do Dia</div>
-                  <div className="text-sm text-slate-600">
-                    {agendamentos.filter((a) => a.status !== 'cancelado').length} agendamentos
+            {funcionario.permissao !== 'atendente' ? (
+              <Card>
+                <div className="p-6 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Resumo do Dia</div>
+                    <div className="text-sm text-slate-600">
+                      {agendamentos.filter((a) => a.status !== 'cancelado').length} agendamentos
+                    </div>
                   </div>
+                  <div className="text-lg font-semibold text-slate-900">{funcionario.pode_ver_financeiro ? formatBRMoney(totalDia) : '—'}</div>
                 </div>
-                <div className="text-lg font-semibold text-slate-900">{funcionario.pode_ver_financeiro ? formatBRMoney(totalDia) : '—'}</div>
-              </div>
-            </Card>
+              </Card>
+            ) : null}
 
             <TutorialOverlay
               open={tutorialOpen}

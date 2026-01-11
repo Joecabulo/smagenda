@@ -19,6 +19,7 @@ type Agendamento = {
   hora_fim: string | null
   status: string
   funcionario_id: string | null
+  extras: Record<string, unknown> | null
   servico: { id: string; nome: string; preco: number; duracao_minutos: number; cor: string | null } | null
 }
 
@@ -53,6 +54,14 @@ function buildSlots(
     slots.push(minutesToTime(m))
   }
   return slots
+}
+
+function readExtrasEndereco(extras: unknown) {
+  if (!extras || typeof extras !== 'object') return null
+  const v = (extras as Record<string, unknown>).endereco
+  if (typeof v !== 'string') return null
+  const t = v.trim()
+  return t ? t : null
 }
 
 function startOfWeek(value: Date) {
@@ -252,11 +261,18 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
 }
 
 export function DashboardPage() {
-  const { appPrincipal } = useAuth()
+  const { appPrincipal, masterUsuario, masterUsuarioLoading } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
-  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
+  const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
+  const isGerente = appPrincipal?.kind === 'funcionario' && appPrincipal.profile.permissao === 'admin'
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isGerente ? masterUsuario : null
   const usuarioId = usuario?.id ?? null
+
+  const canVerFinanceiro = appPrincipal?.kind === 'usuario' ? true : Boolean(funcionario?.pode_ver_financeiro)
+  const canBloquearHorarios = appPrincipal?.kind === 'usuario' ? true : Boolean(funcionario?.pode_bloquear_horarios)
+  const canConfirmarAgendamento = appPrincipal?.kind === 'usuario' ? true : Boolean(funcionario?.pode_criar_agendamentos)
+  const canCancelarAgendamento = appPrincipal?.kind === 'usuario' ? true : Boolean(funcionario?.pode_cancelar_agendamentos)
 
   const canUseRecurringBlocks = useMemo(() => {
     const p = String(usuario?.plano ?? '').trim().toLowerCase()
@@ -374,10 +390,11 @@ export function DashboardPage() {
   }, [slotStepMinutes, usuario])
 
   const totalDia = useMemo(() => {
+    if (!canVerFinanceiro) return 0
     return agendamentos
       .filter((a) => a.status !== 'cancelado')
       .reduce((sum, a) => sum + (a.servico?.preco ? Number(a.servico.preco) : 0), 0)
-  }, [agendamentos])
+  }, [agendamentos, canVerFinanceiro])
 
   useEffect(() => {
     const run = async () => {
@@ -400,6 +417,7 @@ export function DashboardPage() {
         .from('funcionarios')
         .select('id,nome_completo,ativo')
         .eq('usuario_master_id', usuarioId)
+        .eq('permissao', 'funcionario')
         .order('criado_em', { ascending: true })
       if (funcionariosError) {
         setError(funcionariosError.message)
@@ -410,7 +428,7 @@ export function DashboardPage() {
 
       const base = supabase
         .from('agendamentos')
-        .select('id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,servico:servico_id(id,nome,preco,duracao_minutos,cor)')
+        .select('id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(id,nome,preco,duracao_minutos,cor)')
         .eq('usuario_id', usuarioId)
         .order('data', { ascending: true })
         .order('hora_inicio', { ascending: true })
@@ -624,7 +642,7 @@ export function DashboardPage() {
   }, [bloqueios])
 
   const createBloqueio = async () => {
-    if (!usuarioId || !canSaveBlock) return
+    if (!usuarioId || !canSaveBlock || !canBloquearHorarios) return
     setSavingBlock(true)
     setError(null)
     const funcionarioId = blockFuncionarioId.trim() ? blockFuncionarioId : null
@@ -695,7 +713,7 @@ export function DashboardPage() {
   }
 
   const removeBloqueio = async (b: Bloqueio) => {
-    if (!usuarioId) return
+    if (!usuarioId || !canBloquearHorarios) return
     setError(null)
     const ok = window.confirm('Remover este bloqueio?')
     if (!ok) return
@@ -708,6 +726,14 @@ export function DashboardPage() {
   }
 
   if (!usuario) {
+    return (
+      <AppShell>
+        <div className="text-slate-700">{isGerente && masterUsuarioLoading ? 'Carregando…' : 'Acesso restrito.'}</div>
+      </AppShell>
+    )
+  }
+
+  if (funcionario && !funcionario.pode_ver_agenda) {
     return (
       <AppShell>
         <div className="text-slate-700">Acesso restrito.</div>
@@ -860,6 +886,7 @@ export function DashboardPage() {
           }
         >
           <Card>
+            {canBloquearHorarios ? (
             <div className="p-6 space-y-4">
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -958,14 +985,19 @@ export function DashboardPage() {
                         <span className="text-slate-700">{resolveFuncionarioLabel(b.funcionario_id)}</span>
                         {b.motivo ? <span className="text-slate-500"> {' • '}{b.motivo}</span> : null}
                       </div>
-                      <Button variant="danger" onClick={() => removeBloqueio(b)}>
-                        Remover
-                      </Button>
+                      {canBloquearHorarios ? (
+                        <Button variant="danger" onClick={() => removeBloqueio(b)}>
+                          Remover
+                        </Button>
+                      ) : null}
                     </div>
                   ))}
               </div>
             ) : null}
             </div>
+            ) : (
+              <div className="p-6 text-sm text-slate-700">Acesso restrito.</div>
+            )}
           </Card>
         </div>
 
@@ -987,6 +1019,7 @@ export function DashboardPage() {
                   <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
                     {agendamentos.map((ag) => {
                       const statusUi = resolveStatusUi(ag.status)
+                      const endereco = readExtrasEndereco(ag.extras)
                       return (
                         <div key={ag.id} className="p-3 flex items-start justify-between gap-3">
                           <div className="min-w-0">
@@ -994,8 +1027,9 @@ export function DashboardPage() {
                               {(normalizeTimeHHMM(ag.hora_inicio) || '—')} — {ag.cliente_nome}
                             </div>
                             <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
+                            {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
                             <div className="text-sm text-slate-700">
-                              ✂️ {ag.servico?.nome} {ag.servico?.preco ? `- ${formatBRMoney(Number(ag.servico.preco))}` : ''}
+                              ✂️ {ag.servico?.nome} {canVerFinanceiro && ag.servico?.preco ? `- ${formatBRMoney(Number(ag.servico.preco))}` : ''}
                             </div>
                           </div>
                           <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
@@ -1018,6 +1052,7 @@ export function DashboardPage() {
                   const statusUi = resolveStatusUi(agCover.status)
                   const startLabel = normalizeTimeHHMM(agCover.hora_inicio)
                   const timeLabel = isStart && startLabel ? startLabel : time
+                  const endereco = visible ? readExtrasEndereco(agCover.extras) : null
                   return (
                     <div key={time} className="p-4 flex items-start justify-between gap-3">
                       <div>
@@ -1030,9 +1065,10 @@ export function DashboardPage() {
                           </span>
                         </div>
                         {visible ? <div className="text-sm text-slate-600">📱 {agCover.cliente_telefone}</div> : null}
+                        {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
                         {visible ? (
                           <div className="text-sm text-slate-700">
-                            ✂️ {agCover.servico?.nome} {agCover.servico?.preco ? `- ${formatBRMoney(Number(agCover.servico.preco))}` : ''}
+                            ✂️ {agCover.servico?.nome} {canVerFinanceiro && agCover.servico?.preco ? `- ${formatBRMoney(Number(agCover.servico.preco))}` : ''}
                           </div>
                         ) : null}
                       </div>
@@ -1040,9 +1076,11 @@ export function DashboardPage() {
                         <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
                         {agCover.status !== 'cancelado' && visible ? (
                           <div className="flex gap-2">
-                            <Button
-                              variant="secondary"
-                              onClick={async () => {
+                            {canConfirmarAgendamento ? (
+                              <Button
+                                variant="secondary"
+                                onClick={async () => {
+                                  if (!canConfirmarAgendamento) return
                                 setError(null)
                                 const { error: updErr } = await supabase.from('agendamentos').update({ status: 'confirmado' }).eq('id', agCover.id)
                                 if (updErr) {
@@ -1088,12 +1126,15 @@ export function DashboardPage() {
                                   setError(`Falha ao enviar confirmação (HTTP ${sendRes.status}): ${details}`)
                                 }
                               }}
-                            >
-                              ✓ Confirmar
-                            </Button>
-                            <Button
-                              variant="secondary"
-                              onClick={async () => {
+                              >
+                                ✓ Confirmar
+                              </Button>
+                            ) : null}
+                            {canCancelarAgendamento ? (
+                              <Button
+                                variant="secondary"
+                                onClick={async () => {
+                                  if (!canCancelarAgendamento) return
                                 setError(null)
                                 const ok = window.confirm('Marcar como no-show?')
                                 if (!ok) return
@@ -1107,12 +1148,15 @@ export function DashboardPage() {
                                 }
                                 setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'nao_compareceu' } : x)))
                               }}
-                            >
-                              No-show
-                            </Button>
-                            <Button
-                              variant="danger"
-                              onClick={async () => {
+                              >
+                                No-show
+                              </Button>
+                            ) : null}
+                            {canCancelarAgendamento ? (
+                              <Button
+                                variant="danger"
+                                onClick={async () => {
+                                  if (!canCancelarAgendamento) return
                                 setError(null)
                                 const { error: updErr } = await supabase
                                   .from('agendamentos')
@@ -1124,9 +1168,10 @@ export function DashboardPage() {
                                 }
                                 setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'cancelado' } : x)))
                               }}
-                            >
-                              ✗ Cancelar
-                            </Button>
+                              >
+                                ✗ Cancelar
+                              </Button>
+                            ) : null}
                           </div>
                         ) : null}
                       </div>
@@ -1223,6 +1268,10 @@ export function DashboardPage() {
                                           </span>
                                         </div>
                                         {visible ? <div className="text-slate-600">{a.servico?.nome ?? 'Serviço'}</div> : null}
+                                        {visible ? (() => {
+                                          const endereco = readExtrasEndereco(a.extras)
+                                          return endereco ? <div className="text-slate-600">📍 {endereco}</div> : null
+                                        })() : null}
                                       </div>
                                       <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
                                     </div>
@@ -1256,7 +1305,7 @@ export function DashboardPage() {
                 {agendamentos.filter((a) => a.status !== 'cancelado').length} agendamentos
               </div>
             </div>
-            <div className="text-lg font-semibold text-slate-900">{formatBRMoney(totalDia)}</div>
+            <div className="text-lg font-semibold text-slate-900">{canVerFinanceiro ? formatBRMoney(totalDia) : '—'}</div>
             </div>
           </Card>
         </div>

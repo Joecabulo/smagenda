@@ -4,11 +4,13 @@ import { getOptionalEnv } from '../../lib/env'
 import { Button } from '../ui/Button'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { principal, appPrincipal, impersonation, stopImpersonation, signOut } = useAuth()
+  const { principal, appPrincipal, impersonation, stopImpersonation, signOut, masterUsuario } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
   const isFuncionario = appPrincipal?.kind === 'funcionario'
-  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
+  const isFuncionarioAdmin = appPrincipal?.kind === 'funcionario' && appPrincipal.profile.permissao === 'admin'
+  const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isFuncionarioAdmin ? masterUsuario : null
 
   const plano = String(usuario?.plano ?? '').trim().toLowerCase()
   const isProPlus = plano === 'pro' || plano === 'team' || plano === 'enterprise'
@@ -16,21 +18,32 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const supportNumber = getOptionalEnv('VITE_SUPPORT_WHATSAPP_NUMBER')
   const canUseWhatsappSupport = Boolean(supportNumber && usuario && isProPlus)
 
-  const nav = isFuncionario
+  const nav = isFuncionario && !isFuncionarioAdmin
     ? [
         { to: '/funcionario/agenda', label: 'Minha Agenda' },
+        { to: '/ajuda', label: 'Ajuda' },
       ]
-    : [
-        { to: '/dashboard', label: 'Agenda' },
-        { to: '/servicos', label: 'Meus Serviços' },
-        { to: '/clientes', label: 'Clientes' },
-        ...(isProPlus ? [{ to: '/relatorios', label: 'Relatórios' }] : []),
-        { to: '/pagamento', label: 'Pagamento' },
-        { to: '/funcionarios', label: 'Funcionários' },
-        { to: '/configuracoes/whatsapp', label: 'WhatsApp' },
-        { to: '/configuracoes/mensagens', label: 'Mensagens Automáticas' },
-        { to: '/configuracoes/pagina-publica', label: 'Página Pública' },
-      ]
+    : isFuncionarioAdmin
+      ? [
+          ...(funcionario?.pode_ver_agenda ? [{ to: '/dashboard', label: 'Agenda' }] : []),
+          ...(funcionario?.pode_ver_agenda ? [{ to: '/funcionario/agenda', label: 'Minha Agenda' }] : []),
+          ...(funcionario?.pode_gerenciar_servicos ? [{ to: '/servicos', label: 'Meus Serviços' }] : []),
+          ...(funcionario?.pode_ver_clientes_de_outros ? [{ to: '/clientes', label: 'Clientes' }] : []),
+          ...(isProPlus && funcionario?.pode_ver_financeiro ? [{ to: '/relatorios', label: 'Relatórios' }] : []),
+          { to: '/ajuda', label: 'Ajuda' },
+        ]
+      : [
+          { to: '/dashboard', label: 'Agenda' },
+          { to: '/servicos', label: 'Meus Serviços' },
+          { to: '/clientes', label: 'Clientes' },
+          ...(isProPlus ? [{ to: '/relatorios', label: 'Relatórios' }] : []),
+          { to: '/pagamento', label: 'Pagamento' },
+          { to: '/funcionarios', label: 'Funcionários' },
+          { to: '/configuracoes/whatsapp', label: 'WhatsApp' },
+          { to: '/configuracoes/mensagens', label: 'Mensagens Automáticas' },
+          { to: '/configuracoes/pagina-publica', label: 'Página Pública' },
+          { to: '/ajuda', label: 'Ajuda' },
+        ]
 
   return (
     <div className="min-h-screen bg-slate-50">

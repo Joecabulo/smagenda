@@ -15,7 +15,7 @@ type Funcionario = {
   nome_completo: string
   email: string
   telefone: string | null
-  permissao: 'admin' | 'funcionario'
+  permissao: 'admin' | 'funcionario' | 'atendente'
   pode_ver_agenda: boolean
   pode_criar_agendamentos: boolean
   pode_cancelar_agendamentos: boolean
@@ -28,6 +28,7 @@ type Funcionario = {
   dias_trabalho: number[] | null
   intervalo_inicio: string | null
   intervalo_fim: string | null
+  capacidade_dia_inteiro?: number
   ativo: boolean
 }
 
@@ -67,12 +68,13 @@ type FormState = {
   senha: string
   senha_confirm: string
   telefone: string
-  permissao: 'admin' | 'funcionario'
+  permissao: 'admin' | 'funcionario' | 'atendente'
   horario_inicio: string
   horario_fim: string
   dias_trabalho: number[]
   intervalo_inicio: string
   intervalo_fim: string
+  capacidade_dia_inteiro: string
   pode_ver_agenda: boolean
   pode_criar_agendamentos: boolean
   pode_cancelar_agendamentos: boolean
@@ -107,6 +109,7 @@ function toFormState(f?: Funcionario | null): FormState {
     dias_trabalho: f?.dias_trabalho ?? [1, 2, 3, 4, 5],
     intervalo_inicio: f?.intervalo_inicio ?? '',
     intervalo_fim: f?.intervalo_fim ?? '',
+    capacidade_dia_inteiro: String(typeof f?.capacidade_dia_inteiro === 'number' ? f.capacidade_dia_inteiro : 1),
     pode_ver_agenda: f?.pode_ver_agenda ?? true,
     pode_criar_agendamentos: f?.pode_criar_agendamentos ?? true,
     pode_cancelar_agendamentos: f?.pode_cancelar_agendamentos ?? true,
@@ -121,6 +124,16 @@ function toFormState(f?: Funcionario | null): FormState {
 export function FuncionariosPage() {
   const { appPrincipal } = useAuth()
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
+
+  const canUseCapacidadeDiaInteiro = useMemo(() => {
+    const t = String(usuario?.tipo_negocio ?? '').trim().toLowerCase()
+    return t === 'faxina' || t === 'diarista'
+  }, [usuario?.tipo_negocio])
+
+  const agendamentosIcon = useMemo(() => {
+    const t = String(usuario?.tipo_negocio ?? '').trim().toLowerCase()
+    return t === 'barbearia' ? '✂️' : '🗓️'
+  }, [usuario?.tipo_negocio])
 
   const usuarioId = usuario?.id
 
@@ -154,11 +167,26 @@ export function FuncionariosPage() {
   const [form, setForm] = useState<FormState>(() => toFormState(null))
   const [saving, setSaving] = useState(false)
 
+  const limiteFuncionariosEfetivo = useMemo<number | null>(() => {
+    if (!usuario) return 1
+    const plano = String(usuario.plano ?? '').trim().toLowerCase()
+    if (plano === 'enterprise') return null
+    if (plano === 'pro' || plano === 'team') {
+      const raw = usuario.limite_funcionarios
+      const n = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null
+      const base = 4
+      const max = 6
+      if (!n || n < base) return base
+      return Math.min(max, n)
+    }
+    return 1
+  }, [usuario])
+
   const limiteAtingido = useMemo(() => {
-    const limite = usuario?.limite_funcionarios
-    if (!limite) return false
+    const limite = limiteFuncionariosEfetivo
+    if (limite === null) return false
     return funcionarios.filter((f) => f.ativo).length >= limite
-  }, [usuario?.limite_funcionarios, funcionarios])
+  }, [funcionarios, limiteFuncionariosEfetivo])
 
   const canSubmit = useMemo(() => {
     const baseOk = form.nome_completo.trim() && form.email.trim() && form.horario_inicio && form.horario_fim && form.dias_trabalho.length > 0
@@ -184,18 +212,40 @@ export function FuncionariosPage() {
     if (!usuarioId) return
     setLoading(true)
     setError(null)
-    const { data, error: err } = await supabase
-      .from('funcionarios')
-      .select(
-        'id,usuario_master_id,nome_completo,email,telefone,permissao,pode_ver_agenda,pode_criar_agendamentos,pode_cancelar_agendamentos,pode_bloquear_horarios,pode_ver_financeiro,pode_gerenciar_servicos,pode_ver_clientes_de_outros,horario_inicio,horario_fim,dias_trabalho,intervalo_inicio,intervalo_fim,ativo'
+
+    const selectWithoutCap =
+      'id,usuario_master_id,nome_completo,email,telefone,permissao,pode_ver_agenda,pode_criar_agendamentos,pode_cancelar_agendamentos,pode_bloquear_horarios,pode_ver_financeiro,pode_gerenciar_servicos,pode_ver_clientes_de_outros,horario_inicio,horario_fim,dias_trabalho,intervalo_inicio,intervalo_fim,ativo'
+    const selectWithCap = `${selectWithoutCap},capacidade_dia_inteiro`
+
+    const missingCapacidadeColumn = (message: string) => {
+      const lower = message.toLowerCase()
+      return lower.includes('capacidade_dia_inteiro') && lower.includes('does not exist')
+    }
+
+    const fetchList = async (select: string) => {
+      const { data, error: err } = await supabase
+        .from('funcionarios')
+        .select(select)
+        .eq('usuario_master_id', usuarioId)
+        .order('criado_em', { ascending: true })
+      return { data, err }
+    }
+
+    let { data, err } = await fetchList(selectWithCap)
+    if (err && missingCapacidadeColumn(err.message)) {
+      const fallback = await fetchList(selectWithoutCap)
+      data = fallback.data
+      err = fallback.err
+      setError(
+        'Configuração do Supabase incompleta: rode no SQL Editor: alter table public.funcionarios add column if not exists capacidade_dia_inteiro int not null default 1;'
       )
-      .eq('usuario_master_id', usuarioId)
-      .order('criado_em', { ascending: true })
+    }
     if (err) {
       setError(err.message)
       setLoading(false)
       return
     }
+
     const list = (data ?? []) as unknown as Funcionario[]
     setFuncionarios(list)
 
@@ -234,6 +284,14 @@ export function FuncionariosPage() {
     })
   }, [load])
 
+  if (!appPrincipal) {
+    return (
+      <AppShell>
+        <div className="text-slate-700">Carregando…</div>
+      </AppShell>
+    )
+  }
+
   if (!usuario) {
     return (
       <AppShell>
@@ -270,6 +328,9 @@ export function FuncionariosPage() {
     setSaving(true)
     setError(null)
 
+    const capRaw = Number(form.capacidade_dia_inteiro)
+    const cap = canUseCapacidadeDiaInteiro && Number.isFinite(capRaw) ? Math.max(1, Math.min(2, Math.floor(capRaw))) : 1
+
     const payload = {
       nome_completo: form.nome_completo.trim(),
       email: form.email.trim().toLowerCase(),
@@ -280,6 +341,7 @@ export function FuncionariosPage() {
       dias_trabalho: form.dias_trabalho,
       intervalo_inicio: form.intervalo_inicio.trim() ? form.intervalo_inicio : null,
       intervalo_fim: form.intervalo_fim.trim() ? form.intervalo_fim : null,
+      capacidade_dia_inteiro: cap,
       pode_ver_agenda: form.pode_ver_agenda,
       pode_criar_agendamentos: form.pode_criar_agendamentos,
       pode_cancelar_agendamentos: form.pode_cancelar_agendamentos,
@@ -291,15 +353,35 @@ export function FuncionariosPage() {
     }
 
     if (form.id) {
-      const { error: err } = await supabase
-        .from('funcionarios')
-        .update(payload)
-        .eq('id', form.id)
-        .eq('usuario_master_id', usuario.id)
+      const missingCapacidadeColumn = (message: string) => {
+        const lower = message.toLowerCase()
+        return lower.includes('capacidade_dia_inteiro') && lower.includes('does not exist')
+      }
+
+      const { error: err } = await supabase.from('funcionarios').update(payload).eq('id', form.id).eq('usuario_master_id', usuario.id)
       if (err) {
-        setError(err.message)
-        setSaving(false)
-        return
+        if (missingCapacidadeColumn(err.message)) {
+          const { capacidade_dia_inteiro, ...payloadNoCap } = payload
+          void capacidade_dia_inteiro
+          const { error: retryErr } = await supabase
+            .from('funcionarios')
+            .update(payloadNoCap)
+            .eq('id', form.id)
+            .eq('usuario_master_id', usuario.id)
+          if (!retryErr) {
+            setError(
+              'Seu Supabase ainda não tem a coluna capacidade_dia_inteiro. O funcionário foi salvo sem essa configuração. Rode no SQL Editor: alter table public.funcionarios add column if not exists capacidade_dia_inteiro int not null default 1;'
+            )
+          } else {
+            setError(retryErr.message)
+            setSaving(false)
+            return
+          }
+        } else {
+          setError(err.message)
+          setSaving(false)
+          return
+        }
       }
     } else {
       if (limiteAtingido) {
@@ -510,7 +592,7 @@ export function FuncionariosPage() {
                 <div className="text-sm font-medium text-slate-700">Nível de acesso</div>
                 <label className="flex items-center gap-2 text-sm text-slate-700">
                   <input type="radio" checked={form.permissao === 'admin'} onChange={() => setForm((p) => ({ ...p, permissao: 'admin' }))} />
-                  Admin
+                  Gerente
                 </label>
                 <label className="flex items-center gap-2 text-sm text-slate-700">
                   <input
@@ -519,6 +601,14 @@ export function FuncionariosPage() {
                     onChange={() => setForm((p) => ({ ...p, permissao: 'funcionario' }))}
                   />
                   Funcionário
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="radio"
+                    checked={form.permissao === 'atendente'}
+                    onChange={() => setForm((p) => ({ ...p, permissao: 'atendente' }))}
+                  />
+                  Atendente
                 </label>
               </div>
 
@@ -562,6 +652,15 @@ export function FuncionariosPage() {
                   onChange={(e) => setForm((p) => ({ ...p, intervalo_fim: e.target.value }))}
                 />
               </div>
+
+              {canUseCapacidadeDiaInteiro ? (
+                <Input
+                  label="Capacidade de diárias por dia (1 ou 2)"
+                  type="number"
+                  value={form.capacidade_dia_inteiro}
+                  onChange={(e) => setForm((p) => ({ ...p, capacidade_dia_inteiro: e.target.value }))}
+                />
+              ) : null}
 
               <div className="space-y-2">
                 <div className="text-sm font-medium text-slate-700">Permissões</div>
@@ -632,7 +731,7 @@ export function FuncionariosPage() {
                     </div>
                     <div className="flex items-center gap-2 justify-end">
                       {f.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}
-                      <Badge tone="slate">{f.permissao === 'admin' ? 'Admin' : 'Funcionário'}</Badge>
+                      <Badge tone="slate">{f.permissao === 'admin' ? 'Gerente' : f.permissao === 'atendente' ? 'Atendente' : 'Funcionário'}</Badge>
                     </div>
                   </div>
 
@@ -640,7 +739,9 @@ export function FuncionariosPage() {
                     <div className="text-sm text-slate-700">
                       📅 Atende: {daysLabel(f.dias_trabalho)} {f.horario_inicio ?? '—'}–{f.horario_fim ?? '—'}
                     </div>
-                    <div className="text-sm text-slate-700">✂️ {counts[f.id] ?? 0} agendamentos este mês</div>
+                    <div className="text-sm text-slate-700">
+                      {agendamentosIcon} {counts[f.id] ?? 0} agendamentos este mês
+                    </div>
                     <div className="text-sm text-slate-700">
                       Permissões: {f.pode_ver_agenda ? '✅' : '❌'} agenda • {f.pode_criar_agendamentos ? '✅' : '❌'} criar •{' '}
                       {f.pode_ver_financeiro ? '✅' : '❌'} financeiro • {f.pode_gerenciar_servicos ? '✅' : '❌'} serviços

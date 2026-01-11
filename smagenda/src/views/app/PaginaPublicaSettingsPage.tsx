@@ -4,6 +4,7 @@ import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
 import { PageTutorial, TutorialOverlay } from '../../components/ui/TutorialOverlay'
+import { formatBRMoney } from '../../lib/dates'
 import { slugify } from '../../lib/slug'
 import { supabase } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
@@ -19,90 +20,6 @@ function normalizeSlug(s: string) {
   return slugify(s).slice(0, 60)
 }
 
-function toIsoDateLocal(d: Date) {
-  const x = new Date(d)
-  x.setHours(0, 0, 0, 0)
-  const yyyy = x.getFullYear()
-  const mm = String(x.getMonth() + 1).padStart(2, '0')
-  const dd = String(x.getDate()).padStart(2, '0')
-  return `${yyyy}-${mm}-${dd}`
-}
-
-function rpcErrText(err: unknown) {
-  const e = err && typeof err === 'object' ? (err as Record<string, unknown>) : null
-  const msg = typeof e?.message === 'string' ? e.message.trim() : 'Erro'
-  const code = typeof e?.code === 'string' ? e.code.trim() : ''
-  const details = typeof e?.details === 'string' ? e.details.trim() : ''
-  const hint = typeof e?.hint === 'string' ? e.hint.trim() : ''
-  const parts = [msg]
-  if (code && !msg.includes(code)) parts.push(code)
-  if (details && details !== msg) parts.push(details)
-  if (hint) parts.push(hint)
-  return parts.filter(Boolean).join(' — ')
-}
-
-function isSignatureMismatchText(lower: string) {
-  return (
-    lower.includes('does not exist') ||
-    lower.includes('function') ||
-    lower.includes('rpc') ||
-    (lower.includes('schema cache') && lower.includes('could not find'))
-  )
-}
-
-function shouldRetryWithoutKey(err: unknown, key: string) {
-  const lower = rpcErrText(err).toLowerCase()
-  return lower.includes(key.toLowerCase()) && isSignatureMismatchText(lower)
-}
-
-async function callRpcWithSignatureFallback<T>(
-  fnName: string,
-  args: Record<string, unknown>,
-  extra?: {
-    unidadeId?: string | null
-    canAddUnidadeId?: boolean
-    canDropUnidadeId?: boolean
-    canDropFuncionarioId?: boolean
-    canDropUnidadeSlug?: boolean
-  }
-): Promise<{ ok: true; data: T } | { ok: false; errorText: string }> {
-  const first = await supabase.rpc(fnName, args)
-  if (!first.error) return { ok: true as const, data: first.data as T }
-
-  const firstText = rpcErrText(first.error)
-  const firstLower = firstText.toLowerCase()
-  if (!isSignatureMismatchText(firstLower)) return { ok: false as const, errorText: firstText }
-
-  const hasUnidadeId = Object.prototype.hasOwnProperty.call(args, 'p_unidade_id')
-  const hasFuncionarioId = Object.prototype.hasOwnProperty.call(args, 'p_funcionario_id')
-  const hasUnidadeSlug = Object.prototype.hasOwnProperty.call(args, 'p_unidade_slug')
-  const unidadeId = extra?.unidadeId ?? null
-
-  const withoutKey = (o: Record<string, unknown>, key: string) => {
-    const next: Record<string, unknown> = { ...o }
-    delete (next as Record<string, unknown>)[key]
-    return next
-  }
-
-  const variants: Record<string, unknown>[] = []
-
-  if (hasUnidadeId && extra?.canDropUnidadeId !== false && shouldRetryWithoutKey(first.error, 'p_unidade_id')) variants.push(withoutKey(args, 'p_unidade_id'))
-  if (!hasUnidadeId && extra?.canAddUnidadeId && unidadeId) variants.push({ ...args, p_unidade_id: unidadeId })
-
-  if (hasFuncionarioId && extra?.canDropFuncionarioId !== false && shouldRetryWithoutKey(first.error, 'p_funcionario_id')) {
-    variants.push(withoutKey(args, 'p_funcionario_id'))
-  }
-
-  if (hasUnidadeSlug && extra?.canDropUnidadeSlug !== false && shouldRetryWithoutKey(first.error, 'p_unidade_slug')) variants.push(withoutKey(args, 'p_unidade_slug'))
-
-  for (const v of variants) {
-    const retry = await supabase.rpc(fnName, v)
-    if (!retry.error) return { ok: true as const, data: retry.data as T }
-  }
-
-  return { ok: false as const, errorText: firstText }
-}
-
 export function PaginaPublicaSettingsPage() {
   const { appPrincipal, refresh } = useAuth()
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
@@ -116,11 +33,6 @@ export function PaginaPublicaSettingsPage() {
           title: 'Seu link público',
           body: 'Defina o slug e copie/abra sua URL de agendamento. Esse link é o que você divulga aos clientes.',
           target: 'link' as const,
-        },
-        {
-          title: 'Validar em produção',
-          body: 'Use a validação para confirmar se a página pública carrega e se o Supabase retorna horários reais.',
-          target: 'test' as const,
         },
         {
           title: 'Personalizar aparência',
@@ -148,6 +60,7 @@ export function PaginaPublicaSettingsPage() {
   const [instagramUrl, setInstagramUrl] = useState('')
 
   const [tipoNegocio, setTipoNegocio] = useState('')
+  const [tipoNegocioInicial, setTipoNegocioInicial] = useState('')
 
   const [primaryColor, setPrimaryColor] = useState('#0f172a')
   const [backgroundColor, setBackgroundColor] = useState('#f8fafc')
@@ -176,14 +89,28 @@ export function PaginaPublicaSettingsPage() {
   const [unidadeEndereco, setUnidadeEndereco] = useState('')
   const [unidadeTelefone, setUnidadeTelefone] = useState('')
 
-  const [publicTestRunning, setPublicTestRunning] = useState(false)
-  const [publicTestResult, setPublicTestResult] = useState<string | null>(null)
-  const [publicTestError, setPublicTestError] = useState<string | null>(null)
-  const [publicTestUnidadeSlug, setPublicTestUnidadeSlug] = useState('')
-  const [publicTestData, setPublicTestData] = useState(() => toIsoDateLocal(new Date()))
+  type ServicoPreview = {
+    id: string
+    nome: string
+    duracao_minutos: number
+    preco: number
+    cor: string | null
+    foto_url: string | null
+    ativo?: boolean | null
+    ordem?: number | null
+  }
+
+  const [servicosPreview, setServicosPreview] = useState<ServicoPreview[]>([])
+  const [servicosPreviewLoading, setServicosPreviewLoading] = useState(false)
+  const [servicosPreviewError, setServicosPreviewError] = useState<string | null>(null)
 
   const logoObjectUrl = useMemo(() => (logoFile ? URL.createObjectURL(logoFile) : null), [logoFile])
   const bgObjectUrl = useMemo(() => (bgFile ? URL.createObjectURL(bgFile) : null), [bgFile])
+
+  const canUseMedia = useMemo(() => {
+    const p = String(usuario?.plano ?? '').trim().toLowerCase()
+    return p === 'pro' || p === 'team' || p === 'enterprise'
+  }, [usuario?.plano])
 
   useEffect(() => {
     if (!logoObjectUrl) return
@@ -241,9 +168,10 @@ export function PaginaPublicaSettingsPage() {
       setLogoUrl(nextLogo)
       setInstagramUrl(nextInstagram)
       setTipoNegocio(nextTipoNegocio)
+      setTipoNegocioInicial(nextTipoNegocio)
       setPrimaryColor(nextPrimary)
       setBackgroundColor(nextBgColor)
-      setUseBackgroundImage(nextUseBgImage)
+      setUseBackgroundImage(canUseMedia ? nextUseBgImage : false)
       setBackgroundImageUrl(nextBgUrl)
       setLoading(false)
     }
@@ -251,7 +179,7 @@ export function PaginaPublicaSettingsPage() {
       setError(e instanceof Error ? e.message : 'Erro ao carregar')
       setLoading(false)
     })
-  }, [usuarioId])
+  }, [usuarioId, canUseMedia])
 
   useEffect(() => {
     const run = async () => {
@@ -279,6 +207,43 @@ export function PaginaPublicaSettingsPage() {
       setUnidadesLoading(false)
     })
   }, [canUseMultiUnits, usuarioId])
+
+  useEffect(() => {
+    const run = async () => {
+      if (!usuarioId) {
+        setServicosPreview([])
+        return
+      }
+      setServicosPreviewLoading(true)
+      setServicosPreviewError(null)
+
+      const cols = 'id,nome,duracao_minutos,preco,cor,foto_url,ativo,ordem'
+      const res = await supabase
+        .from('servicos')
+        .select(cols)
+        .eq('usuario_id', usuarioId)
+        .eq('ativo', true)
+        .order('ordem', { ascending: true })
+        .order('criado_em', { ascending: true })
+        .limit(6)
+
+      if (res.error) {
+        setServicosPreview([])
+        setServicosPreviewError(res.error.message)
+        setServicosPreviewLoading(false)
+        return
+      }
+
+      setServicosPreview((res.data ?? []) as unknown as ServicoPreview[])
+      setServicosPreviewLoading(false)
+    }
+
+    run().catch((e: unknown) => {
+      setServicosPreview([])
+      setServicosPreviewError(e instanceof Error ? e.message : 'Erro ao carregar serviços')
+      setServicosPreviewLoading(false)
+    })
+  }, [usuarioId])
 
   const uploadBackground = async (file: File) => {
     if (!usuarioId) throw new Error('Sessão inválida')
@@ -331,6 +296,14 @@ export function PaginaPublicaSettingsPage() {
     setError(null)
     setInfo(null)
 
+    const lockedTipoBase = tipoNegocioInicial.trim()
+    const nextTipo = tipoNegocio.trim()
+    if (lockedTipoBase && nextTipo !== lockedTipoBase) {
+      setError('Tipo de negócio já definido. Para alterar, solicite mudança no suporte.')
+      setSaving(false)
+      return
+    }
+
     const nextSlug = normalizeSlug(slug)
     if (!isValidSlug(nextSlug)) {
       setError('Slug inválido. Use letras minúsculas, números e hífen.')
@@ -339,6 +312,11 @@ export function PaginaPublicaSettingsPage() {
     }
 
     let nextBgUrl: string | null = backgroundImageUrl.trim() ? backgroundImageUrl.trim() : null
+    if (bgFile && !canUseMedia) {
+      setError('Imagem de fundo disponível apenas no plano PRO ou EMPRESA.')
+      setSaving(false)
+      return
+    }
     if (bgFile) {
       try {
         const url = await uploadBackground(bgFile)
@@ -362,6 +340,12 @@ export function PaginaPublicaSettingsPage() {
       }
     }
 
+    if (useBackgroundImage && !canUseMedia) {
+      setError('Imagem de fundo disponível apenas no plano PRO ou EMPRESA.')
+      setSaving(false)
+      return
+    }
+
     if (useBackgroundImage && !nextBgUrl) {
       setError('Envie uma imagem de fundo para ativar o fundo com imagem.')
       setSaving(false)
@@ -369,6 +353,11 @@ export function PaginaPublicaSettingsPage() {
     }
 
     let nextLogoUrl: string | null = logoUrl.trim() ? logoUrl.trim() : null
+    if (logoFile && !canUseMedia) {
+      setError('Logo disponível apenas no plano PRO ou EMPRESA.')
+      setSaving(false)
+      return
+    }
     if (logoFile) {
       try {
         const url = await uploadLogo(logoFile)
@@ -399,7 +388,7 @@ export function PaginaPublicaSettingsPage() {
       tipo_negocio: tipoNegocio.trim() ? tipoNegocio.trim() : null,
       public_primary_color: primaryColor.trim() ? primaryColor.trim() : null,
       public_background_color: backgroundColor.trim() ? backgroundColor.trim() : null,
-      public_use_background_image: useBackgroundImage,
+      public_use_background_image: canUseMedia ? useBackgroundImage : false,
       public_background_image_url: nextBgUrl,
     }
 
@@ -412,12 +401,12 @@ export function PaginaPublicaSettingsPage() {
       const rls = lower.includes('row-level security') || lower.includes('row level security')
       setError(
         duplicate
-          ? 'Esse slug já está em uso. Tente outro.'
+          ? 'Nome já está em uso. Escolha outro para o seu link público.'
           : missingColumn
             ? 'Configuração do Supabase incompleta: atualize o SQL do link público (listar + agendar).'
             : rls
               ? 'Sem permissão para atualizar seu perfil (RLS). Execute o SQL de políticas (Usuário / Funcionário) em /admin/configuracoes.'
-            : msg
+              : msg
       )
       setSaving(false)
       return
@@ -425,6 +414,7 @@ export function PaginaPublicaSettingsPage() {
 
     await refresh()
     setSlug(nextSlug)
+    if (!tipoNegocioInicial.trim() && nextTipo) setTipoNegocioInicial(nextTipo)
     setSaved(true)
     setSaving(false)
   }
@@ -498,7 +488,7 @@ export function PaginaPublicaSettingsPage() {
   if (!usuarioId) {
     return (
       <AppShell>
-        <div className="text-slate-700">Acesso restrito.</div>
+        <div className="text-slate-700">{appPrincipal ? 'Acesso restrito.' : 'Carregando…'}</div>
       </AppShell>
     )
   }
@@ -507,13 +497,13 @@ export function PaginaPublicaSettingsPage() {
     <PageTutorial usuarioId={usuarioId} page="pagina_publica">
       {({ tutorialOpen, tutorialStep, setTutorialStep, resetTutorial, closeTutorial }) => (
         <AppShell>
-          <div className="space-y-6">
-            <div className="flex items-center justify-between gap-3">
+          <div className="mx-auto w-full max-w-3xl space-y-6">
+            <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
               <div>
                 <div className="text-sm font-semibold text-slate-500">Configurações</div>
                 <div className="text-xl font-semibold text-slate-900">Página pública de agendamento</div>
               </div>
-              <Button variant="secondary" onClick={resetTutorial}>
+              <Button variant="secondary" onClick={resetTutorial} className="w-full sm:w-auto">
                 Rever tutorial
               </Button>
             </div>
@@ -552,6 +542,7 @@ export function PaginaPublicaSettingsPage() {
                       className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
                       value={tipoNegocio}
                       onChange={(e) => setTipoNegocio(e.target.value)}
+                      disabled={Boolean(tipoNegocioInicial.trim())}
                     >
                       <option value="">Geral</option>
                       <option value="lava_jatos">Lava-jato</option>
@@ -563,6 +554,11 @@ export function PaginaPublicaSettingsPage() {
                       <option value="pilates">Pilates / Estúdio</option>
                       <option value="faxina">Faxina / Diarista</option>
                     </select>
+                    <div className="mt-1 text-xs text-slate-600">
+                      {tipoNegocioInicial.trim()
+                        ? 'Tipo de negócio bloqueado. Para alterar, solicite mudança no suporte.'
+                        : 'Após salvar um tipo específico, ele fica bloqueado para evitar mudanças futuras.'}
+                    </div>
                   </label>
 
                   <Input label="URL pública" value={publicLink} readOnly />
@@ -597,186 +593,6 @@ export function PaginaPublicaSettingsPage() {
                       Abrir
                     </Button>
                   </div>
-                </div>
-              </Card>
-            </div>
-
-            <div
-              className={
-                tutorialOpen && tutorialSteps[tutorialStep]?.target === 'test'
-                  ? 'ring-2 ring-slate-900 ring-offset-2 ring-offset-slate-50 rounded-xl'
-                  : ''
-              }
-            >
-              <Card>
-                <div className="p-6 space-y-4">
-                  <div>
-                    <div className="text-sm font-semibold text-slate-900">Validação do link público</div>
-                    <div className="text-sm text-slate-600">Testa o carregamento e o GET de horários via RPC do Supabase.</div>
-                  </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Input
-                label="Data (para buscar horários)"
-                type="date"
-                value={publicTestData}
-                onChange={(e) => setPublicTestData(e.target.value)}
-              />
-              <Input
-                label="Unidade slug (opcional)"
-                value={publicTestUnidadeSlug}
-                onChange={(e) => setPublicTestUnidadeSlug(normalizeSlug(e.target.value))}
-                placeholder="centro"
-              />
-            </div>
-
-            {canUseMultiUnits && unidades.length > 0 ? (
-              <label className="block">
-                <div className="text-sm font-medium text-slate-700 mb-1">Selecionar unidade (EMPRESA)</div>
-                <select
-                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
-                  value={publicTestUnidadeSlug}
-                  onChange={(e) => setPublicTestUnidadeSlug(e.target.value)}
-                >
-                  <option value="">Sem unidade</option>
-                  {unidades
-                    .filter((u) => u.ativo)
-                    .map((u) => (
-                      <option key={u.id} value={u.slug}>
-                        {u.nome} ({u.slug})
-                      </option>
-                    ))}
-                </select>
-              </label>
-            ) : null}
-
-            <div className="flex flex-wrap gap-3">
-              <Button
-                onClick={async () => {
-                  if (!slug.trim()) return
-
-                  setPublicTestRunning(true)
-                  setPublicTestError(null)
-                  setPublicTestResult(null)
-
-                  try {
-                    const wantsUnidade = Boolean(publicTestUnidadeSlug.trim())
-                    const userArgs: Record<string, unknown> = { p_slug: slug.trim() }
-                    if (wantsUnidade) userArgs.p_unidade_slug = publicTestUnidadeSlug.trim()
-
-                    const userRes = await callRpcWithSignatureFallback<unknown>('public_get_usuario_publico', userArgs, {
-                      canDropUnidadeSlug: true,
-                    })
-                    if (!userRes.ok) throw new Error(userRes.errorText)
-                    const userDataRaw = userRes.data
-                    const userData = Array.isArray(userDataRaw)
-                      ? ((userDataRaw[0] ?? null) as Record<string, unknown> | null)
-                      : ((userDataRaw ?? null) as Record<string, unknown> | null)
-                    if (!userData) throw new Error('Usuário público não encontrado')
-
-                    const usuarioPublico = userData as unknown as Record<string, unknown>
-                    const publicUsuarioId =
-                      typeof usuarioPublico.usuario_id === 'string'
-                        ? usuarioPublico.usuario_id
-                        : typeof usuarioPublico.id === 'string'
-                          ? usuarioPublico.id
-                          : null
-                    if (!publicUsuarioId) throw new Error('Resposta sem usuario_id')
-
-                    const unidadeId = typeof usuarioPublico.unidade_id === 'string' ? usuarioPublico.unidade_id : null
-
-                    const { data: servicesData, error: servicesErr } = await supabase.rpc('public_get_servicos_publicos', { p_usuario_id: publicUsuarioId })
-                    if (servicesErr) throw servicesErr
-                    const servicesList = Array.isArray(servicesData) ? (servicesData as unknown as Array<Record<string, unknown>>) : []
-                    const firstServicoId = typeof servicesList[0]?.id === 'string' ? String(servicesList[0].id) : null
-                    if (!firstServicoId) throw new Error('Nenhum serviço público encontrado')
-
-                    const staffArgs: Record<string, unknown> = { p_usuario_master_id: publicUsuarioId }
-                    if (unidadeId) staffArgs.p_unidade_id = unidadeId
-                    const staffRes = await callRpcWithSignatureFallback<unknown>('public_get_funcionarios_publicos', staffArgs, {
-                      unidadeId,
-                      canDropUnidadeId: true,
-                      canAddUnidadeId: false,
-                    })
-                    if (!staffRes.ok) throw new Error(staffRes.errorText)
-                    const staffList = Array.isArray(staffRes.data) ? (staffRes.data as unknown as Array<Record<string, unknown>>) : []
-
-                    const planoPublico = String(usuarioPublico.plano ?? '').trim().toLowerCase()
-                    const canChooseProfessional = planoPublico === 'pro' || planoPublico === 'team' || planoPublico === 'enterprise'
-                    const hasStaff = canChooseProfessional && staffList.length > 0
-                    const firstFuncionarioId = hasStaff && typeof staffList[0]?.id === 'string' ? String(staffList[0].id) : null
-
-                    const slotsArgs: Record<string, unknown> = {
-                      p_usuario_id: publicUsuarioId,
-                      p_data: publicTestData,
-                      p_servico_id: firstServicoId,
-                      p_funcionario_id: hasStaff ? firstFuncionarioId : null,
-                    }
-                    if (unidadeId) slotsArgs.p_unidade_id = unidadeId
-
-                    const slotsRes = await callRpcWithSignatureFallback<unknown>('public_get_slots_publicos', slotsArgs, {
-                      unidadeId,
-                      canAddUnidadeId: false,
-                      canDropUnidadeId: true,
-                      canDropFuncionarioId: true,
-                    })
-                    if (!slotsRes.ok) throw new Error(slotsRes.errorText)
-
-                    const rawSlots = (slotsRes.data ?? []) as unknown
-                    const rows = Array.isArray(rawSlots) ? rawSlots : []
-                    const list = rows
-                      .map((r) => {
-                        if (typeof r === 'string') return r.trim()
-                        if (!r || typeof r !== 'object') return ''
-                        const obj = r as Record<string, unknown>
-                        if (typeof obj.hora_inicio === 'string') return obj.hora_inicio.trim()
-                        if (typeof obj.hora === 'string') return obj.hora.trim()
-                        return ''
-                      })
-                      .filter(Boolean)
-                    const uniqueSorted = Array.from(new Set(list)).sort((a, b) => a.localeCompare(b))
-
-                    const resumo = {
-                      slug: slug.trim(),
-                      unidade_slug: wantsUnidade ? publicTestUnidadeSlug.trim() : null,
-                      usuario_id: publicUsuarioId,
-                      unidade_id: unidadeId,
-                      servicos: servicesList.length,
-                      funcionarios_publicos: staffList.length,
-                      usa_profissional: hasStaff,
-                      slots: uniqueSorted.length,
-                      slots_preview: uniqueSorted.slice(0, 24),
-                    }
-                    setPublicTestResult(JSON.stringify(resumo, null, 2))
-                  } catch (e: unknown) {
-                    const msg = e instanceof Error ? e.message : 'Falha ao validar'
-                    setPublicTestError(msg)
-                  } finally {
-                    setPublicTestRunning(false)
-                  }
-                }}
-                disabled={publicTestRunning || loading || saving || !slug.trim()}
-              >
-                {publicTestRunning ? 'Validando…' : 'Validar agora'}
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  const wantsUnidade = Boolean(publicTestUnidadeSlug.trim())
-                  const url = wantsUnidade ? unidadeLink(publicTestUnidadeSlug.trim()) : publicLink
-                  if (!url) return
-                  window.open(url, '_blank', 'noopener,noreferrer')
-                }}
-                disabled={!publicLink}
-              >
-                Abrir link
-              </Button>
-            </div>
-
-            {publicTestError ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{publicTestError}</div> : null}
-            {publicTestResult ? (
-              <pre className="rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-800 overflow-auto">{publicTestResult}</pre>
-            ) : null}
                 </div>
               </Card>
             </div>
@@ -867,9 +683,15 @@ export function PaginaPublicaSettingsPage() {
                   : ''
               }
             >
-              <Card>
+          <Card>
                 <div className="p-6 space-y-4">
                   <div className="text-sm font-semibold text-slate-900">Aparência</div>
+
+                  {!canUseMedia ? (
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                      Logo e imagem de fundo estão disponíveis apenas no plano PRO ou EMPRESA. As cores ficam disponíveis em qualquer plano.
+                    </div>
+                  ) : null}
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <Input label="Cor principal" type="color" value={primaryColor} onChange={(e) => setPrimaryColor(e.target.value)} />
@@ -883,10 +705,15 @@ export function PaginaPublicaSettingsPage() {
               <div className="flex items-end">
                 <button
                   type="button"
-                  onClick={() => setUseBackgroundImage((v) => !v)}
+                  onClick={() => {
+                    if (!canUseMedia) return
+                    setUseBackgroundImage((v) => !v)
+                  }}
+                  disabled={!canUseMedia}
                   className={[
                     'h-10 w-full rounded-lg border px-3 text-sm font-medium',
                     useBackgroundImage ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-900',
+                    !canUseMedia ? 'opacity-60 cursor-not-allowed' : '',
                   ].join(' ')}
                 >
                   {useBackgroundImage ? 'Usar imagem de fundo: Sim' : 'Usar imagem de fundo: Não'}
@@ -899,6 +726,7 @@ export function PaginaPublicaSettingsPage() {
                 label="Ou enviar logo"
                 type="file"
                 accept="image/*"
+                disabled={!canUseMedia}
                 onChange={(e) => {
                   const file = e.target.files?.[0] ?? null
                   if (!file) {
@@ -920,7 +748,7 @@ export function PaginaPublicaSettingsPage() {
                   setLogoFile(file)
                 }}
               />
-              {(logoObjectUrl || logoUrl.trim()) && (
+              {canUseMedia && (logoObjectUrl || logoUrl.trim()) && (
                 <div className="flex items-end">
                   <div className="rounded-xl border border-slate-200 bg-white p-3">
                     <img src={logoObjectUrl ?? logoUrl.trim()} alt="Logo" className="h-14 w-14 rounded-xl object-cover border border-slate-200" />
@@ -934,6 +762,7 @@ export function PaginaPublicaSettingsPage() {
                 label="Enviar imagem de fundo"
                 type="file"
                 accept="image/*"
+                disabled={!canUseMedia}
                 onChange={(e) => {
                   const file = e.target.files?.[0] ?? null
                   if (!file) {
@@ -958,17 +787,91 @@ export function PaginaPublicaSettingsPage() {
               <div />
             </div>
 
-            {useBackgroundImage && (bgObjectUrl || backgroundImageUrl.trim()) && (
-              <div
-                className="rounded-xl border border-slate-200 overflow-hidden"
-                style={{ backgroundColor, backgroundImage: `url(${bgObjectUrl ?? backgroundImageUrl.trim()})`, backgroundSize: 'cover', backgroundPosition: 'center' }}
-              >
-                <div className="p-6" style={{ backgroundColor: 'rgba(255,255,255,0.75)' }}>
-                  <div className="text-sm font-semibold text-slate-900">Prévia</div>
-                  <div className="text-sm text-slate-700">Sua página pública usará essas cores e fundo.</div>
+            <div
+              className="rounded-xl border border-slate-200 overflow-hidden"
+              style={
+                canUseMedia && useBackgroundImage && (bgObjectUrl || backgroundImageUrl.trim())
+                  ? {
+                      backgroundColor,
+                      backgroundImage: `url(${bgObjectUrl ?? backgroundImageUrl.trim()})`,
+                      backgroundSize: 'cover',
+                      backgroundPosition: 'center',
+                    }
+                  : { backgroundColor }
+              }
+            >
+              <div className="p-6" style={{ backgroundColor: canUseMedia && useBackgroundImage ? 'rgba(255,255,255,0.78)' : 'rgba(255,255,255,0.9)' }}>
+                <div className="text-sm font-semibold text-slate-900">Prévia (com serviços reais)</div>
+                <div className="mt-3 flex items-center gap-3">
+                  {(logoObjectUrl || logoUrl.trim()) && (
+                    <img
+                      src={logoObjectUrl ?? logoUrl.trim()}
+                      alt="Logo"
+                      className="h-12 w-12 rounded-xl object-cover border border-slate-200 bg-white"
+                    />
+                  )}
+                  <div className="min-w-0">
+                    <div className="truncate text-base font-semibold text-slate-900">{nomeNegocio ?? 'Seu negócio'}</div>
+                    <div className="truncate text-sm text-slate-600">Agendamento online</div>
+                  </div>
+                </div>
+
+                {instagramUrl.trim() ? (
+                  <div className="mt-3 text-sm">
+                    <a
+                      className="font-semibold"
+                      href={instagramUrl.trim()}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: primaryColor }}
+                    >
+                      Instagram
+                    </a>
+                  </div>
+                ) : null}
+
+                <div className="mt-4">
+                  {servicosPreviewLoading ? <div className="text-sm text-slate-600">Carregando serviços…</div> : null}
+                  {!servicosPreviewLoading && servicosPreviewError ? (
+                    <div className="text-sm text-rose-700">Não foi possível carregar seus serviços para a prévia.</div>
+                  ) : null}
+                  {!servicosPreviewLoading && !servicosPreviewError && servicosPreview.length === 0 ? (
+                    <div className="text-sm text-slate-600">Cadastre ao menos 1 serviço para ver a prévia completa.</div>
+                  ) : null}
+
+                  {!servicosPreviewLoading && !servicosPreviewError && servicosPreview.length > 0 ? (
+                    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {servicosPreview.slice(0, 4).map((s) => (
+                        <div key={s.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-semibold text-slate-900">{s.nome}</div>
+                              <div className="text-xs text-slate-600">
+                                {s.duracao_minutos}min · {formatBRMoney(s.preco)}
+                              </div>
+                            </div>
+                            <div
+                              className="h-5 w-5 rounded-full border border-slate-200"
+                              style={{ backgroundColor: (s.cor ?? '').trim() ? s.cor ?? undefined : '#e2e8f0' }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="mt-4">
+                  <button
+                    type="button"
+                    className="h-10 w-full rounded-xl px-4 text-sm font-semibold text-white"
+                    style={{ backgroundColor: primaryColor }}
+                  >
+                    Continuar
+                  </button>
                 </div>
               </div>
-            )}
+            </div>
 
                   <div
                     className={

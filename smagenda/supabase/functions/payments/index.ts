@@ -11,6 +11,8 @@ type Payload =
       hora_inicio: string
       cliente_nome: string
       cliente_telefone: string
+      cliente_endereco?: string | null
+      extras?: Record<string, unknown> | null
       funcionario_id?: string | null
       unidade_id?: string | null
       slug?: string | null
@@ -482,10 +484,16 @@ async function callPublicCreateAgendamentoWithFallback(
   args: Record<string, unknown>
 ) {
   const lowerMsg = (e: { message?: string }) => String(e?.message ?? '').toLowerCase()
+  const hasExtras = 'p_extras' in args && args.p_extras !== null && args.p_extras !== undefined
   const shouldFallback = (msg: string) => {
     const missingSignature =
       msg.includes('public_create_agendamento_publico') && (msg.includes('does not exist') || msg.includes('function') || msg.includes('rpc'))
-    const badParam = msg.includes('parameter') || msg.includes('unknown') || msg.includes('p_unidade_id') || msg.includes('p_status')
+    const badParam =
+      msg.includes('parameter') ||
+      msg.includes('unknown') ||
+      msg.includes('p_unidade_id') ||
+      msg.includes('p_status') ||
+      msg.includes('p_extras')
     return missingSignature || badParam
   }
 
@@ -497,12 +505,22 @@ async function callPublicCreateAgendamentoWithFallback(
     return out
   }
 
-  const variants: Record<string, unknown>[] = [
+  const baseVariants: Record<string, unknown>[] = [
     { ...args },
     dropKeys(args, ['p_unidade_id']),
     dropKeys(args, ['p_status']),
     dropKeys(args, ['p_unidade_id', 'p_status']),
   ]
+
+  const variants: Record<string, unknown>[] = hasExtras
+    ? baseVariants
+    : [
+        ...baseVariants,
+        dropKeys(args, ['p_extras']),
+        dropKeys(args, ['p_unidade_id', 'p_extras']),
+        dropKeys(args, ['p_status', 'p_extras']),
+        dropKeys(args, ['p_unidade_id', 'p_status', 'p_extras']),
+      ]
 
   let lastError: { message?: string } | null = null
   for (const v of variants) {
@@ -582,8 +600,14 @@ async function handlePublicBookingFeeCheckout(input: {
   const horaInicio = String(input.payload.hora_inicio ?? '').trim()
   const clienteNome = String(input.payload.cliente_nome ?? '').trim()
   const clienteTelefone = String(input.payload.cliente_telefone ?? '').trim()
+  const clienteEndereco = String(input.payload.cliente_endereco ?? '').trim()
   const slug = String(input.payload.slug ?? '').trim()
   const unidadeSlug = String(input.payload.unidade_slug ?? '').trim()
+
+  const extrasRaw = input.payload.extras
+  const extrasObj = extrasRaw && typeof extrasRaw === 'object' && !Array.isArray(extrasRaw) ? (extrasRaw as Record<string, unknown>) : null
+  const extras = clienteEndereco ? { ...(extrasObj ?? {}), endereco: clienteEndereco } : extrasObj
+  const extrasFinal = extras && Object.keys(extras).length > 0 ? extras : null
 
   if (!usuarioId || !servicoId || !data || !horaInicio || !clienteNome || !clienteTelefone || !slug) {
     return jsonResponse(400, { error: 'invalid_payload' })
@@ -654,6 +678,7 @@ async function handlePublicBookingFeeCheckout(input: {
       p_funcionario_id: funcionarioId,
       p_status: 'confirmado',
     }
+    if (extrasFinal) createArgs.p_extras = extrasFinal
     if (unidadeId) createArgs.p_unidade_id = unidadeId
 
     const createRes = await callPublicCreateAgendamentoWithFallback(input.adminClient, createArgs)
@@ -685,6 +710,7 @@ async function handlePublicBookingFeeCheckout(input: {
     p_funcionario_id: funcionarioId,
     p_status: 'pendente',
   }
+  if (extrasFinal) createArgs.p_extras = extrasFinal
   if (unidadeId) createArgs.p_unidade_id = unidadeId
 
   const createRes = await callPublicCreateAgendamentoWithFallback(input.adminClient, createArgs)

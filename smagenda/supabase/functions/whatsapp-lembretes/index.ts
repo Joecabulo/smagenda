@@ -49,6 +49,7 @@ type AgendamentoRow = {
   status: string
   lembrete_enviado: boolean | null
   confirmacao_enviada?: boolean | null
+  extras?: unknown | null
   servico: ServicoRow | null
   funcionario?: FuncionarioRow | null
   unidade?: UnidadeRow | null
@@ -257,6 +258,14 @@ function formatBRDate(isoDate: string) {
 
 function interpolateTemplate(template: string, vars: Record<string, string>) {
   return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => vars[key] ?? `{${key}}`)
+}
+
+function readExtrasEndereco(extras: unknown) {
+  if (!extras || typeof extras !== 'object') return ''
+  const v = (extras as Record<string, unknown>).endereco
+  if (typeof v !== 'string') return ''
+  const t = v.trim()
+  return t ? t : ''
 }
 
 function computeDaysLeft(todayIso: string, vencIso: string) {
@@ -663,11 +672,11 @@ Deno.serve(async (req) => {
   if (agendamentoId) {
     let canUpdateConfirmacao = true
     const agSelFull =
-      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,extras,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
     const agSelFullNoFlag =
-      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
-    const agSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco)'
-    const agSelBaseNoFlag = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,servico:servicos(nome,preco)'
+      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,extras,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+    const agSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,extras,servico:servicos(nome,preco)'
+    const agSelBaseNoFlag = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,extras,servico:servicos(nome,preco)'
 
     const first = await adminClient.from('agendamentos').select(agSelFull).eq('id', agendamentoId).maybeSingle()
     const agData = await (async () => {
@@ -727,8 +736,9 @@ Deno.serve(async (req) => {
 
     const tmpl = (uRow.mensagem_confirmacao ?? '').trim() ? (uRow.mensagem_confirmacao ?? '') : defaultConfirmacao
 
+    const clienteEndereco = readExtrasEndereco(agRow.extras)
     const unidadeEndereco = (agRow.unidade?.endereco ?? '').trim()
-    const endereco = unidadeEndereco || (uRow.endereco ?? '')
+    const endereco = clienteEndereco || unidadeEndereco || (uRow.endereco ?? '')
     const telefoneProfissional = (agRow.funcionario?.telefone ?? '').trim() || (uRow.telefone ?? '')
 
     const vars = {
@@ -737,6 +747,7 @@ Deno.serve(async (req) => {
       hora: agRow.hora_inicio ?? '',
       servico: agRow.servico?.nome ?? '',
       preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
+      cliente_endereco: clienteEndereco,
       endereco,
       nome_negocio: uRow.nome_negocio ?? '',
       telefone_profissional: telefoneProfissional,
@@ -823,8 +834,8 @@ Deno.serve(async (req) => {
       const confirmEndDate = confirmEnd.toISOString().slice(0, 10)
 
       const confirmSelFull =
-        'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
-      const confirmSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,servico:servicos(nome,preco)'
+        'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,extras,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+      const confirmSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,confirmacao_enviada,extras,servico:servicos(nome,preco)'
 
       const confirmFirst = await adminClient
         .from('agendamentos')
@@ -865,8 +876,9 @@ Deno.serve(async (req) => {
 
           const tmpl = (uRow.mensagem_confirmacao ?? '').trim() ? (uRow.mensagem_confirmacao ?? '') : defaultConfirmacao
 
+          const clienteEndereco = readExtrasEndereco(agRow.extras)
           const unidadeEndereco = (agRow.unidade?.endereco ?? '').trim()
-          const endereco = unidadeEndereco || (uRow.endereco ?? '')
+          const endereco = clienteEndereco || unidadeEndereco || (uRow.endereco ?? '')
           const telefoneProfissional = (agRow.funcionario?.telefone ?? '').trim() || (uRow.telefone ?? '')
 
           const vars = {
@@ -875,6 +887,7 @@ Deno.serve(async (req) => {
             hora: agRow.hora_inicio ?? '',
             servico: agRow.servico?.nome ?? '',
             preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
+            cliente_endereco: clienteEndereco,
             endereco,
             nome_negocio: uRow.nome_negocio ?? '',
             telefone_profissional: telefoneProfissional,
@@ -931,8 +944,8 @@ Deno.serve(async (req) => {
       const endDate = targetEnd.toISOString().slice(0, 10)
 
       const reminderSelFull =
-        'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,lembrete_enviado,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
-      const reminderSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,lembrete_enviado,servico:servicos(nome,preco)'
+        'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,lembrete_enviado,extras,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+      const reminderSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,lembrete_enviado,extras,servico:servicos(nome,preco)'
 
       const reminderFirst = await adminClient
         .from('agendamentos')
@@ -982,8 +995,9 @@ Deno.serve(async (req) => {
 
           const tmpl = uRow.mensagem_lembrete ?? ''
 
+          const clienteEndereco = readExtrasEndereco(agRow.extras)
           const unidadeEndereco = (agRow.unidade?.endereco ?? '').trim()
-          const endereco = unidadeEndereco || (uRow.endereco ?? '')
+          const endereco = clienteEndereco || unidadeEndereco || (uRow.endereco ?? '')
           const telefoneProfissional = (agRow.funcionario?.telefone ?? '').trim() || (uRow.telefone ?? '')
 
           const vars = {
@@ -992,6 +1006,7 @@ Deno.serve(async (req) => {
             hora: agRow.hora_inicio ?? '',
             servico: agRow.servico?.nome ?? '',
             preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
+            cliente_endereco: clienteEndereco,
             endereco,
             nome_negocio: uRow.nome_negocio ?? '',
             telefone_profissional: telefoneProfissional,

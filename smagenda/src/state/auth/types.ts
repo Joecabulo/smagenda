@@ -29,7 +29,7 @@ export type FuncionarioProfile = {
   nome_completo: string
   email: string
   telefone: string | null
-  permissao: 'admin' | 'funcionario'
+  permissao: 'admin' | 'funcionario' | 'atendente'
   pode_ver_agenda: boolean
   pode_criar_agendamentos: boolean
   pode_cancelar_agendamentos: boolean
@@ -42,6 +42,7 @@ export type FuncionarioProfile = {
   dias_trabalho: number[] | null
   intervalo_inicio: string | null
   intervalo_fim: string | null
+  capacidade_dia_inteiro: number
   ativo: boolean
 }
 

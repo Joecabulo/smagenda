@@ -8,6 +8,8 @@ import { Input } from '../../components/ui/Input'
 import { useAuth } from '../../state/auth/useAuth'
 
 const MIN_PASSWORD_LENGTH = 11
+const TERMS_VERSION = '2026-01-11'
+const PRIVACY_VERSION = '2026-01-11'
 
 export function CadastroPage() {
   const navigate = useNavigate()
@@ -19,6 +21,7 @@ export function CadastroPage() {
   const [email, setEmail] = useState('')
   const [senha, setSenha] = useState('')
   const [slug, setSlug] = useState('')
+  const [acceptedLegal, setAcceptedLegal] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
@@ -31,8 +34,9 @@ export function CadastroPage() {
       nomeNegocio.trim() &&
       email.trim() &&
       senha.trim().length >= MIN_PASSWORD_LENGTH &&
-      derivedSlug.trim(),
-    [nomeCompleto, nomeNegocio, email, senha, derivedSlug]
+      derivedSlug.trim() &&
+      acceptedLegal,
+    [nomeCompleto, nomeNegocio, email, senha, derivedSlug, acceptedLegal]
   )
 
   const onSubmit = async (e: React.FormEvent) => {
@@ -42,11 +46,19 @@ export function CadastroPage() {
     setInfo(null)
     setDiagnostico(null)
 
+    if (!acceptedLegal) {
+      setError('Você precisa aceitar os Termos de Uso e a Política de Privacidade para criar a conta.')
+      setSubmitting(false)
+      return
+    }
+
     const cleanEmail = email.trim().toLowerCase()
     const cleanPassword = senha
     const cleanNomeCompleto = nomeCompleto.trim()
     const cleanNomeNegocio = nomeNegocio.trim()
     const cleanTelefone = telefone.trim() || null
+    const acceptedAt = new Date().toISOString()
+    const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : ''
 
     if (!supabaseEnv.ok) {
       setError(`Supabase não configurado. Faltando: ${supabaseEnv.missing.join(', ')}`)
@@ -119,6 +131,10 @@ export function CadastroPage() {
             nome_negocio: cleanNomeNegocio,
             telefone: cleanTelefone,
             slug: derivedSlug,
+            termos_versao: TERMS_VERSION,
+            privacidade_versao: PRIVACY_VERSION,
+            legal_aceite_em: acceptedAt,
+            legal_user_agent: userAgent,
           },
         },
       })
@@ -199,6 +215,23 @@ export function CadastroPage() {
         setError('Cadastro criado, mas o perfil do usuário não foi configurado no Supabase.')
         setSubmitting(false)
         return
+      }
+    }
+
+    const { error: acceptErr } = await supabase.rpc('accept_legal_terms', {
+      p_terms_version: TERMS_VERSION,
+      p_privacy_version: PRIVACY_VERSION,
+    })
+    if (acceptErr) {
+      const msg = acceptErr.message
+      const lower = msg.toLowerCase()
+      const missingFn = lower.includes('accept_legal_terms') && (lower.includes('function') || lower.includes('rpc'))
+      const missingCols = lower.includes('termos_aceitos_em') || lower.includes('privacidade_aceita_em')
+
+      if (missingFn || missingCols) {
+        setInfo(
+          'Conta criada. Para registrar o aceite no perfil do usuário, rode o SQL de Termos/Privacidade em /admin/configuracoes (Super Admin).'
+        )
       }
     }
 
@@ -284,6 +317,26 @@ export function CadastroPage() {
             </div>
             <Input label="Slug (editável)" value={slug} onChange={(e) => setSlug(e.target.value)} placeholder={derivedSlug} />
             <div className="text-xs text-slate-600">Seu link ficará: /agendar/{derivedSlug}</div>
+
+            <label className="flex items-start gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={acceptedLegal}
+                onChange={(e) => setAcceptedLegal(e.target.checked)}
+              />
+              <span>
+                Eu li e aceito os{' '}
+                <a className="font-medium text-slate-900 hover:underline" href="/termos" target="_blank" rel="noreferrer">
+                  Termos de Uso
+                </a>{' '}
+                e a{' '}
+                <a className="font-medium text-slate-900 hover:underline" href="/privacidade" target="_blank" rel="noreferrer">
+                  Política de Privacidade
+                </a>
+                .
+              </span>
+            </label>
 
             {info ? <div className="text-sm text-emerald-700">{info}</div> : null}
             {diagnostico ? <div className="text-xs text-slate-600">{diagnostico}</div> : null}

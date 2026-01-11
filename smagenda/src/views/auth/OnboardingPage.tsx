@@ -18,10 +18,12 @@ const weekdayOptions = [
 ]
 
 export function OnboardingPage() {
-  const { appPrincipal, refresh } = useAuth()
-  const usuarioId = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.id : null
-  const slug = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.slug : null
-  const initialLogoUrl = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.logo_url : null
+  const { appPrincipal, masterUsuario, masterUsuarioLoading, refresh } = useAuth()
+  const isGerente = appPrincipal?.kind === 'funcionario' && appPrincipal.profile.permissao === 'admin'
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isGerente ? masterUsuario : null
+  const usuarioId = usuario?.id ?? null
+  const slug = usuario?.slug ?? null
+  const initialLogoUrl = usuario?.logo_url ?? null
 
   const [step, setStep] = useState<Step>(1)
   const [horarioInicio, setHorarioInicio] = useState('08:00')
@@ -53,7 +55,7 @@ export function OnboardingPage() {
   }, [logoObjectUrl])
 
   if (!usuarioId) {
-    return <div className="text-slate-700">Conta inválida para onboarding.</div>
+    return <div className="text-slate-700">{isGerente && masterUsuarioLoading ? 'Carregando…' : 'Conta inválida para onboarding.'}</div>
   }
 
   const toggleDia = (day: number) => {

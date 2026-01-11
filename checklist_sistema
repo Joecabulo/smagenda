@@ -1,0 +1,97 @@
+2026-01-08
+- Link público: endereço obrigatório para tipo_negocio=faxina e envio via p_extras
+- Edge Function payments: aceita cliente_endereco e persiste em p_extras.endereco
+- RPC public_create_agendamento_publico: suporte a p_extras (jsonb) e coluna agendamentos.extras
+- Página pública (config): tipo_negocio fica bloqueado após primeira definição não-vazia
+- Agenda (usuário/funcionário): exibe extras.endereco quando presente no agendamento
+- WhatsApp: variável {cliente_endereco} disponível nos templates e preenchida por agendamentos.extras.endereco (prioridade sobre unidade/endereço do negócio)
+- Link público: regras por serviço (buffers/antecedência/janela) aplicadas em slots e criação
+- RPC public_get_ocupacoes: considera buffer_antes_min/buffer_depois_min por serviço
+- Página pública: maxDays/minLeadMinutes exibidos conforme regras do serviço selecionado
+- Página pública: email opcional (extras.email) para fallback de confirmação
+- Cliente (detalhes): edição de extras (endereco/placa/email) por agendamento
+- WhatsApp (confirmação): fallback real por e-mail via Resend quando necessário
+- Serviços: suporte a dia_inteiro e capacidade diária de diárias (1 ou 2)
+- Link público: calendário responsivo para selecionar dia em serviços dia_inteiro
+- RPC public_get_slots_publicos: dia_inteiro usa capacidade_dia_inteiro e bloqueios reais
+- RPC public_create_agendamento_publico: dia_inteiro reserva expediente completo e respeita capacidade
+- Lint: removido setState em useEffect (capacidadeDiaInteiro e mês do calendário)
+- Página pública: hora de dia_inteiro é derivada de diaInteiroDisponibilidade[data]
+
+2026-01-11
+- Funcionários: fallback quando coluna capacidade_dia_inteiro não existe (carrega sem ela e exibe SQL para corrigir)
+- Admin (configurações): SQL agora cria constraint para capacidade_dia_inteiro (1 ou 2)
+- Cadastro: termos de uso e política de privacidade com aceite obrigatório e registro no Supabase
+- Público: página /ajuda com contato, FAQ e links para termos/privacidade
+- Painel: link “Ajuda” no menu lateral (usuário e funcionário)
+- Ajuda: quando autenticado, abre dentro do painel e volta ao dashboard/agenda
+- Ajuda: fallback real de suporte (telefone/WhatsApp e email) com links tel/mailto
+- Ajuda: WhatsApp mostra número em negrito e email com prefixo "Email:"
+- Ajuda: WhatsApp exibido como "WhatsApp: (31) 9 7518-4428"
+- Link público: RPC via REST sanitiza VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY (remove aspas e barras finais)
+- Link público: fallback de assinatura agora remove p_extras quando Supabase está com SQL antigo
+- Link público: erro de slots diferencia ausência de public_get_ocupacoes e sugere SQL de ocupações/bloqueios
+- Link público: erro de slots/criação em rotas com unidade sugere também SQL de Multi-unidades (EMPRESA)
+- Link público: detecção de RPC ausente ficou mais precisa (evita falso-positivo em permission denied)
+- Admin (configurações): SQL do link público inclui pgcrypto e NOTIFY pgrst para refresh imediato
+- Admin (configurações): SQL do link público remove overload de RPCs e padroniza assinaturas com parâmetros default
+- Link público: public_get_usuario_publico agora aceita p_unidade_slug e evita erro de "best candidate function"
+- Link público: RPCs públicas agora aceitam p_unidade_id default e salvam agendamentos com unidade_id quando disponível
+- Público: ajuste de lint no PublicBookingPage (remove helper não utilizado)
+- Link público: hotfix SQL remove overloads de public_create_agendamento_publico (evita PGRST203)
+- Clientes: lista e detalhes destacam quando um telefone tem múltiplos nomes
+- Cliente (detalhes): ação "Ocultar cliente" anonimiza telefone/nome em todos os agendamentos do número
+- Cliente (detalhes): ocultar cliente usa telefone vazio e nome "Cliente oculto" (NOT NULL)
+- Trial: período padrão reduzido de 15 para 7 dias (data_vencimento)
+- Funcionários: limite agora respeita o plano (enterprise ilimitado; pro 4–6; basic/free 1)
+- Edge Functions: create-funcionario/admin-create-funcionario validam limite pelo plano
+- Deploy: Edge Functions create-funcionario (v17) e admin-create-funcionario (v1) em ttecpztkoaxwttludgfl
+- Funcionários: permissões agora incluem Atendente (além de Funcionário e Gerente)
+- Funcionários: rótulo de "Admin" renomeado para "Gerente" (permissao continua 'admin')
+- Link público: public_get_funcionarios_publicos filtra para exibir apenas permissao='funcionario'
+- Link público: filtro agora exige permissao='funcionario' (não mostra null/gerente/atendente)
+- Deploy: Edge Functions create-funcionario (v18) e admin-create-funcionario (v2) em ttecpztkoaxwttludgfl
+- Dev (Windows): npm ci estava falhando por lock em binário do Rollup; removido arquivo travado e reinstaladas dependências
+- TypeScript: tsconfig.app inclui tipos de React/ReactDOM e composite para remover erros de JSX no editor
+- Funcionários: SQL para atualizar constraint funcionarios_permissao_check e permitir permissao='atendente'
+- Agenda (painel): filtro de profissionais mostra apenas permissao='funcionario'
+- Agenda (funcionário): gerente/atendente com "Ver agenda" podem ver agenda completa com filtro por profissional
+- RLS: gerente/atendente com pode_ver_agenda podem listar funcionarios/agendamentos/bloqueios do master
+- UI: campos de senha agora têm botão Ver/Ocultar
+- Agenda (funcionário): removida edição do próprio horário (apenas gerente ajusta no painel)
+- Agenda (atendente): atendente não visualiza o card "Resumo do Dia"
+- Admin (configurações): SQL bloqueia RPC funcionario_update_horarios (não permite salvar horário por funcionário)
+- Agenda (atendente): agenda completa usa horários do profissional filtrado (slots corretos)
+- Agenda (atendente): erros de permissão/RLS exibem mensagem detalhada com ação recomendada
+- Agenda (atendente): modo Lista para visualizar agendamentos e bloqueios por período
+- Agenda (atendente): vazio agora mostra período, profissional e filtros ativos
+- Agenda (painel): preferência Grade/Lista fica salva por usuário no navegador
+- Agenda (atendente): exibe erro quando funcionarios.usuario_master_id está vazio (não carrega agenda)
+- Supabase RLS: corrigida recursão infinita em policy de funcionarios usando função security definer
+- Gerente: Configurações (Mensagens automáticas / Página pública) agora usam usuário master
+- Onboarding: gerente usa perfil do usuário master (com estado Carregando…)
+- Gerente: acesso agora limitado às 7 permissões (agenda/criar/cancelar/bloquear/financeiro/serviços/clientes)
+- Menu: gerente só vê páginas permitidas pelas permissões marcadas
+- Painel (agenda): bloquear horário, confirmar/no-show/cancelar e preços respeitam permissões do gerente
+- Configurações: Pagamento/Funcionários/WhatsApp/Mensagens/Página pública restritos ao usuário master
+- Funcionários: capacidade de diárias por dia só aparece para tipo_negocio=faxina/diarista
+- Funcionários: ícone de agendamentos usa tesoura só em barbearia (senão calendário)
+- WhatsApp: botão “Conectar (código)” agora prioriza código de pareamento (não QR)
+- WhatsApp: UI não exibe QRCode quando o usuário escolhe “Conectar (código)”
+- WhatsApp: Edge Function tenta criar/conectar com qrcode=false no modo código
+- WhatsApp: ocultado o modo “Conectar (código)” (mantido apenas QR Code)
+ - Mensagens automáticas: UI mobile aprimorada (padding responsivo, botões full-width no celular, melhor hierarquia)
+ - Mensagens automáticas: adicionados modelos prontos para lava_jatos/barbearia/manicure/pilates/faxina
+ - Mensagens automáticas: ao selecionar modelo pronto, aplica confirmação e lembrete automaticamente
+ - Página pública (config): removida validação visual do link público (tela mais limpa)
+ - Página pública (config): slug duplicado exibe “Nome já está em uso. Escolha outro para o seu link público.”
+ - Página pública (config): Unidades ativo apenas no plano enterprise (carrega/permite CRUD só nesse plano)
+ - Página pública (config): Aparência permite cores em qualquer plano
+ - Página pública (config): Logo e imagem de fundo liberados apenas para planos pro/enterprise (com bloqueio de UI e no salvar)
+ - Página pública (config): prévia de aparência agora mostra serviços reais do usuário (Supabase)
+
+2026-01-11 (validação)
+- Build (tsc -b + vite build): OK
+- Lint (eslint .): OK
+- Smoke-test em preview (vite preview): OK (home abre sem erros no browser)
+- Varredura por mocks/simulações no front: não encontrado (mock/fake/stub/simula)

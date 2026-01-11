@@ -259,6 +259,12 @@ with check (public.is_super_admin());`
 
   const sqlTrial = useMemo(() => {
     return `alter table public.usuarios add column if not exists data_vencimento date;
+alter table public.usuarios add column if not exists termos_aceitos_em timestamptz;
+alter table public.usuarios add column if not exists privacidade_aceita_em timestamptz;
+alter table public.usuarios add column if not exists termos_versao text;
+alter table public.usuarios add column if not exists privacidade_versao text;
+alter table public.usuarios add column if not exists consentimento_ip text;
+alter table public.usuarios add column if not exists consentimento_user_agent text;
 
 create or replace function public.ensure_usuario_profile()
 returns void
@@ -275,6 +281,11 @@ declare
   v_slug text := coalesce(nullif(meta ->> 'slug', ''), null);
   v_telefone text := nullif(meta ->> 'telefone', '');
   v_email text := nullif(jwt ->> 'email', '');
+  v_terms_ver text := nullif(meta ->> 'termos_versao', '');
+  v_priv_ver text := nullif(meta ->> 'privacidade_versao', '');
+  v_accepted_raw text := nullif(meta ->> 'legal_aceite_em', '');
+  v_accepted_at timestamptz := null;
+  v_ua text := nullif(meta ->> 'legal_user_agent', '');
 begin
   if uid is null then
     raise exception 'not authenticated';
@@ -331,13 +342,24 @@ begin
     v_slug := v_slug || '-' || substring(replace(uid::text, '-', '') from 1 for 6);
   end if;
 
+  if v_accepted_raw is not null then
+    begin
+      v_accepted_at := v_accepted_raw::timestamptz;
+    exception
+      when others then
+        v_accepted_at := null;
+    end;
+  end if;
+
   insert into public.usuarios (
     id, nome_completo, nome_negocio, telefone, email, slug,
-    plano, tipo_conta, limite_funcionarios, status_pagamento, data_vencimento, ativo
+    plano, tipo_conta, limite_funcionarios, status_pagamento, data_vencimento, ativo,
+    termos_aceitos_em, privacidade_aceita_em, termos_versao, privacidade_versao, consentimento_user_agent
   )
   values (
     uid, v_nome, v_negocio, v_telefone, v_email, v_slug,
-    'free', 'master', 1, 'trial', (current_date + 15), true
+    'free', 'master', 1, 'trial', (current_date + 7), true,
+    v_accepted_at, v_accepted_at, v_terms_ver, v_priv_ver, v_ua
   )
   on conflict (id) do update
   set
@@ -347,12 +369,53 @@ begin
     email = coalesce(public.usuarios.email, excluded.email),
     slug = coalesce(public.usuarios.slug, excluded.slug),
     limite_funcionarios = coalesce(public.usuarios.limite_funcionarios, excluded.limite_funcionarios),
-    data_vencimento = coalesce(public.usuarios.data_vencimento, excluded.data_vencimento);
+    data_vencimento = coalesce(public.usuarios.data_vencimento, excluded.data_vencimento),
+    termos_aceitos_em = coalesce(public.usuarios.termos_aceitos_em, excluded.termos_aceitos_em),
+    privacidade_aceita_em = coalesce(public.usuarios.privacidade_aceita_em, excluded.privacidade_aceita_em),
+    termos_versao = coalesce(public.usuarios.termos_versao, excluded.termos_versao),
+    privacidade_versao = coalesce(public.usuarios.privacidade_versao, excluded.privacidade_versao),
+    consentimento_user_agent = coalesce(public.usuarios.consentimento_user_agent, excluded.consentimento_user_agent);
 end;
 $$;
 
 revoke all on function public.ensure_usuario_profile() from public;
 grant execute on function public.ensure_usuario_profile() to authenticated;
+
+create or replace function public.accept_legal_terms(
+  p_terms_version text,
+  p_privacy_version text
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_headers jsonb := coalesce(current_setting('request.headers', true)::jsonb, '{}'::jsonb);
+  v_xff text := nullif(v_headers ->> 'x-forwarded-for', '');
+  v_ip text := nullif(split_part(coalesce(v_xff, ''), ',', 1), '');
+  v_ua text := nullif(v_headers ->> 'user-agent', '');
+begin
+  if v_uid is null then
+    raise exception 'not authenticated';
+  end if;
+
+  perform public.ensure_usuario_profile();
+
+  update public.usuarios u
+  set
+    termos_aceitos_em = now(),
+    privacidade_aceita_em = now(),
+    termos_versao = nullif(trim(coalesce(p_terms_version, '')), ''),
+    privacidade_versao = nullif(trim(coalesce(p_privacy_version, '')), ''),
+    consentimento_ip = coalesce(nullif(u.consentimento_ip, ''), v_ip),
+    consentimento_user_agent = coalesce(nullif(u.consentimento_user_agent, ''), v_ua)
+  where u.id = v_uid;
+end;
+$$;
+
+revoke all on function public.accept_legal_terms(text, text) from public;
+grant execute on function public.accept_legal_terms(text, text) to authenticated;
 
 update public.usuarios
 set limite_funcionarios = 1
@@ -360,7 +423,7 @@ where status_pagamento = 'trial'
   and (limite_funcionarios is null or limite_funcionarios < 1);
 
 update public.usuarios
-set data_vencimento = current_date + 15
+set data_vencimento = current_date + 7
 where status_pagamento = 'trial'
   and data_vencimento is null;`
   }, [])
@@ -390,7 +453,38 @@ alter table public.servicos enable row level security;
 alter table public.agendamentos enable row level security;
 alter table public.bloqueios enable row level security;
 
+alter table public.usuarios add column if not exists termos_aceitos_em timestamptz;
+alter table public.usuarios add column if not exists privacidade_aceita_em timestamptz;
+alter table public.usuarios add column if not exists termos_versao text;
+alter table public.usuarios add column if not exists privacidade_versao text;
+alter table public.usuarios add column if not exists consentimento_ip text;
+alter table public.usuarios add column if not exists consentimento_user_agent text;
+
 alter table public.servicos add column if not exists taxa_agendamento numeric not null default 0;
+
+alter table public.servicos add column if not exists buffer_antes_min int not null default 0;
+alter table public.servicos add column if not exists buffer_depois_min int not null default 0;
+alter table public.servicos add column if not exists antecedencia_minutos int not null default 120;
+alter table public.servicos add column if not exists janela_max_dias int not null default 15;
+alter table public.servicos add column if not exists dia_inteiro boolean not null default false;
+
+alter table public.funcionarios add column if not exists capacidade_dia_inteiro int not null default 1;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'funcionarios_capacidade_dia_inteiro_chk'
+      and conrelid = 'public.funcionarios'::regclass
+  ) then
+    alter table public.funcionarios
+      add constraint funcionarios_capacidade_dia_inteiro_chk check (capacidade_dia_inteiro between 1 and 2);
+  end if;
+end;
+$$;
+
+alter table public.agendamentos add column if not exists extras jsonb;
 
 create table if not exists public.super_admin (
   id uuid primary key references auth.users(id) on delete cascade,
@@ -428,6 +522,20 @@ language sql stable as $$
   select exists (select 1 from public.super_admin sa where sa.id = auth.uid())
 $$;
 
+create or replace function public.can_view_master_agenda(p_master_id uuid) returns boolean
+language sql stable security definer
+set search_path = public as $$
+  select exists (
+    select 1
+    from public.funcionarios f
+    where f.id = auth.uid()
+      and f.usuario_master_id = p_master_id
+      and f.ativo = true
+      and f.pode_ver_agenda = true
+      and f.permissao in ('admin', 'atendente')
+  )
+$$;
+
 drop policy if exists "usuarios_select_self_or_master_for_funcionario" on public.usuarios;
 create policy "usuarios_select_self_or_master_for_funcionario" on public.usuarios
 for select to authenticated
@@ -462,6 +570,7 @@ using (
   usuario_master_id = auth.uid()
   or public.is_super_admin()
   or id = auth.uid()
+  or public.can_view_master_agenda(funcionarios.usuario_master_id)
 );
 
 drop policy if exists "funcionarios_insert_master" on public.funcionarios;
@@ -573,6 +682,15 @@ for select to authenticated
 using (
   usuario_id = auth.uid()
   or public.is_super_admin()
+  or exists (
+    select 1
+    from public.funcionarios f
+    where f.id = auth.uid()
+      and f.usuario_master_id = agendamentos.usuario_id
+      and f.ativo = true
+      and f.pode_ver_agenda = true
+      and f.permissao in ('admin', 'atendente')
+  )
   or (
     funcionario_id = auth.uid()
     and exists (
@@ -653,6 +771,15 @@ for select to authenticated
 using (
   usuario_id = auth.uid()
   or public.is_super_admin()
+  or exists (
+    select 1
+    from public.funcionarios f
+    where f.id = auth.uid()
+      and f.usuario_master_id = bloqueios.usuario_id
+      and f.ativo = true
+      and f.pode_ver_agenda = true
+      and f.permissao in ('admin', 'atendente')
+  )
   or (
     (bloqueios.funcionario_id is null or bloqueios.funcionario_id = auth.uid())
     and exists (
@@ -737,8 +864,30 @@ grant select, insert, update, delete on public.agendamentos to authenticated;
 grant select, insert, update, delete on public.bloqueios to authenticated;`
   }, [])
 
+  const sqlFuncionariosPermissaoAtendente = useMemo(() => {
+    return `do $$
+begin
+  if exists (
+    select 1
+    from pg_constraint
+    where conname = 'funcionarios_permissao_check'
+      and conrelid = 'public.funcionarios'::regclass
+  ) then
+    alter table public.funcionarios drop constraint funcionarios_permissao_check;
+  end if;
+
+  alter table public.funcionarios
+    add constraint funcionarios_permissao_check
+    check (permissao is null or permissao in ('admin', 'funcionario', 'atendente'));
+end;
+$$;`
+  }, [])
+
   const sqlPublicOcupacoes = useMemo(() => {
     return `drop function if exists public.public_get_ocupacoes(uuid, date, uuid);
+
+alter table public.servicos add column if not exists buffer_antes_min int not null default 0;
+alter table public.servicos add column if not exists buffer_depois_min int not null default 0;
 
 create or replace function public.public_get_ocupacoes(p_usuario_id uuid, p_data date, p_funcionario_id uuid)
 returns table (start_min int, end_min int)
@@ -749,9 +898,10 @@ as $$
 begin
   return query
   select
-    floor(extract(epoch from a.hora_inicio::time) / 60)::int as start_min,
-    floor(extract(epoch from coalesce(a.hora_fim, a.hora_inicio)::time) / 60)::int as end_min
+    (floor(extract(epoch from a.hora_inicio::time) / 60)::int - coalesce(s.buffer_antes_min, 0)::int) as start_min,
+    (floor(extract(epoch from coalesce(a.hora_fim, a.hora_inicio)::time) / 60)::int + coalesce(s.buffer_depois_min, 0)::int) as end_min
   from public.agendamentos a
+  left join public.servicos s on s.id = a.servico_id and s.usuario_id = a.usuario_id
   where a.usuario_id = p_usuario_id
     and a.data = p_data
     and a.status <> 'cancelado'
@@ -776,6 +926,11 @@ grant execute on function public.public_get_ocupacoes(uuid, date, uuid) to authe
 
   const sqlTaxaAgendamento = useMemo(() => {
     return `alter table public.servicos add column if not exists taxa_agendamento numeric not null default 0;
+
+alter table public.servicos add column if not exists buffer_antes_min int not null default 0;
+alter table public.servicos add column if not exists buffer_depois_min int not null default 0;
+alter table public.servicos add column if not exists antecedencia_minutos int not null default 120;
+alter table public.servicos add column if not exists janela_max_dias int not null default 15;
 
 create table if not exists public.taxa_agendamento_pagamentos (
   id uuid primary key default gen_random_uuid(),
@@ -902,6 +1057,11 @@ returns table (
   nome text,
   descricao text,
   duracao_minutos int,
+  buffer_antes_min int,
+  buffer_depois_min int,
+  antecedencia_minutos int,
+  janela_max_dias int,
+  dia_inteiro boolean,
   preco numeric,
   taxa_agendamento numeric,
   cor text,
@@ -913,7 +1073,20 @@ set search_path = public
 as $$
 begin
   return query
-  select s.id::uuid, s.nome::text, s.descricao::text, s.duracao_minutos::int, s.preco::numeric, s.taxa_agendamento::numeric, s.cor::text, s.foto_url::text
+  select
+    s.id::uuid,
+    s.nome::text,
+    s.descricao::text,
+    s.duracao_minutos::int,
+    coalesce(s.buffer_antes_min, 0)::int,
+    coalesce(s.buffer_depois_min, 0)::int,
+    coalesce(s.antecedencia_minutos, 120)::int,
+    coalesce(s.janela_max_dias, 15)::int,
+    coalesce(s.dia_inteiro, false)::boolean,
+    s.preco::numeric,
+    s.taxa_agendamento::numeric,
+    s.cor::text,
+    s.foto_url::text
   from public.servicos s
   where s.usuario_id = p_usuario_id
     and s.ativo = true
@@ -923,6 +1096,134 @@ $$;
 
 do $$
 begin
+  if not exists (
+    select 1
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname = 'public_create_agendamento_publico'
+      and p.proargtypes = '2950 1082 25 2950 25 25 2950 3802 25'::oidvector
+  ) and exists (
+    select 1
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname = 'public_create_agendamento_publico'
+      and p.proargtypes = '2950 1082 25 2950 25 25 2950 3802'::oidvector
+  ) then
+    execute $fn$
+      create function public.public_create_agendamento_publico(
+        p_usuario_id uuid,
+        p_data date,
+        p_hora_inicio text,
+        p_servico_id uuid,
+        p_cliente_nome text,
+        p_cliente_telefone text,
+        p_funcionario_id uuid,
+        p_extras jsonb default null,
+        p_status text default 'confirmado'
+      )
+      returns uuid
+      language plpgsql
+      security definer
+      set search_path = public
+      as $body$
+      declare
+        v_created_id uuid;
+        v_status text;
+      begin
+        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'confirmado'));
+        if v_status not in ('confirmado', 'pendente') then
+          raise exception 'status_invalido';
+        end if;
+
+        v_created_id := public.public_create_agendamento_publico(
+          p_usuario_id,
+          p_data,
+          p_hora_inicio,
+          p_servico_id,
+          p_cliente_nome,
+          p_cliente_telefone,
+          p_funcionario_id,
+          p_extras
+        );
+
+        update public.agendamentos
+        set status = v_status
+        where id = v_created_id
+          and usuario_id = p_usuario_id;
+
+        return v_created_id;
+      end;
+      $body$;
+    $fn$;
+  end if;
+
+  if not exists (
+    select 1
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname = 'public_create_agendamento_publico'
+      and p.proargtypes = '2950 1082 25 2950 25 25 2950 2950 3802 25'::oidvector
+  ) and exists (
+    select 1
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname = 'public_create_agendamento_publico'
+      and p.proargtypes = '2950 1082 25 2950 25 25 2950 2950 3802'::oidvector
+  ) then
+    execute $fn$
+      create function public.public_create_agendamento_publico(
+        p_usuario_id uuid,
+        p_data date,
+        p_hora_inicio text,
+        p_servico_id uuid,
+        p_cliente_nome text,
+        p_cliente_telefone text,
+        p_funcionario_id uuid,
+        p_unidade_id uuid default null,
+        p_extras jsonb default null,
+        p_status text default 'confirmado'
+      )
+      returns uuid
+      language plpgsql
+      security definer
+      set search_path = public
+      as $body$
+      declare
+        v_created_id uuid;
+        v_status text;
+      begin
+        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'confirmado'));
+        if v_status not in ('confirmado', 'pendente') then
+          raise exception 'status_invalido';
+        end if;
+
+        v_created_id := public.public_create_agendamento_publico(
+          p_usuario_id,
+          p_data,
+          p_hora_inicio,
+          p_servico_id,
+          p_cliente_nome,
+          p_cliente_telefone,
+          p_funcionario_id,
+          p_unidade_id,
+          p_extras
+        );
+
+        update public.agendamentos
+        set status = v_status
+        where id = v_created_id
+          and usuario_id = p_usuario_id;
+
+        return v_created_id;
+      end;
+      $body$;
+    $fn$;
+  end if;
+
   if not exists (
     select 1
     from pg_proc p
@@ -1051,9 +1352,22 @@ $$;`
   }, [])
 
   const sqlPublicBooking = useMemo(() => {
-    return `drop function if exists public.public_get_usuario_publico(text);
+    return `create extension if not exists pgcrypto;
+
+drop function if exists public.public_get_usuario_publico(text);
+drop function if exists public.public_get_usuario_publico(text, text);
 drop function if exists public.public_get_servicos_publicos(uuid);
 drop function if exists public.public_get_funcionarios_publicos(uuid);
+drop function if exists public.public_get_funcionarios_publicos(uuid, uuid);
+
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, jsonb);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, jsonb, text);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, jsonb, uuid);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, text);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text);
 
 alter table public.usuarios add column if not exists slug text;
 create unique index if not exists usuarios_slug_unique on public.usuarios (slug);
@@ -1068,8 +1382,52 @@ alter table public.usuarios add column if not exists public_background_image_url
 alter table public.usuarios add column if not exists timezone text;
 alter table public.usuarios add column if not exists limite_agendamentos_mes int;
 
+alter table public.usuarios add column if not exists termos_aceitos_em timestamptz;
+alter table public.usuarios add column if not exists privacidade_aceita_em timestamptz;
+alter table public.usuarios add column if not exists termos_versao text;
+alter table public.usuarios add column if not exists privacidade_versao text;
+alter table public.usuarios add column if not exists consentimento_ip text;
+alter table public.usuarios add column if not exists consentimento_user_agent text;
+
 alter table public.servicos add column if not exists foto_url text;
 alter table public.servicos add column if not exists taxa_agendamento numeric not null default 0;
+alter table public.servicos add column if not exists buffer_antes_min int not null default 0;
+alter table public.servicos add column if not exists buffer_depois_min int not null default 0;
+alter table public.servicos add column if not exists antecedencia_minutos int not null default 120;
+alter table public.servicos add column if not exists janela_max_dias int not null default 15;
+alter table public.servicos add column if not exists dia_inteiro boolean not null default false;
+
+alter table public.funcionarios add column if not exists capacidade_dia_inteiro int not null default 1;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'funcionarios_capacidade_dia_inteiro_chk'
+      and conrelid = 'public.funcionarios'::regclass
+  ) then
+    alter table public.funcionarios
+      add constraint funcionarios_capacidade_dia_inteiro_chk check (capacidade_dia_inteiro between 1 and 2);
+  end if;
+end;
+$$;
+
+alter table public.agendamentos add column if not exists extras jsonb;
+
+do $$
+begin
+  if to_regclass('public.unidades') is null then
+    alter table public.funcionarios add column if not exists unidade_id uuid;
+    alter table public.agendamentos add column if not exists unidade_id uuid;
+    alter table public.bloqueios add column if not exists unidade_id uuid;
+  else
+    alter table public.funcionarios add column if not exists unidade_id uuid references public.unidades(id) on delete set null;
+    alter table public.agendamentos add column if not exists unidade_id uuid references public.unidades(id) on delete set null;
+    alter table public.bloqueios add column if not exists unidade_id uuid references public.unidades(id) on delete set null;
+  end if;
+end;
+$$;
 
 create table if not exists public.taxa_agendamento_pagamentos (
   id uuid primary key default gen_random_uuid(),
@@ -1188,7 +1546,7 @@ $$;
 revoke all on function public.consume_taxa_agendamento_credito(uuid, text) from public;
 grant execute on function public.consume_taxa_agendamento_credito(uuid, text) to service_role;
 
-create or replace function public.public_get_usuario_publico(p_slug text)
+create or replace function public.public_get_usuario_publico(p_slug text, p_unidade_slug text default null)
 returns table (
   id uuid,
   nome_negocio text,
@@ -1208,38 +1566,88 @@ returns table (
   public_primary_color text,
   public_background_color text,
   public_use_background_image boolean,
-  public_background_image_url text
+  public_background_image_url text,
+  unidade_id uuid,
+  unidade_nome text,
+  unidade_slug text
 )
 language plpgsql
 security definer
 set search_path = public
 as $$
 begin
-  return query
-  select
-    u.id::uuid,
-    u.nome_negocio::text,
-    u.logo_url::text,
-    u.endereco::text,
-    u.telefone::text,
-    u.instagram_url::text,
-    u.horario_inicio::text,
-    u.horario_fim::text,
-    u.dias_trabalho::int[],
-    u.intervalo_inicio::text,
-    u.intervalo_fim::text,
-    u.ativo::boolean,
-    u.tipo_conta::text,
-    u.plano::text,
-    u.tipo_negocio::text,
-    u.public_primary_color::text,
-    u.public_background_color::text,
-    u.public_use_background_image::boolean,
-    u.public_background_image_url::text
-  from public.usuarios u
-  where u.slug = p_slug
-    and u.ativo = true
-  limit 1;
+  if to_regclass('public.unidades') is null then
+    return query
+    select
+      u.id::uuid,
+      u.nome_negocio::text,
+      u.logo_url::text,
+      u.endereco::text,
+      u.telefone::text,
+      u.instagram_url::text,
+      u.horario_inicio::text,
+      u.horario_fim::text,
+      u.dias_trabalho::int[],
+      u.intervalo_inicio::text,
+      u.intervalo_fim::text,
+      u.ativo::boolean,
+      u.tipo_conta::text,
+      u.plano::text,
+      u.tipo_negocio::text,
+      u.public_primary_color::text,
+      u.public_background_color::text,
+      u.public_use_background_image::boolean,
+      u.public_background_image_url::text,
+      null::uuid as unidade_id,
+      null::text as unidade_nome,
+      null::text as unidade_slug
+    from public.usuarios u
+    where u.slug = p_slug
+      and u.ativo = true
+    limit 1;
+  else
+    return query
+    with base as (
+      select u.*
+      from public.usuarios u
+      where u.slug = p_slug
+        and u.ativo = true
+      limit 1
+    ), uni as (
+      select un.*
+      from public.unidades un
+      join base b on b.id = un.usuario_id
+      where nullif(trim(coalesce(p_unidade_slug, '')), '') is not null
+        and un.slug = p_unidade_slug
+        and un.ativo = true
+      limit 1
+    )
+    select
+      b.id::uuid,
+      (case when u.id is not null then u.nome::text else b.nome_negocio::text end) as nome_negocio,
+      b.logo_url::text,
+      coalesce(u.endereco::text, b.endereco::text) as endereco,
+      coalesce(u.telefone::text, b.telefone::text) as telefone,
+      b.instagram_url::text,
+      coalesce(u.horario_inicio::text, b.horario_inicio::text) as horario_inicio,
+      coalesce(u.horario_fim::text, b.horario_fim::text) as horario_fim,
+      coalesce(u.dias_trabalho::int[], b.dias_trabalho::int[]) as dias_trabalho,
+      coalesce(u.intervalo_inicio::text, b.intervalo_inicio::text) as intervalo_inicio,
+      coalesce(u.intervalo_fim::text, b.intervalo_fim::text) as intervalo_fim,
+      b.ativo::boolean,
+      b.tipo_conta::text,
+      b.plano::text,
+      b.tipo_negocio::text,
+      coalesce(u.public_primary_color::text, b.public_primary_color::text) as public_primary_color,
+      coalesce(u.public_background_color::text, b.public_background_color::text) as public_background_color,
+      coalesce(u.public_use_background_image::boolean, b.public_use_background_image::boolean) as public_use_background_image,
+      coalesce(u.public_background_image_url::text, b.public_background_image_url::text) as public_background_image_url,
+      u.id::uuid as unidade_id,
+      u.nome::text as unidade_nome,
+      u.slug::text as unidade_slug
+    from base b
+    left join uni u on true;
+  end if;
 end;
 $$;
 
@@ -1249,6 +1657,11 @@ returns table (
   nome text,
   descricao text,
   duracao_minutos int,
+  buffer_antes_min int,
+  buffer_depois_min int,
+  antecedencia_minutos int,
+  janela_max_dias int,
+  dia_inteiro boolean,
   preco numeric,
   taxa_agendamento numeric,
   cor text,
@@ -1260,7 +1673,20 @@ set search_path = public
 as $$
 begin
   return query
-  select s.id::uuid, s.nome::text, s.descricao::text, s.duracao_minutos::int, s.preco::numeric, s.taxa_agendamento::numeric, s.cor::text, s.foto_url::text
+  select
+    s.id::uuid,
+    s.nome::text,
+    s.descricao::text,
+    s.duracao_minutos::int,
+    coalesce(s.buffer_antes_min, 0)::int,
+    coalesce(s.buffer_depois_min, 0)::int,
+    coalesce(s.antecedencia_minutos, 120)::int,
+    coalesce(s.janela_max_dias, 15)::int,
+    coalesce(s.dia_inteiro, false)::boolean,
+    s.preco::numeric,
+    s.taxa_agendamento::numeric,
+    s.cor::text,
+    s.foto_url::text
   from public.servicos s
   where s.usuario_id = p_usuario_id
     and s.ativo = true
@@ -1268,7 +1694,7 @@ begin
 end;
 $$;
 
-create or replace function public.public_get_funcionarios_publicos(p_usuario_master_id uuid)
+create or replace function public.public_get_funcionarios_publicos(p_usuario_master_id uuid, p_unidade_id uuid default null)
 returns table (
   id uuid,
   nome_completo text,
@@ -1288,17 +1714,21 @@ begin
   from public.funcionarios f
   where f.usuario_master_id = p_usuario_master_id
     and f.ativo = true
+    and lower(trim(f.permissao)) = 'funcionario'
+    and (p_unidade_id is null or f.unidade_id = p_unidade_id)
   order by f.criado_em asc;
 end;
 $$;
 
 drop function if exists public.public_get_slots_publicos(uuid, date, uuid, uuid);
+drop function if exists public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid);
 
 create or replace function public.public_get_slots_publicos(
   p_usuario_id uuid,
   p_data date,
   p_servico_id uuid,
-  p_funcionario_id uuid
+  p_funcionario_id uuid,
+  p_unidade_id uuid default null
 )
 returns table (hora_inicio text)
 language plpgsql
@@ -1315,6 +1745,7 @@ declare
   v_staff_intervalo_inicio time;
   v_staff_intervalo_fim time;
   v_duracao int;
+  v_dia_inteiro boolean;
   v_weekday int;
   v_sched_inicio time;
   v_sched_fim time;
@@ -1327,11 +1758,15 @@ declare
   v_start_min int;
   v_end_min int;
   v_now_min int;
-  v_min_lead_min int := 120;
   v_step_min int := 30;
-  v_max_days int := 15;
+  v_min_lead_min int;
+  v_max_days int;
+  v_buffer_antes int;
+  v_buffer_depois int;
   v_tz text;
   v_today date;
+  v_cap int;
+  v_diaria_count int;
 begin
   if p_usuario_id is null or p_data is null or p_servico_id is null then
     raise exception 'invalid_payload';
@@ -1355,12 +1790,14 @@ begin
     raise exception 'data_passada';
   end if;
 
-  if p_data > (v_today + v_max_days) then
-    raise exception 'data_muito_futura';
-  end if;
-
-  select s.duracao_minutos
-  into v_duracao
+  select
+    s.duracao_minutos,
+    coalesce(s.buffer_antes_min, 0),
+    coalesce(s.buffer_depois_min, 0),
+    coalesce(s.antecedencia_minutos, 120),
+    coalesce(s.janela_max_dias, 15),
+    coalesce(s.dia_inteiro, false)::boolean
+  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
   from public.servicos s
   where s.id = p_servico_id
     and s.usuario_id = v_uid
@@ -1368,6 +1805,10 @@ begin
 
   if v_duracao is null or v_duracao <= 0 then
     raise exception 'servico_invalido';
+  end if;
+
+  if p_data > (v_today + v_max_days) then
+    raise exception 'data_muito_futura';
   end if;
 
   if p_funcionario_id is not null then
@@ -1406,13 +1847,12 @@ begin
 
   v_sched_inicio_min := floor(extract(epoch from v_sched_inicio) / 60)::int;
   v_sched_fim_min := floor(extract(epoch from v_sched_fim) / 60)::int;
-  v_end_min := v_sched_fim_min - v_duracao;
+  v_start_min := v_sched_inicio_min + v_buffer_antes;
+  v_end_min := v_sched_fim_min - (v_duracao + v_buffer_depois);
 
-  if v_end_min < v_sched_inicio_min then
+  if v_end_min < v_start_min then
     return;
   end if;
-
-  v_start_min := v_sched_inicio_min;
 
   if v_iv_inicio is not null and v_iv_fim is not null then
     v_iv_inicio_min := floor(extract(epoch from v_iv_inicio) / 60)::int;
@@ -1427,36 +1867,136 @@ begin
     v_start_min := greatest(v_start_min, v_now_min + v_min_lead_min);
   end if;
 
+  if v_dia_inteiro then
+    if v_sched_fim_min <= v_sched_inicio_min then
+      return;
+    end if;
+
+    if p_data = v_today then
+      if v_sched_inicio_min < (v_now_min + v_min_lead_min) then
+        return;
+      end if;
+    end if;
+
+    v_cap := 1;
+    if p_funcionario_id is not null then
+      select coalesce(f.capacidade_dia_inteiro, 1)::int
+      into v_cap
+      from public.funcionarios f
+      where f.id = p_funcionario_id
+        and f.usuario_master_id = v_uid
+        and f.ativo = true;
+    end if;
+    if v_cap < 1 then v_cap := 1; end if;
+    if v_cap > 2 then v_cap := 2; end if;
+
+    if exists (
+      select 1
+      from public.bloqueios b
+      where b.usuario_id = v_uid
+        and b.data = p_data
+        and (p_funcionario_id is null or b.funcionario_id is null or b.funcionario_id = p_funcionario_id)
+        and floor(extract(epoch from b.hora_inicio::time) / 60)::int < v_sched_fim_min
+        and v_sched_inicio_min < floor(extract(epoch from b.hora_fim::time) / 60)::int
+      limit 1
+    ) then
+      return;
+    end if;
+
+    if exists (
+      select 1
+      from public.agendamentos a
+      join public.servicos s2 on s2.id = a.servico_id and s2.usuario_id = a.usuario_id
+      where a.usuario_id = v_uid
+        and a.data = p_data
+        and a.status <> 'cancelado'
+        and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+        and coalesce(s2.dia_inteiro, false) = false
+      limit 1
+    ) then
+      return;
+    end if;
+
+    select count(*)::int
+    into v_diaria_count
+    from public.agendamentos a
+    join public.servicos s2 on s2.id = a.servico_id and s2.usuario_id = a.usuario_id
+    where a.usuario_id = v_uid
+      and a.data = p_data
+      and a.status <> 'cancelado'
+      and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+      and coalesce(s2.dia_inteiro, false) = true;
+
+    if coalesce(v_diaria_count, 0) >= v_cap then
+      return;
+    end if;
+
+    return query
+    select to_char(v_sched_inicio, 'HH24:MI') as hora_inicio;
+    return;
+  end if;
+
   v_start_min := ((v_start_min + v_step_min - 1) / v_step_min) * v_step_min;
 
-  return query
-  with candidates as (
-    select gs as start_min
-    from generate_series(v_start_min, v_end_min, v_step_min) gs
-  ),
-  without_interval as (
-    select c.start_min
-    from candidates c
-    where not (
-      v_iv_inicio_min is not null
-      and v_iv_fim_min is not null
-      and c.start_min < v_iv_fim_min
-      and v_iv_inicio_min < (c.start_min + v_duracao)
+  if p_unidade_id is not null and to_regprocedure('public.public_get_ocupacoes(uuid,date,uuid,uuid)') is not null then
+    return query
+    with candidates as (
+      select gs as start_min
+      from generate_series(v_start_min, v_end_min, v_step_min) gs
+    ),
+    without_interval as (
+      select c.start_min
+      from candidates c
+      where not (
+        v_iv_inicio_min is not null
+        and v_iv_fim_min is not null
+        and (c.start_min - v_buffer_antes) < v_iv_fim_min
+        and v_iv_inicio_min < (c.start_min + v_duracao + v_buffer_depois)
+      )
+    ),
+    free as (
+      select w.start_min
+      from without_interval w
+      where not exists (
+        select 1
+        from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id, p_unidade_id) r
+        where (w.start_min - v_buffer_antes) < r.end_min and r.start_min < (w.start_min + v_duracao + v_buffer_depois)
+        limit 1
+      )
     )
-  ),
-  free as (
-    select w.start_min
-    from without_interval w
-    where not exists (
-      select 1
-      from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id) r
-      where w.start_min < r.end_min and r.start_min < (w.start_min + v_duracao)
-      limit 1
+    select to_char((time '00:00' + (free.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio
+    from free
+    order by free.start_min asc;
+  else
+    return query
+    with candidates as (
+      select gs as start_min
+      from generate_series(v_start_min, v_end_min, v_step_min) gs
+    ),
+    without_interval as (
+      select c.start_min
+      from candidates c
+      where not (
+        v_iv_inicio_min is not null
+        and v_iv_fim_min is not null
+        and (c.start_min - v_buffer_antes) < v_iv_fim_min
+        and v_iv_inicio_min < (c.start_min + v_duracao + v_buffer_depois)
+      )
+    ),
+    free as (
+      select w.start_min
+      from without_interval w
+      where not exists (
+        select 1
+        from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id) r
+        where (w.start_min - v_buffer_antes) < r.end_min and r.start_min < (w.start_min + v_duracao + v_buffer_depois)
+        limit 1
+      )
     )
-  )
-  select to_char((time '00:00' + (free.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio
-  from free
-  order by free.start_min asc;
+    select to_char((time '00:00' + (free.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio
+    from free
+    order by free.start_min asc;
+  end if;
 end;
 $$;
 
@@ -1468,6 +2008,8 @@ create or replace function public.public_create_agendamento_publico(
   p_cliente_nome text,
   p_cliente_telefone text,
   p_funcionario_id uuid,
+  p_unidade_id uuid default null,
+  p_extras jsonb default null,
   p_status text default 'confirmado'
 )
 returns uuid
@@ -1485,6 +2027,7 @@ declare
   v_staff_intervalo_inicio time;
   v_staff_intervalo_fim time;
   v_duracao int;
+  v_dia_inteiro boolean;
   v_start_min int;
   v_end_min int;
   v_weekday int;
@@ -1495,8 +2038,10 @@ declare
   v_horario_fim text;
   v_created_id uuid;
   v_now_min int;
-  v_min_lead_min int := 120;
-  v_max_days int := 15;
+  v_min_lead_min int;
+  v_max_days int;
+  v_buffer_antes int;
+  v_buffer_depois int;
   v_tz text;
   v_today date;
   v_limite_mes int;
@@ -1504,6 +2049,8 @@ declare
   v_month_end date;
   v_month_count int;
   v_status text;
+  v_cap int;
+  v_diaria_count int;
 begin
   if p_usuario_id is null or p_data is null or nullif(p_hora_inicio, '') is null or p_servico_id is null then
     raise exception 'invalid_payload';
@@ -1534,10 +2081,6 @@ begin
     raise exception 'data_passada';
   end if;
 
-  if p_data > (v_today + v_max_days) then
-    raise exception 'data_muito_futura';
-  end if;
-
   v_limite_mes := v_base.limite_agendamentos_mes;
   if v_limite_mes is not null then
     if v_limite_mes <= 0 then
@@ -1560,8 +2103,14 @@ begin
     end if;
   end if;
 
-  select s.duracao_minutos
-  into v_duracao
+  select
+    s.duracao_minutos,
+    coalesce(s.buffer_antes_min, 0),
+    coalesce(s.buffer_depois_min, 0),
+    coalesce(s.antecedencia_minutos, 120),
+    coalesce(s.janela_max_dias, 15),
+    coalesce(s.dia_inteiro, false)::boolean
+  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
   from public.servicos s
   where s.id = p_servico_id
     and s.usuario_id = v_uid
@@ -1569,6 +2118,10 @@ begin
 
   if v_duracao is null or v_duracao <= 0 then
     raise exception 'servico_invalido';
+  end if;
+
+  if p_data > (v_today + v_max_days) then
+    raise exception 'data_muito_futura';
   end if;
 
   if p_funcionario_id is not null then
@@ -1605,46 +2158,118 @@ begin
     end if;
   end if;
 
-  v_start_min := floor(extract(epoch from (p_hora_inicio::time)) / 60)::int;
-  v_end_min := v_start_min + v_duracao;
-  v_horario_fim := to_char(((p_hora_inicio::time) + (v_duracao::text || ' minutes')::interval)::time, 'HH24:MI');
+  if v_dia_inteiro then
+    v_start_min := floor(extract(epoch from v_sched_inicio) / 60)::int;
+    v_end_min := floor(extract(epoch from v_sched_fim) / 60)::int;
+    v_horario_fim := to_char(v_sched_fim, 'HH24:MI');
 
-  if p_data = v_today then
-    v_now_min := floor(extract(epoch from ((now() at time zone v_tz)::time)) / 60)::int;
-    if v_start_min < v_now_min + v_min_lead_min then
-      raise exception 'antecedencia_minima';
+    if v_end_min <= v_start_min then
+      raise exception 'fora_do_horario';
     end if;
-  end if;
 
-  if v_start_min < floor(extract(epoch from v_sched_inicio) / 60)::int then
-    raise exception 'fora_do_horario';
-  end if;
-  if v_end_min > floor(extract(epoch from v_sched_fim) / 60)::int then
-    raise exception 'fora_do_horario';
-  end if;
-
-  if v_iv_inicio is not null and v_iv_fim is not null then
-    if v_start_min < floor(extract(epoch from v_iv_fim) / 60)::int
-      and floor(extract(epoch from v_iv_inicio) / 60)::int < v_end_min then
-      raise exception 'intervalo';
+    if p_data = v_today then
+      v_now_min := floor(extract(epoch from ((now() at time zone v_tz)::time)) / 60)::int;
+      if v_start_min < v_now_min + v_min_lead_min then
+        raise exception 'antecedencia_minima';
+      end if;
     end if;
-  end if;
 
-  if exists (
-    select 1
-    from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id) r
-    where v_start_min < r.end_min and r.start_min < v_end_min
-    limit 1
-  ) then
-    raise exception 'ocupado';
+    v_cap := 1;
+    if p_funcionario_id is not null then
+      select coalesce(f.capacidade_dia_inteiro, 1)::int
+      into v_cap
+      from public.funcionarios f
+      where f.id = p_funcionario_id
+        and f.usuario_master_id = v_uid
+        and f.ativo = true;
+    end if;
+    if v_cap < 1 then v_cap := 1; end if;
+    if v_cap > 2 then v_cap := 2; end if;
+
+    if exists (
+      select 1
+      from public.bloqueios b
+      where b.usuario_id = v_uid
+        and b.data = p_data
+        and (p_funcionario_id is null or b.funcionario_id is null or b.funcionario_id = p_funcionario_id)
+        and floor(extract(epoch from b.hora_inicio::time) / 60)::int < v_end_min
+        and v_start_min < floor(extract(epoch from b.hora_fim::time) / 60)::int
+      limit 1
+    ) then
+      raise exception 'ocupado';
+    end if;
+
+    if exists (
+      select 1
+      from public.agendamentos a
+      join public.servicos s2 on s2.id = a.servico_id and s2.usuario_id = a.usuario_id
+      where a.usuario_id = v_uid
+        and a.data = p_data
+        and a.status <> 'cancelado'
+        and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+        and coalesce(s2.dia_inteiro, false) = false
+      limit 1
+    ) then
+      raise exception 'ocupado';
+    end if;
+
+    select count(*)::int
+    into v_diaria_count
+    from public.agendamentos a
+    join public.servicos s2 on s2.id = a.servico_id and s2.usuario_id = a.usuario_id
+    where a.usuario_id = v_uid
+      and a.data = p_data
+      and a.status <> 'cancelado'
+      and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+      and coalesce(s2.dia_inteiro, false) = true;
+
+    if coalesce(v_diaria_count, 0) >= v_cap then
+      raise exception 'ocupado';
+    end if;
+  else
+    v_start_min := floor(extract(epoch from (p_hora_inicio::time)) / 60)::int;
+    v_end_min := v_start_min + v_duracao;
+    v_horario_fim := to_char(((p_hora_inicio::time) + (v_duracao::text || ' minutes')::interval)::time, 'HH24:MI');
+
+    if p_data = v_today then
+      v_now_min := floor(extract(epoch from ((now() at time zone v_tz)::time)) / 60)::int;
+      if v_start_min < v_now_min + v_min_lead_min then
+        raise exception 'antecedencia_minima';
+      end if;
+    end if;
+
+    if (v_start_min - v_buffer_antes) < floor(extract(epoch from v_sched_inicio) / 60)::int then
+      raise exception 'fora_do_horario';
+    end if;
+    if (v_end_min + v_buffer_depois) > floor(extract(epoch from v_sched_fim) / 60)::int then
+      raise exception 'fora_do_horario';
+    end if;
+
+    if v_iv_inicio is not null and v_iv_fim is not null then
+      if (v_start_min - v_buffer_antes) < floor(extract(epoch from v_iv_fim) / 60)::int
+        and floor(extract(epoch from v_iv_inicio) / 60)::int < (v_end_min + v_buffer_depois) then
+        raise exception 'intervalo';
+      end if;
+    end if;
+
+    if exists (
+      select 1
+      from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id) r
+      where (v_start_min - v_buffer_antes) < r.end_min and r.start_min < (v_end_min + v_buffer_depois)
+      limit 1
+    ) then
+      raise exception 'ocupado';
+    end if;
   end if;
 
   insert into public.agendamentos (
     usuario_id,
     funcionario_id,
+    unidade_id,
     servico_id,
     cliente_nome,
     cliente_telefone,
+    extras,
     data,
     hora_inicio,
     hora_fim,
@@ -1653,12 +2278,14 @@ begin
   values (
     v_uid,
     p_funcionario_id,
+    p_unidade_id,
     p_servico_id,
     nullif(p_cliente_nome, ''),
     nullif(p_cliente_telefone, ''),
+    p_extras,
     p_data,
-    p_hora_inicio::time,
-    v_horario_fim::time,
+    case when v_dia_inteiro then v_sched_inicio else p_hora_inicio::time end,
+    case when v_dia_inteiro then v_sched_fim else v_horario_fim::time end,
     v_status
   )
   returning id into v_created_id;
@@ -1667,23 +2294,25 @@ begin
 end;
 $$;
 
-revoke all on function public.public_get_usuario_publico(text) from public;
+revoke all on function public.public_get_usuario_publico(text, text) from public;
 revoke all on function public.public_get_servicos_publicos(uuid) from public;
-revoke all on function public.public_get_funcionarios_publicos(uuid) from public;
-revoke all on function public.public_get_slots_publicos(uuid, date, uuid, uuid) from public;
-revoke all on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, text) from public;
+revoke all on function public.public_get_funcionarios_publicos(uuid, uuid) from public;
+revoke all on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) from public;
+revoke all on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) from public;
 
-grant execute on function public.public_get_usuario_publico(text) to anon;
+grant execute on function public.public_get_usuario_publico(text, text) to anon;
 grant execute on function public.public_get_servicos_publicos(uuid) to anon;
-grant execute on function public.public_get_funcionarios_publicos(uuid) to anon;
-grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid) to anon;
-grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, text) to anon;
+grant execute on function public.public_get_funcionarios_publicos(uuid, uuid) to anon;
+grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) to anon;
+grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) to anon;
 
-grant execute on function public.public_get_usuario_publico(text) to authenticated;
+grant execute on function public.public_get_usuario_publico(text, text) to authenticated;
 grant execute on function public.public_get_servicos_publicos(uuid) to authenticated;
-grant execute on function public.public_get_funcionarios_publicos(uuid) to authenticated;
-grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid) to authenticated;
-grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, text) to authenticated;`
+grant execute on function public.public_get_funcionarios_publicos(uuid, uuid) to authenticated;
+grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) to authenticated;
+grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) to authenticated;
+
+notify pgrst, 'reload schema';`
   }, [])
 
   const sqlStorageLogos = useMemo(() => {
@@ -1947,6 +2576,10 @@ returns table (
   nome text,
   descricao text,
   duracao_minutos int,
+  buffer_antes_min int,
+  buffer_depois_min int,
+  antecedencia_minutos int,
+  janela_max_dias int,
   preco numeric,
   taxa_agendamento numeric,
   cor text,
@@ -1958,7 +2591,19 @@ set search_path = public
 as $$
 begin
   return query
-  select s.id::uuid, s.nome::text, s.descricao::text, s.duracao_minutos::int, s.preco::numeric, s.taxa_agendamento::numeric, s.cor::text, s.foto_url::text
+  select
+    s.id::uuid,
+    s.nome::text,
+    s.descricao::text,
+    s.duracao_minutos::int,
+    coalesce(s.buffer_antes_min, 0)::int,
+    coalesce(s.buffer_depois_min, 0)::int,
+    coalesce(s.antecedencia_minutos, 120)::int,
+    coalesce(s.janela_max_dias, 15)::int,
+    s.preco::numeric,
+    s.taxa_agendamento::numeric,
+    s.cor::text,
+    s.foto_url::text
   from public.servicos s
   where s.usuario_id = p_usuario_id
     and s.ativo = true
@@ -2138,6 +2783,7 @@ begin
   from public.funcionarios f
   where f.usuario_master_id = p_usuario_master_id
     and f.ativo = true
+    and lower(trim(f.permissao)) = 'funcionario'
     and (p_unidade_id is null or f.unidade_id = p_unidade_id)
   order by f.criado_em asc;
 end;
@@ -2155,9 +2801,10 @@ as $$
 begin
   return query
   select
-    floor(extract(epoch from a.hora_inicio::time) / 60)::int as start_min,
-    floor(extract(epoch from coalesce(a.hora_fim, a.hora_inicio)::time) / 60)::int as end_min
+    (floor(extract(epoch from a.hora_inicio::time) / 60)::int - coalesce(s.buffer_antes_min, 0)::int) as start_min,
+    (floor(extract(epoch from coalesce(a.hora_fim, a.hora_inicio)::time) / 60)::int + coalesce(s.buffer_depois_min, 0)::int) as end_min
   from public.agendamentos a
+  left join public.servicos s on s.id = a.servico_id and s.usuario_id = a.usuario_id
   where a.usuario_id = p_usuario_id
     and a.data = p_data
     and a.status <> 'cancelado'
@@ -2202,6 +2849,7 @@ declare
   v_staff_intervalo_inicio time;
   v_staff_intervalo_fim time;
   v_duracao int;
+  v_dia_inteiro boolean;
   v_weekday int;
   v_sched_inicio time;
   v_sched_fim time;
@@ -2214,12 +2862,16 @@ declare
   v_start_min int;
   v_end_min int;
   v_now_min int;
-  v_min_lead_min int := 120;
   v_step_min int := 30;
-  v_max_days int := 15;
+  v_min_lead_min int;
+  v_max_days int;
+  v_buffer_antes int;
+  v_buffer_depois int;
   v_tz text;
   v_today date;
   v_unidade_ok boolean;
+  v_cap int;
+  v_diaria_count int;
 begin
   if p_usuario_id is null or p_data is null or p_servico_id is null then
     raise exception 'invalid_payload';
@@ -2265,12 +2917,14 @@ begin
     raise exception 'data_passada';
   end if;
 
-  if p_data > (v_today + v_max_days) then
-    raise exception 'data_muito_futura';
-  end if;
-
-  select s.duracao_minutos
-  into v_duracao
+  select
+    s.duracao_minutos,
+    coalesce(s.buffer_antes_min, 0)::int,
+    coalesce(s.buffer_depois_min, 0)::int,
+    coalesce(s.antecedencia_minutos, 120)::int,
+    coalesce(s.janela_max_dias, 15)::int,
+    coalesce(s.dia_inteiro, false)::boolean
+  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
   from public.servicos s
   where s.id = p_servico_id
     and s.usuario_id = v_uid
@@ -2278,6 +2932,10 @@ begin
 
   if v_duracao is null or v_duracao <= 0 then
     raise exception 'servico_invalido';
+  end if;
+
+  if p_data > (v_today + v_max_days) then
+    raise exception 'data_muito_futura';
   end if;
 
   if p_funcionario_id is not null then
@@ -2323,38 +2981,116 @@ begin
   v_iv_inicio_min := case when v_iv_inicio is null then null else floor(extract(epoch from v_iv_inicio) / 60)::int end;
   v_iv_fim_min := case when v_iv_fim is null then null else floor(extract(epoch from v_iv_fim) / 60)::int end;
 
-  if p_data = v_today then
-    v_now_min := floor(extract(epoch from (now() at time zone v_tz)::time) / 60)::int;
-  else
-    v_now_min := -999999;
+  if v_iv_inicio_min is not null and v_iv_fim_min is not null and v_iv_inicio_min >= v_iv_fim_min then
+    v_iv_inicio_min := null;
+    v_iv_fim_min := null;
   end if;
 
+  v_start_min := v_sched_inicio_min + v_buffer_antes;
+  v_end_min := v_sched_fim_min - v_duracao - v_buffer_depois;
+
+  if v_dia_inteiro then
+    if v_sched_fim_min <= v_sched_inicio_min then
+      return;
+    end if;
+
+    if p_data = v_today then
+      v_now_min := floor(extract(epoch from (now() at time zone v_tz)::time) / 60)::int;
+      if v_sched_inicio_min < (v_now_min + v_min_lead_min) then
+        return;
+      end if;
+    end if;
+
+    v_cap := 1;
+    if p_funcionario_id is not null then
+      select coalesce(f.capacidade_dia_inteiro, 1)::int
+      into v_cap
+      from public.funcionarios f
+      where f.id = p_funcionario_id
+        and f.usuario_master_id = v_uid
+        and f.ativo = true;
+    end if;
+    if v_cap < 1 then v_cap := 1; end if;
+    if v_cap > 2 then v_cap := 2; end if;
+
+    if exists (
+      select 1
+      from public.bloqueios b
+      where b.usuario_id = v_uid
+        and b.data = p_data
+        and (p_unidade_id is null and b.unidade_id is null or p_unidade_id is not null and b.unidade_id = p_unidade_id)
+        and (p_funcionario_id is null or b.funcionario_id is null or b.funcionario_id = p_funcionario_id)
+        and floor(extract(epoch from b.hora_inicio::time) / 60)::int < v_sched_fim_min
+        and v_sched_inicio_min < floor(extract(epoch from b.hora_fim::time) / 60)::int
+      limit 1
+    ) then
+      return;
+    end if;
+
+    if exists (
+      select 1
+      from public.agendamentos a
+      join public.servicos s2 on s2.id = a.servico_id and s2.usuario_id = a.usuario_id
+      where a.usuario_id = v_uid
+        and a.data = p_data
+        and a.status <> 'cancelado'
+        and (p_unidade_id is null and a.unidade_id is null or p_unidade_id is not null and a.unidade_id = p_unidade_id)
+        and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+        and coalesce(s2.dia_inteiro, false) = false
+      limit 1
+    ) then
+      return;
+    end if;
+
+    select count(*)::int
+    into v_diaria_count
+    from public.agendamentos a
+    join public.servicos s2 on s2.id = a.servico_id and s2.usuario_id = a.usuario_id
+    where a.usuario_id = v_uid
+      and a.data = p_data
+      and a.status <> 'cancelado'
+      and (p_unidade_id is null and a.unidade_id is null or p_unidade_id is not null and a.unidade_id = p_unidade_id)
+      and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+      and coalesce(s2.dia_inteiro, false) = true;
+
+    if coalesce(v_diaria_count, 0) >= v_cap then
+      return;
+    end if;
+
+    return query
+    select to_char(v_sched_inicio, 'HH24:MI') as hora_inicio;
+    return;
+  end if;
+
+  if p_data = v_today then
+    v_now_min := floor(extract(epoch from (now() at time zone v_tz)::time) / 60)::int;
+    v_start_min := greatest(v_start_min, v_now_min + v_min_lead_min);
+  end if;
+
+  v_start_min := ((v_start_min + v_step_min - 1) / v_step_min) * v_step_min;
+
   return query
-  with windows as (
-    select v_sched_inicio_min as start_min, v_sched_fim_min as end_min
-    union all
-    select v_iv_fim_min as start_min, v_sched_fim_min as end_min
-    where v_iv_inicio_min is not null and v_iv_fim_min is not null and v_iv_inicio_min < v_iv_fim_min
+  with candidates as (
+    select gs as start_min
+    from generate_series(v_start_min, v_end_min, v_step_min) gs
   ),
-  expanded as (
-    select generate_series(w.start_min, w.end_min - v_duracao, v_step_min) as start_min
-    from windows w
-    where w.start_min is not null and w.end_min is not null and w.start_min < w.end_min
-  ),
-  filtered as (
-    select e.start_min
-    from expanded e
-    where (e.start_min + v_duracao) <= v_sched_fim_min
-      and (v_iv_inicio_min is null or v_iv_fim_min is null or e.start_min + v_duracao <= v_iv_inicio_min or e.start_min >= v_iv_fim_min)
-      and e.start_min >= (v_now_min + v_min_lead_min)
+  without_interval as (
+    select c.start_min
+    from candidates c
+    where not (
+      v_iv_inicio_min is not null
+      and v_iv_fim_min is not null
+      and (c.start_min - v_buffer_antes) < v_iv_fim_min
+      and v_iv_inicio_min < (c.start_min + v_duracao + v_buffer_depois)
+    )
   ),
   free as (
-    select f.start_min
-    from filtered f
+    select w.start_min
+    from without_interval w
     where not exists (
       select 1
       from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id, p_unidade_id) r
-      where f.start_min < r.end_min and r.start_min < (f.start_min + v_duracao)
+      where (w.start_min - v_buffer_antes) < r.end_min and r.start_min < (w.start_min + v_duracao + v_buffer_depois)
       limit 1
     )
   )
@@ -2376,6 +3112,7 @@ create or replace function public.public_create_agendamento_publico(
   p_cliente_telefone text,
   p_funcionario_id uuid,
   p_unidade_id uuid default null,
+  p_extras jsonb default null,
   p_status text default 'confirmado'
 )
 returns uuid
@@ -2393,6 +3130,7 @@ declare
   v_staff_intervalo_inicio time;
   v_staff_intervalo_fim time;
   v_duracao int;
+  v_dia_inteiro boolean;
   v_start_min int;
   v_end_min int;
   v_weekday int;
@@ -2403,8 +3141,10 @@ declare
   v_horario_fim text;
   v_created_id uuid;
   v_now_min int;
-  v_min_lead_min int := 120;
-  v_max_days int := 15;
+  v_min_lead_min int;
+  v_max_days int;
+  v_buffer_antes int;
+  v_buffer_depois int;
   v_tz text;
   v_today date;
   v_limite_mes int;
@@ -2413,6 +3153,8 @@ declare
   v_month_count int;
   v_unidade_ok boolean;
   v_status text;
+  v_cap int;
+  v_diaria_count int;
 begin
   if p_usuario_id is null or p_data is null or nullif(p_hora_inicio, '') is null or p_servico_id is null then
     raise exception 'invalid_payload';
@@ -2464,14 +3206,16 @@ begin
     raise exception 'data_passada';
   end if;
 
-  if p_data > (v_today + v_max_days) then
-    raise exception 'data_muito_futura';
-  end if;
-
   v_weekday := extract(dow from p_data)::int;
 
-  select s.duracao_minutos
-  into v_duracao
+  select
+    s.duracao_minutos,
+    coalesce(s.buffer_antes_min, 0)::int,
+    coalesce(s.buffer_depois_min, 0)::int,
+    coalesce(s.antecedencia_minutos, 120)::int,
+    coalesce(s.janela_max_dias, 15)::int,
+    coalesce(s.dia_inteiro, false)::boolean
+  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
   from public.servicos s
   where s.id = p_servico_id
     and s.usuario_id = v_uid
@@ -2479,6 +3223,10 @@ begin
 
   if v_duracao is null or v_duracao <= 0 then
     raise exception 'servico_invalido';
+  end if;
+
+  if p_data > (v_today + v_max_days) then
+    raise exception 'data_muito_futura';
   end if;
 
   if p_funcionario_id is not null then
@@ -2518,34 +3266,107 @@ begin
     raise exception 'horarios_nao_configurados';
   end if;
 
-  v_start_min := floor(extract(epoch from p_hora_inicio::time) / 60)::int;
-  v_end_min := v_start_min + v_duracao;
-  v_horario_fim := to_char((time '00:00' + (v_end_min::text || ' minutes')::interval)::time, 'HH24:MI');
+  if v_dia_inteiro then
+    v_start_min := floor(extract(epoch from v_sched_inicio) / 60)::int;
+    v_end_min := floor(extract(epoch from v_sched_fim) / 60)::int;
+    v_horario_fim := to_char(v_sched_fim, 'HH24:MI');
 
-  if p_data = v_today then
-    v_now_min := floor(extract(epoch from (now() at time zone v_tz)::time) / 60)::int;
-    if v_start_min < (v_now_min + v_min_lead_min) then
-      raise exception 'antecedencia_minima';
+    if v_end_min <= v_start_min then
+      raise exception 'fora_do_horario';
     end if;
-  end if;
 
-  if v_start_min < floor(extract(epoch from v_sched_inicio) / 60)::int or v_end_min > floor(extract(epoch from v_sched_fim) / 60)::int then
-    raise exception 'fora_do_horario';
-  end if;
-
-  if v_iv_inicio is not null and v_iv_fim is not null then
-    if v_start_min < floor(extract(epoch from v_iv_fim) / 60)::int and v_end_min > floor(extract(epoch from v_iv_inicio) / 60)::int then
-      raise exception 'em_intervalo';
+    if p_data = v_today then
+      v_now_min := floor(extract(epoch from (now() at time zone v_tz)::time) / 60)::int;
+      if v_start_min < (v_now_min + v_min_lead_min) then
+        raise exception 'antecedencia_minima';
+      end if;
     end if;
-  end if;
 
-  if exists (
-    select 1
-    from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id, p_unidade_id) r
-    where v_start_min < r.end_min and r.start_min < v_end_min
-    limit 1
-  ) then
-    raise exception 'ocupado';
+    v_cap := 1;
+    if p_funcionario_id is not null then
+      select coalesce(f.capacidade_dia_inteiro, 1)::int
+      into v_cap
+      from public.funcionarios f
+      where f.id = p_funcionario_id
+        and f.usuario_master_id = v_uid
+        and f.ativo = true;
+    end if;
+    if v_cap < 1 then v_cap := 1; end if;
+    if v_cap > 2 then v_cap := 2; end if;
+
+    if exists (
+      select 1
+      from public.bloqueios b
+      where b.usuario_id = v_uid
+        and b.data = p_data
+        and (p_unidade_id is null and b.unidade_id is null or p_unidade_id is not null and b.unidade_id = p_unidade_id)
+        and (p_funcionario_id is null or b.funcionario_id is null or b.funcionario_id = p_funcionario_id)
+        and floor(extract(epoch from b.hora_inicio::time) / 60)::int < v_end_min
+        and v_start_min < floor(extract(epoch from b.hora_fim::time) / 60)::int
+      limit 1
+    ) then
+      raise exception 'ocupado';
+    end if;
+
+    if exists (
+      select 1
+      from public.agendamentos a
+      join public.servicos s2 on s2.id = a.servico_id and s2.usuario_id = a.usuario_id
+      where a.usuario_id = v_uid
+        and a.data = p_data
+        and a.status <> 'cancelado'
+        and (p_unidade_id is null and a.unidade_id is null or p_unidade_id is not null and a.unidade_id = p_unidade_id)
+        and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+        and coalesce(s2.dia_inteiro, false) = false
+      limit 1
+    ) then
+      raise exception 'ocupado';
+    end if;
+
+    select count(*)::int
+    into v_diaria_count
+    from public.agendamentos a
+    join public.servicos s2 on s2.id = a.servico_id and s2.usuario_id = a.usuario_id
+    where a.usuario_id = v_uid
+      and a.data = p_data
+      and a.status <> 'cancelado'
+      and (p_unidade_id is null and a.unidade_id is null or p_unidade_id is not null and a.unidade_id = p_unidade_id)
+      and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+      and coalesce(s2.dia_inteiro, false) = true;
+
+    if coalesce(v_diaria_count, 0) >= v_cap then
+      raise exception 'ocupado';
+    end if;
+  else
+    v_start_min := floor(extract(epoch from p_hora_inicio::time) / 60)::int;
+    v_end_min := v_start_min + v_duracao;
+    v_horario_fim := to_char((time '00:00' + (v_end_min::text || ' minutes')::interval)::time, 'HH24:MI');
+
+    if p_data = v_today then
+      v_now_min := floor(extract(epoch from (now() at time zone v_tz)::time) / 60)::int;
+      if v_start_min < (v_now_min + v_min_lead_min) then
+        raise exception 'antecedencia_minima';
+      end if;
+    end if;
+
+    if (v_start_min - v_buffer_antes) < floor(extract(epoch from v_sched_inicio) / 60)::int or (v_end_min + v_buffer_depois) > floor(extract(epoch from v_sched_fim) / 60)::int then
+      raise exception 'fora_do_horario';
+    end if;
+
+    if v_iv_inicio is not null and v_iv_fim is not null then
+      if (v_start_min - v_buffer_antes) < floor(extract(epoch from v_iv_fim) / 60)::int and floor(extract(epoch from v_iv_inicio) / 60)::int < (v_end_min + v_buffer_depois) then
+        raise exception 'em_intervalo';
+      end if;
+    end if;
+
+    if exists (
+      select 1
+      from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id, p_unidade_id) r
+      where (v_start_min - v_buffer_antes) < r.end_min and r.start_min < (v_end_min + v_buffer_depois)
+      limit 1
+    ) then
+      raise exception 'ocupado';
+    end if;
   end if;
 
   v_limite_mes := v_base.limite_agendamentos_mes;
@@ -2570,6 +3391,7 @@ begin
     servico_id,
     cliente_nome,
     cliente_telefone,
+    extras,
     data,
     hora_inicio,
     hora_fim,
@@ -2582,9 +3404,10 @@ begin
     p_servico_id,
     nullif(p_cliente_nome, ''),
     nullif(p_cliente_telefone, ''),
+    p_extras,
     p_data,
-    p_hora_inicio::time,
-    v_horario_fim::time,
+    case when v_dia_inteiro then v_sched_inicio else p_hora_inicio::time end,
+    case when v_dia_inteiro then v_sched_fim else v_horario_fim::time end,
     v_status
   )
   returning id into v_created_id;
@@ -2597,19 +3420,19 @@ revoke all on function public.public_get_usuario_publico(text, text) from public
 revoke all on function public.public_get_funcionarios_publicos(uuid, uuid) from public;
 revoke all on function public.public_get_ocupacoes(uuid, date, uuid, uuid) from public;
 revoke all on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) from public;
-revoke all on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, text) from public;
+revoke all on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) from public;
 
 grant execute on function public.public_get_usuario_publico(text, text) to anon;
 grant execute on function public.public_get_funcionarios_publicos(uuid, uuid) to anon;
 grant execute on function public.public_get_ocupacoes(uuid, date, uuid, uuid) to anon;
 grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) to anon;
-grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, text) to anon;
+grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) to anon;
 
 grant execute on function public.public_get_usuario_publico(text, text) to authenticated;
 grant execute on function public.public_get_funcionarios_publicos(uuid, uuid) to authenticated;
 grant execute on function public.public_get_ocupacoes(uuid, date, uuid, uuid) to authenticated;
 grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) to authenticated;
-grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, text) to authenticated;`
+grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) to authenticated;`
   }, [])
 
   const sqlWhatsappAutomacao = useMemo(() => {
@@ -2830,88 +3653,28 @@ $$;`
   }, [])
 
   const sqlFuncionarioHorarios = useMemo(() => {
-    return `create or replace function public.funcionario_update_horarios(
+    return `drop function if exists public.funcionario_update_horarios(text, text, int[], text, text);
+drop function if exists public.funcionario_update_horarios(text, text, int[], text, text, int);
+
+create or replace function public.funcionario_update_horarios(
   p_horario_inicio text,
   p_horario_fim text,
   p_dias_trabalho int[],
   p_intervalo_inicio text default null,
-  p_intervalo_fim text default null
+  p_intervalo_fim text default null,
+  p_capacidade_dia_inteiro int default null
 ) returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-  v_uid uuid;
-  v_exists boolean;
-  v_start time;
-  v_end time;
-  v_iv_start time;
-  v_iv_end time;
 begin
-  v_uid := auth.uid();
-  if v_uid is null then
-    raise exception 'unauthenticated';
-  end if;
-
-  select true
-  into v_exists
-  from public.funcionarios f
-  where f.id = v_uid
-    and f.ativo = true;
-
-  if v_exists is distinct from true then
-    raise exception 'funcionario_invalido';
-  end if;
-
-  if nullif(trim(p_horario_inicio), '') is null or nullif(trim(p_horario_fim), '') is null then
-    raise exception 'horarios_invalidos';
-  end if;
-
-  v_start := p_horario_inicio::time;
-  v_end := p_horario_fim::time;
-
-  if v_end <= v_start then
-    raise exception 'horarios_invalidos';
-  end if;
-
-  if p_dias_trabalho is null or array_length(p_dias_trabalho, 1) is null or array_length(p_dias_trabalho, 1) = 0 then
-    raise exception 'dias_invalidos';
-  end if;
-
-  if exists (select 1 from unnest(p_dias_trabalho) d where d is null or d < 0 or d > 6) then
-    raise exception 'dias_invalidos';
-  end if;
-
-  if nullif(trim(coalesce(p_intervalo_inicio, '')), '') is null and nullif(trim(coalesce(p_intervalo_fim, '')), '') is null then
-    v_iv_start := null;
-    v_iv_end := null;
-  elsif nullif(trim(coalesce(p_intervalo_inicio, '')), '') is null or nullif(trim(coalesce(p_intervalo_fim, '')), '') is null then
-    raise exception 'intervalo_invalido';
-  else
-    v_iv_start := p_intervalo_inicio::time;
-    v_iv_end := p_intervalo_fim::time;
-    if v_iv_end <= v_iv_start then
-      raise exception 'intervalo_invalido';
-    end if;
-    if v_iv_start < v_start or v_iv_end > v_end then
-      raise exception 'intervalo_invalido';
-    end if;
-  end if;
-
-  update public.funcionarios
-  set
-    horario_inicio = v_start::text,
-    horario_fim = v_end::text,
-    dias_trabalho = p_dias_trabalho,
-    intervalo_inicio = v_iv_start::text,
-    intervalo_fim = v_iv_end::text
-  where id = v_uid;
+  raise exception 'not_allowed';
 end;
 $$;
 
-revoke all on function public.funcionario_update_horarios(text, text, int[], text, text) from public;
-grant execute on function public.funcionario_update_horarios(text, text, int[], text, text) to authenticated;`
+revoke all on function public.funcionario_update_horarios(text, text, int[], text, text, int) from public;
+revoke all on function public.funcionario_update_horarios(text, text, int[], text, text, int) from authenticated;`
   }, [])
 
   const sqlWhatsappLembretesCron = useMemo(() => {
@@ -3347,7 +4110,7 @@ $$;`
         />
 
         <SqlCard
-          title="SQL de Trial (15 dias / 1 funcionário)"
+          title="SQL de Trial (7 dias / 1 funcionário)"
           description="Use para habilitar trial automático após confirmação de email."
           sql={sqlTrial}
         />
@@ -3365,8 +4128,14 @@ $$;`
         />
 
         <SqlCard
-          title="SQL do horário do funcionário"
-          description="Use para permitir que o funcionário salve o próprio horário (início/fim/dias/intervalo)."
+          title="SQL de permissões de funcionário (Atendente)"
+          description="Use se aparecer erro ao criar funcionário com permissao='atendente'."
+          sql={sqlFuncionariosPermissaoAtendente}
+        />
+
+        <SqlCard
+          title="SQL de bloqueio de horário do funcionário"
+          description="Use para impedir que funcionário salve o próprio horário via RPC (apenas o gerente ajusta no painel)."
           sql={sqlFuncionarioHorarios}
         />
 

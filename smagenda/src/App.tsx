@@ -3,6 +3,9 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { RequireAuth } from './state/auth/RequireAuth'
 
 const PublicBookingPage = lazy(() => import('./views/public/PublicBookingPage').then((m) => ({ default: m.PublicBookingPage })))
+const TermosPage = lazy(() => import('./views/public/TermosPage').then((m) => ({ default: m.TermosPage })))
+const PrivacidadePage = lazy(() => import('./views/public/PrivacidadePage').then((m) => ({ default: m.PrivacidadePage })))
+const AjudaPage = lazy(() => import('./views/public/AjudaPage').then((m) => ({ default: m.AjudaPage })))
 
 const LoginPage = lazy(() => import('./views/auth/LoginPage').then((m) => ({ default: m.LoginPage })))
 const CadastroPage = lazy(() => import('./views/auth/CadastroPage').then((m) => ({ default: m.CadastroPage })))
@@ -52,6 +55,10 @@ function App() {
         <Route path="/agendar/:slug/:unidadeSlug" element={<PublicBookingPage />} />
         <Route path="/agendar/:slug" element={<PublicBookingPage />} />
 
+        <Route path="/termos" element={<TermosPage />} />
+        <Route path="/privacidade" element={<PrivacidadePage />} />
+        <Route path="/ajuda" element={<AjudaPage />} />
+
         <Route path="/login" element={<LoginPage />} />
         <Route path="/esqueci-senha" element={<ForgotPasswordPage />} />
         <Route path="/resetar-senha" element={<ResetPasswordPage />} />
@@ -59,7 +66,7 @@ function App() {
         <Route
           path="/onboarding"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <OnboardingPage />
             </RequireAuth>
           }
@@ -68,7 +75,7 @@ function App() {
         <Route
           path="/dashboard"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <DashboardPage />
             </RequireAuth>
           }
@@ -76,7 +83,7 @@ function App() {
         <Route
           path="/servicos"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <ServicosPage />
             </RequireAuth>
           }
@@ -84,7 +91,7 @@ function App() {
         <Route
           path="/clientes"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <ClientesPage />
             </RequireAuth>
           }
@@ -92,7 +99,7 @@ function App() {
         <Route
           path="/clientes/:telefone"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <ClienteDetalhesPage />
             </RequireAuth>
           }
@@ -100,7 +107,7 @@ function App() {
         <Route
           path="/relatorios"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <RelatoriosPage />
             </RequireAuth>
           }
@@ -108,7 +115,7 @@ function App() {
         <Route
           path="/pagamento"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <PagamentoPage />
             </RequireAuth>
           }
@@ -116,7 +123,7 @@ function App() {
         <Route
           path="/funcionarios"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <FuncionariosPage />
             </RequireAuth>
           }
@@ -124,7 +131,7 @@ function App() {
         <Route
           path="/configuracoes/whatsapp"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <WhatsappSettingsPage />
             </RequireAuth>
           }
@@ -132,7 +139,7 @@ function App() {
         <Route
           path="/configuracoes/mensagens"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <MensagensSettingsPage />
             </RequireAuth>
           }
@@ -140,7 +147,7 @@ function App() {
         <Route
           path="/configuracoes/pagina-publica"
           element={
-            <RequireAuth requiredKind="usuario">
+            <RequireAuth requiredKind="usuario" allowFuncionarioAdmin={true}>
               <PaginaPublicaSettingsPage />
             </RequireAuth>
           }

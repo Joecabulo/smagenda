@@ -27,7 +27,7 @@ type Funcionario = {
   nome_completo: string
   email: string
   telefone: string | null
-  permissao: 'admin' | 'funcionario'
+  permissao: 'admin' | 'funcionario' | 'atendente'
   ativo: boolean
 }
 
@@ -120,7 +120,7 @@ export function AdminClienteDetalhesPage() {
   const [funcNome, setFuncNome] = useState('')
   const [funcEmail, setFuncEmail] = useState('')
   const [funcSenha, setFuncSenha] = useState('')
-  const [funcPermissao, setFuncPermissao] = useState<'admin' | 'funcionario'>('funcionario')
+  const [funcPermissao, setFuncPermissao] = useState<'admin' | 'funcionario' | 'atendente'>('funcionario')
   const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null)
   const [creatingCheckout, setCreatingCheckout] = useState(false)
   const [refreshingPagamento, setRefreshingPagamento] = useState(false)
@@ -660,10 +660,11 @@ export function AdminClienteDetalhesPage() {
                         <select
                           className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
                           value={funcPermissao}
-                          onChange={(e) => setFuncPermissao(e.target.value as 'admin' | 'funcionario')}
+                          onChange={(e) => setFuncPermissao(e.target.value as 'admin' | 'funcionario' | 'atendente')}
                         >
                           <option value="funcionario">Funcionário</option>
-                          <option value="admin">Admin</option>
+                          <option value="atendente">Atendente</option>
+                          <option value="admin">Gerente</option>
                         </select>
                       </label>
                     </div>
@@ -693,7 +694,7 @@ export function AdminClienteDetalhesPage() {
                         <div className="text-sm font-semibold text-slate-900">{f.nome_completo}</div>
                         <div className="text-sm text-slate-600">{f.email}</div>
                         {f.telefone ? <div className="text-sm text-slate-600">{f.telefone}</div> : null}
-                        <div className="text-sm text-slate-700">{f.permissao}</div>
+                        <div className="text-sm text-slate-700">{f.permissao === 'admin' ? 'Gerente' : f.permissao === 'atendente' ? 'Atendente' : 'Funcionário'}</div>
                       </div>
                       <div className="flex flex-wrap items-center justify-end gap-2">
                         {f.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}

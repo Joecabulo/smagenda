@@ -66,8 +66,10 @@ function toCsv(rows: Array<Record<string, string | number | null | undefined>>) 
 }
 
 export function RelatoriosPage() {
-  const { appPrincipal } = useAuth()
-  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
+  const { appPrincipal, masterUsuario, masterUsuarioLoading } = useAuth()
+  const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
+  const isGerente = appPrincipal?.kind === 'funcionario' && appPrincipal.profile.permissao === 'admin'
+  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isGerente ? masterUsuario : null
   const usuarioId = usuario?.id ?? null
   const navigate = useNavigate()
 
@@ -348,6 +350,14 @@ export function RelatoriosPage() {
   }, [agendamentos])
 
   if (!usuario) {
+    return (
+      <AppShell>
+        <div className="text-slate-700">{isGerente && masterUsuarioLoading ? 'Carregando…' : 'Acesso restrito.'}</div>
+      </AppShell>
+    )
+  }
+
+  if (funcionario && !funcionario.pode_ver_financeiro) {
     return (
       <AppShell>
         <div className="text-slate-700">Acesso restrito.</div>

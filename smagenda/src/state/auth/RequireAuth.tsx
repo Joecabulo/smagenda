@@ -7,9 +7,10 @@ import { supabase } from '../../lib/supabase'
 type Props = {
   children: React.ReactNode
   requiredKind?: Principal['kind']
+  allowFuncionarioAdmin?: boolean
 }
 
-export function RequireAuth({ children, requiredKind }: Props) {
+export function RequireAuth({ children, requiredKind, allowFuncionarioAdmin }: Props) {
   const { loading, session, principal, appPrincipal, impersonation, signOut } = useAuth()
   const location = useLocation()
   const [masterBlocked, setMasterBlocked] = useState(false)
@@ -188,6 +189,14 @@ export function RequireAuth({ children, requiredKind }: Props) {
   }
 
   if (requiredKind && effective.kind !== requiredKind) {
+    if (
+      allowFuncionarioAdmin &&
+      requiredKind === 'usuario' &&
+      effective.kind === 'funcionario' &&
+      effective.profile.permissao === 'admin'
+    ) {
+      return <>{children}</>
+    }
     if (principal.kind === 'super_admin') return <Navigate to="/admin/dashboard" replace />
     if (effective.kind === 'funcionario') return <Navigate to="/funcionario/agenda" replace />
     return <Navigate to="/dashboard" replace />

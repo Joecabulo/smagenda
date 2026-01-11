@@ -25,28 +25,68 @@ const templatePresets: TemplatePreset[] = [
     lembrete: defaultLembrete,
   },
   {
-    key: 'salao',
-    title: 'Salão / Barbearia',
+    key: 'lava_jatos',
+    title: 'Lava-jato',
     confirmacao:
-      `Olá {nome}!\n\n✅ Seu horário está confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté já!\n{nome_negocio}`,
+      `Olá {nome}!\n\n✅ Sua lavagem está confirmada:\n📅 {data} às {hora}\n🚗 {servico}\n💰 {preco}\n\nLocal: {unidade_nome}\n{unidade_endereco}\n\nDúvidas/alterações: {telefone_profissional}\n{nome_negocio}`,
     lembrete:
-      `Oi {nome}!\n\n⏰ Lembrete do seu horário:\n📅 {data} às {hora}\n✂️ {servico}\nProfissional: {profissional_nome}\n\nSe precisar remarcar, fale com a gente: {telefone_profissional}`,
+      `Oi {nome}!\n\n⏰ Lembrete da sua lavagem:\n📅 {data} às {hora}\n🚗 {servico}\n\nLocal: {unidade_nome}\n{unidade_endereco}\n\nSe precisar remarcar: {telefone_profissional}`,
+  },
+  {
+    key: 'barbearia',
+    title: 'Barbearia',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Seu horário está confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nBarbeiro: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté já!\n{nome_negocio}`,
+    lembrete:
+      `Oi {nome}!\n\n⏰ Lembrete do seu horário:\n📅 {data} às {hora}\n✂️ {servico}\n\nBarbeiro: {profissional_nome}\n\nSe precisar remarcar: {telefone_profissional}`,
+  },
+  {
+    key: 'salao',
+    title: 'Salão de beleza',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Seu horário está confirmado:\n📅 {data} às {hora}\n💇 {servico}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté já!\n{nome_negocio}`,
+    lembrete:
+      `Oi {nome}!\n\n⏰ Lembrete do seu horário:\n📅 {data} às {hora}\n💇 {servico}\nProfissional: {profissional_nome}\n\nSe precisar remarcar, fale com a gente: {telefone_profissional}`,
+  },
+  {
+    key: 'estetica',
+    title: 'Estética',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Seu atendimento está confirmado:\n📅 {data} às {hora}\n✨ {servico}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté breve!\n{nome_negocio}`,
+    lembrete:
+      `Oi {nome}!\n\n✨ Lembrete do seu atendimento:\n📅 {data} às {hora}\n✨ {servico}\n\nQualquer ajuste: {telefone_profissional}`,
   },
   {
     key: 'odontologia',
     title: 'Odontologia',
     confirmacao:
-      `Olá {nome}!\n\n✅ Sua consulta está confirmada:\n📅 {data} às {hora}\n🦷 {servico}\n\nDoutor(a): {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nQualquer dúvida: {telefone_profissional}\n{nome_negocio}`,
+      `Olá {nome}!\n\n✅ Sua consulta está confirmada:\n📅 {data} às {hora}\n🦷 {servico}\n\nDentista: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nQualquer dúvida: {telefone_profissional}\n{nome_negocio}`,
     lembrete:
-      `Olá {nome}!\n\n🦷 Lembrete da sua consulta:\n📅 {data} às {hora}\nProcedimento: {servico}\nProfissional: {profissional_nome}\n\nSe precisar remarcar: {telefone_profissional}`,
+      `Olá {nome}!\n\n🦷 Lembrete da sua consulta:\n📅 {data} às {hora}\nProcedimento: {servico}\n\nSe precisar remarcar: {telefone_profissional}`,
   },
   {
-    key: 'estetica',
-    title: 'Estética / Bem-estar',
+    key: 'manicure',
+    title: 'Manicure',
     confirmacao:
-      `Olá {nome}!\n\n✅ Seu atendimento está confirmado:\n📅 {data} às {hora}\n💆 {servico}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté breve!\n{nome_negocio}`,
+      `Olá {nome}!\n\n✅ Seu horário está confirmado:\n📅 {data} às {hora}\n💅 {servico}\n💰 {preco}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté já!\n{nome_negocio}`,
     lembrete:
-      `Oi {nome}!\n\n✨ Lembrete do seu atendimento:\n📅 {data} às {hora}\n💆 {servico}\n\nQualquer ajuste: {telefone_profissional}`,
+      `Oi {nome}!\n\n⏰ Lembrete do seu horário:\n📅 {data} às {hora}\n💅 {servico}\n\nSe precisar remarcar: {telefone_profissional}`,
+  },
+  {
+    key: 'pilates',
+    title: 'Pilates / Estúdio',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Sua aula está confirmada:\n📅 {data} às {hora}\n🏋️ {servico}\n\nInstrutor: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté lá!\n{nome_negocio}`,
+    lembrete:
+      `Oi {nome}!\n\n⏰ Lembrete da sua aula:\n📅 {data} às {hora}\n🏋️ {servico}\n\nSe precisar remarcar: {telefone_profissional}`,
+  },
+  {
+    key: 'faxina',
+    title: 'Faxina / Diarista',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Sua diária está confirmada:\n📅 {data} às {hora}\n🧹 {servico}\n💰 {preco}\n\nEndereço do cliente:\n{cliente_endereco}\n\nProfissional: {profissional_nome}\n\nQualquer ajuste: {telefone_profissional}\n{nome_negocio}`,
+    lembrete:
+      `Oi {nome}!\n\n⏰ Lembrete da sua diária:\n📅 {data} às {hora}\n🧹 {servico}\n\nEndereço do cliente:\n{cliente_endereco}\n\nSe precisar remarcar: {telefone_profissional}`,
   },
 ]
 
@@ -56,6 +96,7 @@ const templateVars: Array<{ key: string; label: string }> = [
   { key: 'hora', label: 'Hora' },
   { key: 'servico', label: 'Serviço' },
   { key: 'preco', label: 'Preço' },
+  { key: 'cliente_endereco', label: 'Endereço cliente' },
   { key: 'profissional_nome', label: 'Profissional' },
   { key: 'telefone_profissional', label: 'Telefone' },
   { key: 'unidade_nome', label: 'Unidade' },
@@ -185,8 +226,7 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
 export function MensagensSettingsPage() {
   const { appPrincipal } = useAuth()
   const navigate = useNavigate()
-  const usuarioId =
-    appPrincipal?.kind === 'usuario' ? appPrincipal.profile.id : appPrincipal?.kind === 'funcionario' ? appPrincipal.profile.usuario_master_id : null
+  const usuarioId = appPrincipal?.kind === 'usuario' ? appPrincipal.profile.id : null
   const canEditTemplates = useMemo(() => appPrincipal?.kind === 'usuario' && Boolean(usuarioId), [appPrincipal?.kind, usuarioId])
   const canTestConfirmacao = Boolean(usuarioId)
 
@@ -404,8 +444,10 @@ export function MensagensSettingsPage() {
     setTimeout(() => setSaved(false), 2000)
   }
 
-  const applyPreset = (target: 'confirmacao' | 'lembrete' | 'both') => {
-    const preset = templatePresets.find((p) => p.key === presetKey) ?? templatePresets[0]
+  const getPreset = (key: string) => templatePresets.find((p) => p.key === key) ?? templatePresets[0]
+
+  const applyPreset = (target: 'confirmacao' | 'lembrete' | 'both', keyOverride?: string) => {
+    const preset = getPreset(keyOverride ?? presetKey)
     if (!preset) return
     if (target === 'confirmacao' || target === 'both') setMensagemConfirmacao(preset.confirmacao)
     if (target === 'lembrete' || target === 'both') setMensagemLembrete(preset.lembrete)
@@ -432,28 +474,38 @@ export function MensagensSettingsPage() {
     })
   }
 
+  if (!usuarioId) {
+    return (
+      <AppShell>
+        <div className="text-slate-700">{appPrincipal ? 'Acesso restrito.' : 'Carregando…'}</div>
+      </AppShell>
+    )
+  }
+
   return (
     <PageTutorial usuarioId={usuarioId} page="mensagens">
       {({ tutorialOpen, tutorialStep, setTutorialStep, resetTutorial, closeTutorial }) => (
         <AppShell>
-          <div className="space-y-6">
-            <div className="flex items-center justify-between gap-3">
+          <div className="mx-auto w-full max-w-3xl space-y-6">
+            <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
               <div>
                 <div className="text-sm font-semibold text-slate-500">Configurações</div>
                 <div className="text-xl font-semibold text-slate-900">Mensagens automáticas</div>
               </div>
-              <Button variant="secondary" onClick={resetTutorial}>
+              <Button variant="secondary" onClick={resetTutorial} className="w-full sm:w-auto">
                 Rever tutorial
               </Button>
             </div>
 
-        {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
-        {schemaIncompleto ? (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-            Seu Supabase ainda não tem as colunas de automação do WhatsApp. Execute o SQL do WhatsApp (automação) no painel de Admin.
-          </div>
-        ) : null}
-        {saved ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">Salvo.</div> : null}
+            <div className="space-y-3">
+              {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
+              {schemaIncompleto ? (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  Seu Supabase ainda não tem as colunas de automação do WhatsApp. Execute o SQL do WhatsApp (automação) no painel de Admin.
+                </div>
+              ) : null}
+              {saved ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">Salvo.</div> : null}
+            </div>
 
             <div
               className={
@@ -463,7 +515,7 @@ export function MensagensSettingsPage() {
               }
             >
               <Card>
-                <div className="p-6 space-y-4">
+                <div className="space-y-4 p-4 sm:p-6">
             <div className="text-sm font-semibold text-slate-900">Preferências de envio</div>
             {loading ? (
               <div className="text-sm text-slate-600">Carregando…</div>
@@ -475,11 +527,18 @@ export function MensagensSettingsPage() {
                     checked={enviarConfirmacao}
                     onChange={(e) => setEnviarConfirmacao(e.target.checked)}
                     disabled={!canEditTemplates || saving}
+                    className="h-4 w-4"
                   />
                   Enviar confirmação ao confirmar agendamento
                 </label>
                 <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={enviarLembrete} onChange={(e) => setEnviarLembrete(e.target.checked)} disabled={!canEditTemplates || saving} />
+                  <input
+                    type="checkbox"
+                    checked={enviarLembrete}
+                    onChange={(e) => setEnviarLembrete(e.target.checked)}
+                    disabled={!canEditTemplates || saving}
+                    className="h-4 w-4"
+                  />
                   Enviar lembrete automático
                 </label>
                 <div className="space-y-2">
@@ -495,7 +554,7 @@ export function MensagensSettingsPage() {
                       disabled={!canEditTemplates || saving || !enviarLembrete}
                       className="w-full"
                     />
-                    <div className="text-sm font-semibold text-slate-900 w-12 text-right">{lembreteHorasAntes}h</div>
+                    <div className="w-14 text-right text-sm font-semibold text-slate-900">{lembreteHorasAntes}h</div>
                   </div>
                 </div>
               </div>
@@ -512,7 +571,7 @@ export function MensagensSettingsPage() {
               }
             >
               <Card>
-                <div className="p-6 space-y-4">
+                <div className="space-y-4 p-4 sm:p-6">
             <div className="text-sm font-semibold text-slate-900">Validar confirmação automática</div>
             <div className="text-sm text-slate-600">Salve o template antes de testar o envio.</div>
 
@@ -627,6 +686,7 @@ export function MensagensSettingsPage() {
                   !agendamentoSelecionadoId ||
                   (selectedAgendamento?.status ?? '').trim().toLowerCase() !== 'confirmado'
                 }
+                className="w-full sm:w-auto"
               >
                 {sendingConfirmacao ? 'Enviando…' : 'Enviar confirmação agora'}
               </Button>
@@ -648,7 +708,7 @@ export function MensagensSettingsPage() {
             >
               <div className="space-y-6">
                 <Card>
-                  <div className="p-6 space-y-4">
+                  <div className="space-y-4 p-4 sm:p-6">
                     <div className="text-sm font-semibold text-slate-900">Modelos prontos</div>
                     <div className="text-sm text-slate-600">
                       Escolha um modelo e ajuste se quiser. As variáveis são preenchidas automaticamente com dados reais do agendamento.
@@ -660,7 +720,11 @@ export function MensagensSettingsPage() {
                         <select
                           className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
                           value={presetKey}
-                          onChange={(e) => setPresetKey(e.target.value)}
+                          onChange={(e) => {
+                            const nextKey = e.target.value
+                            setPresetKey(nextKey)
+                            applyPreset('both', nextKey)
+                          }}
                           disabled={!canEditTemplates || saving || loading}
                         >
                           {templatePresets.map((p) => (
@@ -671,14 +735,29 @@ export function MensagensSettingsPage() {
                         </select>
                       </label>
 
-                      <div className="flex items-end justify-end gap-2">
-                        <Button variant="secondary" onClick={() => applyPreset('confirmacao')} disabled={!canEditTemplates || saving || loading}>
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-end">
+                        <Button
+                          variant="secondary"
+                          onClick={() => applyPreset('confirmacao')}
+                          disabled={!canEditTemplates || saving || loading}
+                          className="w-full sm:w-auto"
+                        >
                           Aplicar na confirmação
                         </Button>
-                        <Button variant="secondary" onClick={() => applyPreset('lembrete')} disabled={!canEditTemplates || saving || loading}>
+                        <Button
+                          variant="secondary"
+                          onClick={() => applyPreset('lembrete')}
+                          disabled={!canEditTemplates || saving || loading}
+                          className="w-full sm:w-auto"
+                        >
                           Aplicar no lembrete
                         </Button>
-                        <Button variant="secondary" onClick={() => applyPreset('both')} disabled={!canEditTemplates || saving || loading}>
+                        <Button
+                          variant="secondary"
+                          onClick={() => applyPreset('both')}
+                          disabled={!canEditTemplates || saving || loading}
+                          className="w-full sm:w-auto"
+                        >
                           Aplicar nos dois
                         </Button>
                       </div>
@@ -687,13 +766,19 @@ export function MensagensSettingsPage() {
                 </Card>
 
                 <Card>
-                  <div className="p-6 space-y-4">
+                  <div className="space-y-4 p-4 sm:p-6">
                     <div className="text-sm font-semibold text-slate-900">Variáveis</div>
                     <div className="text-sm text-slate-600">Clique para inserir no campo selecionado (confirmação/lembrete).</div>
 
-                    <div className="flex flex-wrap gap-2">
+                    <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
                       {templateVars.map((v) => (
-                        <Button key={v.key} variant="secondary" onClick={() => insertVar(v.key)} disabled={!canEditTemplates || saving || loading}>
+                        <Button
+                          key={v.key}
+                          variant="secondary"
+                          onClick={() => insertVar(v.key)}
+                          disabled={!canEditTemplates || saving || loading}
+                          className="w-full sm:w-auto"
+                        >
                           {v.label}
                         </Button>
                       ))}
@@ -702,13 +787,13 @@ export function MensagensSettingsPage() {
                 </Card>
 
                 <Card>
-                  <div className="p-6 space-y-4">
+                  <div className="space-y-4 p-4 sm:p-6">
                     <div className="text-sm font-semibold text-slate-900">Mensagem de confirmação</div>
                     {loading ? (
                       <div className="text-sm text-slate-600">Carregando…</div>
                     ) : (
                       <textarea
-                        className="w-full min-h-[160px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                        className="w-full min-h-[160px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-base text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 sm:text-sm"
                         value={mensagemConfirmacao}
                         onChange={(e) => setMensagemConfirmacao(e.target.value)}
                         disabled={!canEditTemplates || saving}
@@ -720,13 +805,13 @@ export function MensagensSettingsPage() {
                 </Card>
 
                 <Card>
-                  <div className="p-6 space-y-4">
+                  <div className="space-y-4 p-4 sm:p-6">
                     <div className="text-sm font-semibold text-slate-900">Mensagem de lembrete</div>
                     {loading ? (
                       <div className="text-sm text-slate-600">Carregando…</div>
                     ) : (
                       <textarea
-                        className="w-full min-h-[160px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                        className="w-full min-h-[160px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-base text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 sm:text-sm"
                         value={mensagemLembrete}
                         onChange={(e) => setMensagemLembrete(e.target.value)}
                         disabled={!canEditTemplates || saving}
@@ -739,7 +824,7 @@ export function MensagensSettingsPage() {
 
                 {canEditTemplates ? (
                   <div className="flex justify-end">
-                    <Button onClick={save} disabled={saving || loading}>
+                    <Button onClick={save} disabled={saving || loading} className="w-full sm:w-auto">
                       Salvar
                     </Button>
                   </div>

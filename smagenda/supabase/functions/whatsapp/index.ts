@@ -64,6 +64,7 @@ type AgendamentoRow = {
   status: string
   funcionario_id?: string | null
   unidade_id?: string | null
+  extras?: unknown | null
   servico: ServicoRow | null
   funcionario?: FuncionarioRow | null
   unidade?: UnidadeRow | null
@@ -370,8 +371,45 @@ function formatBRDate(isoDate: string) {
   return `${parts[2]}/${parts[1]}/${parts[0]}`
 }
 
+function readExtrasEndereco(extras: unknown) {
+  if (!extras || typeof extras !== 'object') return ''
+  const v = (extras as Record<string, unknown>).endereco
+  if (typeof v !== 'string') return ''
+  const t = v.trim()
+  return t ? t : ''
+}
+
+function readExtrasEmail(extras: unknown) {
+  if (!extras || typeof extras !== 'object') return ''
+  const v = (extras as Record<string, unknown>).email
+  if (typeof v !== 'string') return ''
+  const t = v.trim().toLowerCase()
+  if (!t) return ''
+  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)
+  return ok ? t : ''
+}
+
 function interpolateTemplate(template: string, vars: Record<string, string>) {
   return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => vars[key] ?? `{${key}}`)
+}
+
+async function resendSendEmail(args: {
+  apiKey: string
+  from: string
+  to: string
+  subject: string
+  text: string
+}) {
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ from: args.from, to: args.to, subject: args.subject, text: args.text }),
+  })
+  const body = (await res.json().catch(() => null)) as unknown
+  return { ok: res.ok, status: res.status, body }
 }
 
 async function evolutionRequest(opts: { baseUrl: string; apiKey: string; path: string; method: string; body?: unknown }) {
@@ -780,13 +818,16 @@ function evolutionHint(details: unknown) {
   )
 }
 
-async function createEvolutionInstance(opts: { apiUrl: string; apiKey: string; instanceName: string }) {
+async function createEvolutionInstance(opts: { apiUrl: string; apiKey: string; instanceName: string; qrcode?: boolean; number?: string | null }) {
+  const qrcode = typeof opts.qrcode === 'boolean' ? opts.qrcode : true
+  const number = typeof opts.number === 'string' && opts.number.trim() ? sanitizePhone(opts.number) : ''
+
   const createResA = await evolutionRequestAuto({
     baseUrl: opts.apiUrl,
     apiKey: opts.apiKey,
     path: '/instance/create',
     method: 'POST',
-    body: { instanceName: opts.instanceName, token: opts.apiKey, qrcode: true, integration: 'WHATSAPP-BAILEYS' },
+    body: { instanceName: opts.instanceName, token: opts.apiKey, qrcode, integration: 'WHATSAPP-BAILEYS', ...(number ? { number } : {}) },
   })
 
   const createRes =
@@ -797,7 +838,7 @@ async function createEvolutionInstance(opts: { apiUrl: string; apiKey: string; i
           apiKey: opts.apiKey,
           path: '/instance/create',
           method: 'POST',
-          body: { instanceName: opts.instanceName, qrcode: true, integration: 'WHATSAPP-BAILEYS' },
+          body: { instanceName: opts.instanceName, qrcode, integration: 'WHATSAPP-BAILEYS', ...(number ? { number } : {}) },
         })
 
   return createRes
@@ -940,6 +981,9 @@ Deno.serve(async (req) => {
   if (!supabaseUrl || !anonKey) return jsonResponse(500, { error: 'missing_env' })
 
   const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+  const resendApiKey = (Deno.env.get('RESEND_API_KEY') ?? '').trim()
+  const resendFromRaw = (Deno.env.get('RESEND_FROM') ?? '').trim()
+  const resendFrom = resendFromRaw || 'SMagenda <onboarding@resend.dev>'
 
   const jwt = extractJwt(req)
   if (!jwt) {
@@ -1138,7 +1182,7 @@ Deno.serve(async (req) => {
       const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
       let stateRes = await evolutionRequestAuto({ baseUrl: apiUrl, apiKey, path: `/instance/connectionState/${instanceName}`, method: 'GET', stopOn404 })
       if (!stateRes.ok && stateRes.status === 404 && isEvolutionInstanceNotFound(stateRes.body, instanceName)) {
-        const createRes = await createEvolutionInstance({ apiUrl, apiKey, instanceName })
+        const createRes = await createEvolutionInstance({ apiUrl, apiKey, instanceName, qrcode: pairingNumber ? false : true, number: pairingNumber || null })
         if (!createRes.ok && createRes.status !== 409) {
           const hint = evolutionHint(createRes.body)
           return jsonResponse(createRes.status, { error: 'evolution_error', details: createRes.body, hint })
@@ -1184,26 +1228,42 @@ Deno.serve(async (req) => {
         return jsonResponse(404, { error: 'evolution_error', details: stateRes.body, hint })
       }
 
-      const connectCandidates: Array<{ method: 'GET' | 'POST'; path: string; body?: unknown }> = [
-        { method: 'GET', path: `/instance/connect/${instanceName}` },
-        ...(pairingNumber
-          ? [
-              { method: 'GET', path: `/instance/connect/${instanceName}?number=${encodeURIComponent(pairingNumber)}` },
-              { method: 'POST', path: `/instance/connect/${instanceName}`, body: { number: pairingNumber } },
-            ]
-          : []),
-        { method: 'POST', path: `/instance/connect/${instanceName}` },
-        { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}` },
-        { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}` },
-        ...(pairingNumber
-          ? [
-              { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}` },
-              { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}` },
-            ]
-          : []),
-        { method: 'POST', path: `/instance/connect`, body: { instanceName, ...(pairingNumber ? { number: pairingNumber } : {}) } },
-        { method: 'POST', path: `/instance/connect`, body: { instance: instanceName, ...(pairingNumber ? { number: pairingNumber } : {}) } },
-      ]
+      const connectCandidates: Array<{ method: 'GET' | 'POST'; path: string; body?: unknown }> = pairingNumber
+        ? [
+            { method: 'GET', path: `/instance/connect/${instanceName}?number=${encodeURIComponent(pairingNumber)}&qrcode=false` },
+            { method: 'GET', path: `/instance/connect/${instanceName}?number=${encodeURIComponent(pairingNumber)}&qrCode=false` },
+            { method: 'GET', path: `/instance/connect/${instanceName}?number=${encodeURIComponent(pairingNumber)}&pairingCode=true` },
+            { method: 'GET', path: `/instance/connect/${instanceName}?number=${encodeURIComponent(pairingNumber)}` },
+            { method: 'POST', path: `/instance/connect/${instanceName}`, body: { number: pairingNumber, qrcode: false } },
+            { method: 'POST', path: `/instance/connect/${instanceName}`, body: { number: pairingNumber, qrCode: false } },
+            { method: 'POST', path: `/instance/connect/${instanceName}`, body: { number: pairingNumber, pairingCode: true } },
+            { method: 'POST', path: `/instance/connect/${instanceName}`, body: { number: pairingNumber, usePairingCode: true } },
+            { method: 'POST', path: `/instance/connect/${instanceName}`, body: { number: pairingNumber } },
+            { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}&qrcode=false` },
+            { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}&qrcode=false` },
+            { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}` },
+            { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}` },
+            { method: 'POST', path: `/instance/connect`, body: { instanceName, number: pairingNumber, qrcode: false } },
+            { method: 'POST', path: `/instance/connect`, body: { instance: instanceName, number: pairingNumber, qrcode: false } },
+            { method: 'POST', path: `/instance/connect`, body: { instanceName, number: pairingNumber, pairingCode: true, qrcode: false } },
+            { method: 'POST', path: `/instance/connect`, body: { instance: instanceName, number: pairingNumber, pairingCode: true, qrcode: false } },
+            { method: 'POST', path: `/instance/connect`, body: { instanceName, number: pairingNumber } },
+            { method: 'POST', path: `/instance/connect`, body: { instance: instanceName, number: pairingNumber } },
+            { method: 'GET', path: `/instance/connect/${instanceName}` },
+            { method: 'POST', path: `/instance/connect/${instanceName}` },
+            { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}` },
+            { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}` },
+            { method: 'POST', path: `/instance/connect`, body: { instanceName } },
+            { method: 'POST', path: `/instance/connect`, body: { instance: instanceName } },
+          ]
+        : [
+            { method: 'GET', path: `/instance/connect/${instanceName}` },
+            { method: 'POST', path: `/instance/connect/${instanceName}` },
+            { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}` },
+            { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}` },
+            { method: 'POST', path: `/instance/connect`, body: { instanceName } },
+            { method: 'POST', path: `/instance/connect`, body: { instance: instanceName } },
+          ]
 
       const qrCandidates: Array<{ method: 'GET' | 'POST'; path: string; body?: unknown }> = [
         { method: 'GET', path: `/instance/qrcode/${instanceName}` },
@@ -1225,10 +1285,14 @@ Deno.serve(async (req) => {
         connectState = extractInstanceState(res.body) ?? connectState
         qrBase64 = extractQrBase64(res.body) ?? qrBase64
         pairingCode = extractPairingCode(res.body) ?? pairingCode
-        if (qrBase64 || pairingCode) break
+        if (pairingNumber) {
+          if (pairingCode) break
+        } else {
+          if (qrBase64 || pairingCode) break
+        }
       }
 
-      if (!qrBase64) {
+      if (!qrBase64 && !pairingNumber) {
         for (const c of qrCandidates) {
           const res = await evolutionRequestAuto({ baseUrl: apiUrl, apiKey, path: c.path, method: c.method, body: c.body })
           if (!res.ok) {
@@ -1248,17 +1312,23 @@ Deno.serve(async (req) => {
         if (stateAfterRes.ok) connectState = extractInstanceState(stateAfterRes.body)
       }
 
-      const hint =
-        !qrBase64 && !pairingCode && (connectState === 'connecting' || connectState === 'close' || connectState === 'closed')
-          ? 'A instância ainda não retornou QR Code. Isso costuma acontecer quando a Evolution está iniciando ou quando a versão do WhatsApp Web no container está desatualizada. Verifique os logs do container e, se necessário, atualize CONFIG_SESSION_PHONE_VERSION.'
-          : null
+      const hint = (() => {
+        if (pairingNumber && !pairingCode) {
+          return 'A Evolution API não retornou código de pareamento para este número. Se sua versão não suporta pareamento por código, use “Conectar (QR Code)” em outro aparelho.'
+        }
+        if (!qrBase64 && !pairingCode && (connectState === 'connecting' || connectState === 'close' || connectState === 'closed')) {
+          return 'A instância ainda não retornou QR Code. Isso costuma acontecer quando a Evolution está iniciando ou quando a versão do WhatsApp Web no container está desatualizada. Verifique os logs do container e, se necessário, atualize CONFIG_SESSION_PHONE_VERSION.'
+        }
+        return null
+      })()
 
       if (!sa.whatsapp_instance_name) {
         const { error: updErr } = await dbClient.from('super_admin').update({ whatsapp_instance_name: instanceName }).eq('id', principal.uid)
         if (updErr && !isMissingColumnError(updErr.message)) return jsonResponse(400, { error: 'save_instance_name_failed', message: updErr.message })
       }
 
-      return jsonResponse(200, { ok: true, instanceName, state: connectState ?? state, qrBase64, pairingCode, hint })
+      const qrSafe = pairingNumber ? null : qrBase64
+      return jsonResponse(200, { ok: true, instanceName, state: connectState ?? state, qrBase64: qrSafe, pairingCode, hint })
     }
 
     if (payload.action === 'admin_disconnect') {
@@ -1479,12 +1549,12 @@ Deno.serve(async (req) => {
       stopOn404,
     })
 
-    if (!stateRes.ok && stateRes.status === 404 && isEvolutionInstanceNotFound(stateRes.body, instanceName)) {
-      const createRes = await createEvolutionInstance({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName })
-      if (!createRes.ok && createRes.status !== 409) {
-        const hint = evolutionHint(createRes.body)
-        return jsonResponse(createRes.status, { error: 'evolution_error', details: createRes.body, hint })
-      }
+      if (!stateRes.ok && stateRes.status === 404 && isEvolutionInstanceNotFound(stateRes.body, instanceName)) {
+        const createRes = await createEvolutionInstance({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName, qrcode: pairingNumber ? false : true, number: pairingNumber || null })
+        if (!createRes.ok && createRes.status !== 409) {
+          const hint = evolutionHint(createRes.body)
+          return jsonResponse(createRes.status, { error: 'evolution_error', details: createRes.body, hint })
+        }
       stateRes = await evolutionRequestAuto({
         baseUrl: apiUrl!,
         apiKey: apiKey!,
@@ -1527,7 +1597,7 @@ Deno.serve(async (req) => {
     }
 
     if (!stateRes.ok && stateRes.status === 404 && isEvolutionInstanceNotFound(stateRes.body, instanceName)) {
-      const createRes = await createEvolutionInstance({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName })
+      const createRes = await createEvolutionInstance({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName, qrcode: pairingNumber ? false : true, number: pairingNumber || null })
       if (!createRes.ok && createRes.status !== 409) {
         const hint = evolutionHint(createRes.body)
         return jsonResponse(createRes.status, { error: 'evolution_error', details: createRes.body, hint })
@@ -1541,26 +1611,29 @@ Deno.serve(async (req) => {
       return jsonResponse(404, { error: 'evolution_error', details: stateRes.body, hint })
     }
 
-    const connectCandidates: Array<{ method: 'GET' | 'POST'; path: string; body?: unknown }> = [
-      { method: 'GET', path: `/instance/connect/${instanceName}` },
-      ...(pairingNumber
-        ? [
-            { method: 'GET', path: `/instance/connect/${instanceName}?number=${encodeURIComponent(pairingNumber)}` },
-            { method: 'POST', path: `/instance/connect/${instanceName}`, body: { number: pairingNumber } },
-          ]
-        : []),
-      { method: 'POST', path: `/instance/connect/${instanceName}` },
-      { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}` },
-      { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}` },
-      ...(pairingNumber
-        ? [
-            { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}` },
-            { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}` },
-          ]
-        : []),
-      { method: 'POST', path: `/instance/connect`, body: { instanceName, ...(pairingNumber ? { number: pairingNumber } : {}) } },
-      { method: 'POST', path: `/instance/connect`, body: { instance: instanceName, ...(pairingNumber ? { number: pairingNumber } : {}) } },
-    ]
+    const connectCandidates: Array<{ method: 'GET' | 'POST'; path: string; body?: unknown }> = pairingNumber
+      ? [
+          { method: 'GET', path: `/instance/connect/${instanceName}?number=${encodeURIComponent(pairingNumber)}` },
+          { method: 'POST', path: `/instance/connect/${instanceName}`, body: { number: pairingNumber } },
+          { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}` },
+          { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}&number=${encodeURIComponent(pairingNumber)}` },
+          { method: 'POST', path: `/instance/connect`, body: { instanceName, number: pairingNumber } },
+          { method: 'POST', path: `/instance/connect`, body: { instance: instanceName, number: pairingNumber } },
+          { method: 'GET', path: `/instance/connect/${instanceName}` },
+          { method: 'POST', path: `/instance/connect/${instanceName}` },
+          { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}` },
+          { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}` },
+          { method: 'POST', path: `/instance/connect`, body: { instanceName } },
+          { method: 'POST', path: `/instance/connect`, body: { instance: instanceName } },
+        ]
+      : [
+          { method: 'GET', path: `/instance/connect/${instanceName}` },
+          { method: 'POST', path: `/instance/connect/${instanceName}` },
+          { method: 'GET', path: `/instance/connect?instance=${encodeURIComponent(instanceName)}` },
+          { method: 'GET', path: `/instance/connect?instanceName=${encodeURIComponent(instanceName)}` },
+          { method: 'POST', path: `/instance/connect`, body: { instanceName } },
+          { method: 'POST', path: `/instance/connect`, body: { instance: instanceName } },
+        ]
 
     const qrCandidates: Array<{ method: 'GET' | 'POST'; path: string; body?: unknown }> = [
       { method: 'GET', path: `/instance/qrcode/${instanceName}` },
@@ -1584,11 +1657,15 @@ Deno.serve(async (req) => {
       qrBase64 = extractQrBase64(res.body) ?? qrBase64
       pairingCode = extractPairingCode(res.body) ?? pairingCode
 
-      if (qrBase64) break
-      if (pairingCode) break
+      if (pairingNumber) {
+        if (pairingCode) break
+      } else {
+        if (qrBase64) break
+        if (pairingCode) break
+      }
     }
 
-    if (!qrBase64) {
+    if (!qrBase64 && !pairingNumber) {
       for (const c of qrCandidates) {
         const res = await evolutionRequestAuto({ baseUrl: apiUrl!, apiKey: apiKey!, path: c.path, method: c.method, body: c.body })
         if (!res.ok) {
@@ -1610,17 +1687,23 @@ Deno.serve(async (req) => {
       if (stateAfterRes.ok) connectState = extractInstanceState(stateAfterRes.body)
     }
 
-    const hint =
-      !qrBase64 && !pairingCode && (connectState === 'connecting' || connectState === 'close' || connectState === 'closed')
-        ? 'A instância ainda não retornou QR Code. Isso costuma acontecer quando a Evolution está iniciando ou quando a versão do WhatsApp Web no container está desatualizada. Verifique os logs do container e, se necessário, atualize CONFIG_SESSION_PHONE_VERSION.'
-        : null
+    const hint = (() => {
+      if (pairingNumber && !pairingCode) {
+        return 'A Evolution API não retornou código de pareamento para este número. Atualize a Evolution e confirme suporte a pairing code (Baileys); se não suportar, use “Conectar (QR Code)” em outro aparelho.'
+      }
+      if (!qrBase64 && !pairingCode && (connectState === 'connecting' || connectState === 'close' || connectState === 'closed')) {
+        return 'A instância ainda não retornou QR Code. Isso costuma acontecer quando a Evolution está iniciando ou quando a versão do WhatsApp Web no container está desatualizada. Verifique os logs do container e, se necessário, atualize CONFIG_SESSION_PHONE_VERSION.'
+      }
+      return null
+    })()
     if (userExtraOk) {
       const { error: updErr } = await dbClient.from('usuarios').update({ whatsapp_instance_name: instanceName }).eq('id', masterId)
       if (updErr && !isMissingColumnError(updErr.message)) {
         return jsonResponse(400, { error: 'save_instance_name_failed', message: updErr.message })
       }
     }
-    return jsonResponse(200, { ok: true, instanceName, state: connectState ?? state, qrBase64, pairingCode, hint })
+    const qrSafe = pairingNumber ? null : qrBase64
+    return jsonResponse(200, { ok: true, instanceName, state: connectState ?? state, qrBase64: qrSafe, pairingCode, hint })
   }
 
   if (payload.action === 'disconnect') {
@@ -1678,8 +1761,8 @@ Deno.serve(async (req) => {
     if (!agendamentoId) return jsonResponse(400, { error: 'invalid_payload' })
 
     const selectFull =
-      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,funcionario_id,unidade_id,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
-    const selectBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,servico:servicos(nome,preco)'
+      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,funcionario_id,unidade_id,extras,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+    const selectBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,extras,servico:servicos(nome,preco)'
 
     const first = await userClient.from('agendamentos').select(selectFull).eq('id', agendamentoId).maybeSingle()
     const second =
@@ -1720,13 +1803,12 @@ Deno.serve(async (req) => {
     const shouldSend = userExtra?.enviar_confirmacao !== false
     if (!shouldSend) return jsonResponse(200, { ok: true, skipped: 'disabled' })
 
-    if (!apiUrl || !apiKey) return jsonResponse(200, { ok: true, skipped: 'not_configured' })
-
     const tmplCandidate = (userExtra?.mensagem_confirmacao ?? '').trim()
     const tmpl = tmplCandidate ? (userExtra?.mensagem_confirmacao ?? '') : defaultConfirmacao
 
+    const clienteEndereco = readExtrasEndereco(agRow.extras)
     const unidadeEndereco = (agRow.unidade?.endereco ?? '').trim()
-    const endereco = unidadeEndereco || (userBaseRow.endereco ?? '')
+    const endereco = clienteEndereco || unidadeEndereco || (userBaseRow.endereco ?? '')
     const telefoneProfissional = (agRow.funcionario?.telefone ?? '').trim() || (userBaseRow.telefone ?? '')
 
     const vars = {
@@ -1735,6 +1817,7 @@ Deno.serve(async (req) => {
       hora: agRow.hora_inicio ?? '',
       servico: agRow.servico?.nome ?? '',
       preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
+      cliente_endereco: clienteEndereco,
       endereco,
       nome_negocio: userBaseRow.nome_negocio ?? '',
       telefone_profissional: telefoneProfissional,
@@ -1747,16 +1830,54 @@ Deno.serve(async (req) => {
     const phoneRaw = String(agRow.cliente_telefone ?? '')
     const phoneOk = Boolean(sanitizePhone(phoneRaw))
     const msgOk = Boolean(message)
-    if (!phoneOk || !msgOk) {
+
+    const clienteEmail = readExtrasEmail(agRow.extras)
+    const canEmail = Boolean(resendApiKey && clienteEmail)
+
+    const tryEmail = async (reason: string) => {
+      if (!canEmail) return null
+      if (!msgOk) return null
+      const negocio = (userBaseRow.nome_negocio ?? '').trim() || 'SMagenda'
+      const subject = `Agendamento confirmado — ${negocio}`
+      const res = await resendSendEmail({ apiKey: resendApiKey, from: resendFrom, to: clienteEmail, subject, text: message })
+      if (res.ok && agExtraOk) {
+        await userClient
+          .from('agendamentos')
+          .update({ confirmacao_enviada: true, confirmacao_enviada_em: new Date().toISOString() })
+          .eq('id', agendamentoId)
+          .eq('usuario_id', masterId)
+          .eq('confirmacao_enviada', false)
+      }
+      return { ok: res.ok, status: res.status, reason, to: clienteEmail, body: res.body }
+    }
+
+    const canWhatsapp = Boolean(apiUrl && apiKey)
+    if (!msgOk) {
       return jsonResponse(400, {
         error: 'missing_message_data',
         phone_ok: phoneOk,
         message_ok: msgOk,
         phone_masked: phoneRaw ? maskRecipient(phoneRaw) : null,
-        hint: !phoneOk
-          ? 'O agendamento não tem telefone válido do cliente. Preencha o telefone com DDD (ex.: 11999999999) e tente novamente.'
-          : 'A mensagem de confirmação ficou vazia. Verifique o modelo de mensagem em Configurações > Mensagens automáticas.',
+        hint: 'A mensagem de confirmação ficou vazia. Verifique o modelo de mensagem em Configurações > Mensagens automáticas.',
       })
+    }
+
+    if (!phoneOk) {
+      const emailFallback = await tryEmail('invalid_phone')
+      if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, fallback: { email: emailFallback } })
+      return jsonResponse(400, {
+        error: 'missing_message_data',
+        phone_ok: phoneOk,
+        message_ok: msgOk,
+        phone_masked: phoneRaw ? maskRecipient(phoneRaw) : null,
+        hint: 'O agendamento não tem telefone válido do cliente. Preencha o telefone com DDD (ex.: 11999999999).',
+      })
+    }
+
+    if (!canWhatsapp) {
+      const emailFallback = await tryEmail('whatsapp_not_configured')
+      if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, skipped: 'not_configured', fallback: { email: emailFallback } })
+      return jsonResponse(200, { ok: true, skipped: 'not_configured' })
     }
 
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
@@ -1778,6 +1899,16 @@ Deno.serve(async (req) => {
 
     if (!sendRes.ok) {
       if (stateNormalized && stateNormalized !== 'open' && stateNormalized !== 'connected') {
+        const emailFallback = await tryEmail('instance_not_connected')
+        if (emailFallback) {
+          return jsonResponse(emailFallback.ok ? 200 : 502, {
+            ok: emailFallback.ok,
+            error: 'instance_not_connected',
+            state,
+            instanceName,
+            fallback: { email: emailFallback },
+          })
+        }
         return jsonResponse(409, {
           error: 'instance_not_connected',
           state,
@@ -1787,6 +1918,17 @@ Deno.serve(async (req) => {
       }
 
       const hint = evolutionHint(sendRes.body)
+      const emailFallback = await tryEmail('evolution_error')
+      if (emailFallback) {
+        return jsonResponse(emailFallback.ok ? 200 : 502, {
+          ok: emailFallback.ok,
+          error: 'evolution_error',
+          details: sendRes.body,
+          hint,
+          attempts: (sendRes as unknown as { attempts?: unknown }).attempts ?? null,
+          fallback: { email: emailFallback },
+        })
+      }
       return jsonResponse(sendRes.status, {
         error: 'evolution_error',
         details: sendRes.body,

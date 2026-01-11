@@ -416,14 +416,6 @@ export function PagamentoPage() {
     window.location.href = url
   }
 
-  if (!usuario) {
-    return (
-      <AppShell>
-        <div className="text-slate-700">Acesso restrito.</div>
-      </AppShell>
-    )
-  }
-
   const formatStatusPagamento = (value: string) => {
     const v = String(value ?? '').trim().toLowerCase()
     if (!v) return '—'
@@ -433,6 +425,14 @@ export function PagamentoPage() {
     if (v === 'suspenso') return 'Suspenso'
     if (v === 'cancelado') return 'Cancelado'
     return value
+  }
+
+  if (!usuarioId || !usuario) {
+    return (
+      <AppShell>
+        <div className="text-slate-700">{appPrincipal ? 'Acesso restrito.' : 'Carregando…'}</div>
+      </AppShell>
+    )
   }
 
   const statusTone = usuario.status_pagamento === 'inadimplente' ? 'red' : usuario.status_pagamento === 'ativo' ? 'green' : 'slate'
