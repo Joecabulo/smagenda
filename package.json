@@ -1,0 +1,10 @@
+{
+  "name": "smagenda-root",
+  "private": true,
+  "scripts": {
+    "build": "cd smagenda && npm install && npm run build",
+    "lint": "cd smagenda && npm run lint",
+    "dev": "cd smagenda && npm run dev",
+    "preview": "cd smagenda && npm run preview"
+  }
+}

@@ -99,3 +99,7 @@
 2026-01-11 (GitHub)
 - Upload realizado para https://github.com/Joecabulo/smagenda (branch main)
 - Commit enviado: b273437
+
+2026-01-11 (Cloudflare)
+- Hotfix: adicionado package.json na raiz para o Cloudflare Pages encontrar npm scripts
+- Build recomendado no Cloudflare: "npm run build" (root) gerando artefatos em "smagenda/dist"
