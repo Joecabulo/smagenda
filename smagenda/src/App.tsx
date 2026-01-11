@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { RequireAuth } from './state/auth/RequireAuth'
 
 const PublicBookingPage = lazy(() => import('./views/public/PublicBookingPage').then((m) => ({ default: m.PublicBookingPage })))
+const LandingPage = lazy(() => import('./views/public/LandingPage').then((m) => ({ default: m.LandingPage })))
 const TermosPage = lazy(() => import('./views/public/TermosPage').then((m) => ({ default: m.TermosPage })))
 const PrivacidadePage = lazy(() => import('./views/public/PrivacidadePage').then((m) => ({ default: m.PrivacidadePage })))
 const AjudaPage = lazy(() => import('./views/public/AjudaPage').then((m) => ({ default: m.AjudaPage })))
@@ -50,7 +51,7 @@ function App() {
   return (
     <Suspense fallback={<AppFallback />}>
       <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<LandingPage />} />
 
         <Route path="/agendar/:slug/:unidadeSlug" element={<PublicBookingPage />} />
         <Route path="/agendar/:slug" element={<PublicBookingPage />} />
@@ -212,7 +213,7 @@ function App() {
           }
         />
 
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Suspense>
   )

@@ -104,3 +104,6 @@
 - Hotfix: adicionado package.json na raiz para o Cloudflare Pages encontrar npm scripts
 - Build no Cloudflare: "npm run build" (root) gerando artefatos em "dist" (raiz)
 - Frontend: Vite outDir ajustado para "../dist" (gera dist na raiz do repositório)
+
+2026-01-11 (site)
+- Landing page pública adicionada na rota / com CTA para cadastro/login
