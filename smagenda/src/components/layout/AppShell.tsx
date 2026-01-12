@@ -11,6 +11,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isFuncionarioAdmin = appPrincipal?.kind === 'funcionario' && appPrincipal.profile.permissao === 'admin'
   const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isFuncionarioAdmin ? masterUsuario : null
+  const temaProspector = usuario?.tema_prospector_habilitado === true
 
   const plano = String(usuario?.plano ?? '').trim().toLowerCase()
   const isProPlus = plano === 'pro' || plano === 'team' || plano === 'enterprise'
@@ -46,7 +47,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         ]
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className={['min-h-screen bg-slate-50', temaProspector ? 'theme-prospector' : ''].filter(Boolean).join(' ')}>
       <div className="mx-auto max-w-6xl px-4 py-6">
         <div className="mb-6 flex items-center justify-between">
           <div>

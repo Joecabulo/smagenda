@@ -3488,6 +3488,36 @@ before update on public.usuarios
 for each row execute function public.usuarios_block_whatsapp_update();`
   }, [])
 
+  const sqlTemaProspectorHabilitacao = useMemo(() => {
+    return `alter table public.usuarios add column if not exists tema_prospector_habilitado boolean not null default false;
+
+create index if not exists usuarios_tema_prospector_habilitado_idx on public.usuarios (tema_prospector_habilitado);
+
+create or replace function public.usuarios_block_tema_prospector_update()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if public.is_super_admin() then
+    return NEW;
+  end if;
+
+  if NEW.tema_prospector_habilitado is distinct from OLD.tema_prospector_habilitado then
+    raise exception 'not_allowed';
+  end if;
+
+  return NEW;
+end;
+$$;
+
+drop trigger if exists usuarios_block_tema_prospector_update on public.usuarios;
+create trigger usuarios_block_tema_prospector_update
+before update on public.usuarios
+for each row execute function public.usuarios_block_tema_prospector_update();`
+  }, [])
+
   const sqlWhatsappSuperAdmin = useMemo(() => {
     return `create table if not exists public.super_admin (
   id uuid primary key references auth.users(id) on delete cascade,
@@ -4186,6 +4216,12 @@ $$;`
           title="SQL do WhatsApp (habilitação por cliente)"
           description="Use para liberar o WhatsApp por cliente via painel do Super Admin."
           sql={sqlWhatsappHabilitacao}
+        />
+
+        <SqlCard
+          title="SQL do Tema Prospector (habilitação por cliente)"
+          description="Use para liberar o tema alternativo por cliente via painel do Super Admin."
+          sql={sqlTemaProspectorHabilitacao}
         />
 
         <SqlCard

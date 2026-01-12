@@ -34,6 +34,7 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
   const statusPagamento = (typeof row.status_pagamento === 'string' ? row.status_pagamento : 'trial') as UsuarioProfile['status_pagamento']
   const freeTrialConsumido = row.free_trial_consumido === true
   const tipoNegocio = typeof row.tipo_negocio === 'string' ? row.tipo_negocio : null
+  const temaProspectorHabilitado = row.tema_prospector_habilitado === true
 
   return {
     id: userId,
@@ -58,6 +59,7 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
     status_pagamento: statusPagamento,
     data_vencimento: typeof row.data_vencimento === 'string' ? row.data_vencimento : null,
     free_trial_consumido: freeTrialConsumido,
+    tema_prospector_habilitado: temaProspectorHabilitado,
     ativo: typeof row.ativo === 'boolean' ? row.ativo : true,
   }
 }
@@ -257,6 +259,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       subscription.subscription.unsubscribe()
+    }
+  }, [refresh])
+
+  useEffect(() => {
+    const onFocus = () => {
+      refresh().catch(() => undefined)
+    }
+    window.addEventListener('focus', onFocus)
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refresh().catch(() => undefined)
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [refresh])
 

@@ -6,6 +6,12 @@ import App from './App.tsx'
 import { AuthProvider } from './state/auth/AuthProvider'
 import { supabaseEnv } from './lib/supabase'
 
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => null)
+  })
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     {supabaseEnv.ok ? (

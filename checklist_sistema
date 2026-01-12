@@ -137,3 +137,38 @@
 - Deploy: Edge Function payments (v19) em ttecpztkoaxwttludgfl
 - Pagamento: PIX checkout resolve Price one-time real por plano (STRIPE_PRICE_{PLANO}_PIX ou fallback Stripe API)
 - Deploy: Edge Function payments (v20) em ttecpztkoaxwttludgfl
+
+2026-01-12 (prospector)
+- Novo app separado "prospector" para importar estabelecimentos do Google Maps (Places API) por rua/cidade e segmentação
+- Prospector: ações por estabelecimento (confirmado/aprovado/recusou/sem resposta/visitado) + contato (nome/número) + exportação JSON/CSV
+- Prospector: backend proxy (Express) para chamadas reais ao Google Places (exige GOOGLE_MAPS_API_KEY no server/.env)
+- Prospector: UI redesenhada (tema escuro, painel de detalhes, filtros/ordenação, copiar/WhatsApp/tel, multi-ruas)
+- Prospector: PWA instalável no Android (manifest + service worker + botão Instalar)
+- Prospecção: nova tela /prospeccao para gerenciar estabelecimentos (status, contato, observações)
+- Prospecção: Edge Function prospeccao importa estabelecimentos reais do Google Maps/Places por rua/termos
+- Prospecção: SQL cria tabela public.prospeccao_estabelecimentos com RLS e índices
+- Prospecção: correção de lint na ProspeccaoPage (useCallback e remoção de variável não usada)
+- Prospector: botão "Importar Itabirito (cidade inteira)" via Places API real (proxy /api)
+- Prospector: ordenação "Rua e número" com separação visual por rua
+- Prospector: segmentos agora são persistidos/mesclados durante upsert/importações
+- Prospector: api.ts melhora erro quando /api está offline (proxy 500 vazio)
+- Prospector-server: carrega GOOGLE_MAPS_API_KEY via server/.env (sem dependências)
+- Prospector (dev): iniciado prospector/server (8787) e vite dev (5173) para validar proxy /api
+- Prospector: pré-check /api/health bloqueia importação sem GOOGLE_MAPS_API_KEY
+- Prospector-server: criado prospector/server/.env placeholder (sem segredo)
+- Prospector: preset "Todos (por agendamento)" agrega segmentos e importa em uma passada
+- Prospector: barra de progresso com etapa atual durante importações
+
+2026-01-12 (SMagenda)
+- Tema alternativo “Prospector” implementado como flag real por usuário (usuarios.tema_prospector_habilitado)
+- Super Admin: toggle em /admin/whatsapp para habilitar/desabilitar Tema Prospector em clientes selecionados
+- Admin (configurações): novo bloco SQL “SQL do Tema Prospector (habilitação por cliente)” com trigger bloqueando update fora do super admin
+- AppShell aplica classe theme-prospector baseado no usuário logado (ou master do gerente), sem alterar tema padrão
+- Build: corrigido erro TS5076 na ProspeccaoPage (precedência de ?? e ||)
+- Lint: ajustado useEffect da ProspeccaoPage para evitar setState-in-effect
+- Tema Prospector: dropdowns/inputs agora usam fundo escuro e texto claro (options legíveis)
+- Super Admin: habilitar/desabilitar Tema Prospector movido para /admin/clientes (lista geral)
+- Tema Prospector: Auth refresh automático em foco/visibilidade para refletir mudanças de flag
+- PWA: SMagenda instalável (manifest + service worker + registro em produção)
+- Prospecção: removida do SMagenda (tela/rota/menu/SQL/Edge Function)
+- Validação: lint (eslint .) e build (tsc -b + vite build) OK após remoção

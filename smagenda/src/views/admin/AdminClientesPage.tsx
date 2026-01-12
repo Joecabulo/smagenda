@@ -14,6 +14,7 @@ type Cliente = {
   plano: string
   status_pagamento: string
   ativo: boolean
+  tema_prospector_habilitado?: boolean | null
 }
 
 function normalizePlanoLabel(planoRaw: string) {
@@ -30,6 +31,10 @@ export function AdminClientesPage() {
   const [error, setError] = useState<string | null>(null)
   const [clientes, setClientes] = useState<Cliente[]>([])
 
+  const [schemaTemaProspectorIncompleto, setSchemaTemaProspectorIncompleto] = useState(false)
+  const [updatingTemaProspector, setUpdatingTemaProspector] = useState(false)
+  const [selected, setSelected] = useState<Record<string, boolean>>({})
+
   const [query, setQuery] = useState('')
   const [plano, setPlano] = useState('')
   const [statusPagamento, setStatusPagamento] = useState('')
@@ -37,15 +42,23 @@ export function AdminClientesPage() {
 
   const canClear = useMemo(() => Boolean(query.trim() || plano || statusPagamento || ativo), [ativo, plano, query, statusPagamento])
 
+  const filteredClientes = useMemo(() => clientes, [clientes])
+  const selectedIds = useMemo(() => Object.keys(selected).filter((id) => selected[id] === true), [selected])
+  const selectedCount = selectedIds.length
+
+  const clearSelection = () => setSelected({})
+  const selectAllFiltered = () => setSelected(Object.fromEntries(filteredClientes.map((c) => [c.id, true])))
+
   useEffect(() => {
     const run = async () => {
       setLoading(true)
       setError(null)
+      setSchemaTemaProspectorIncompleto(false)
 
       const q = query.trim()
       let req = supabase
         .from('usuarios')
-        .select('id,nome_negocio,slug,email,telefone,plano,status_pagamento,ativo')
+        .select('id,nome_negocio,slug,email,telefone,plano,status_pagamento,ativo,tema_prospector_habilitado')
         .order('criado_em', { ascending: false })
         .limit(500)
 
@@ -65,7 +78,41 @@ export function AdminClientesPage() {
 
       const { data, error: err } = await req
       if (err) {
-        setError(err.message)
+        const msg = err.message
+        if (msg.toLowerCase().includes('does not exist') && msg.toLowerCase().includes('column')) {
+          setSchemaTemaProspectorIncompleto(true)
+          let fallback = supabase
+            .from('usuarios')
+            .select('id,nome_negocio,slug,email,telefone,plano,status_pagamento,ativo')
+            .order('criado_em', { ascending: false })
+            .limit(500)
+
+          if (q) {
+            const safe = q.replaceAll(',', ' ').trim()
+            fallback = fallback.or(`nome_negocio.ilike.%${safe}%,slug.ilike.%${safe}%,email.ilike.%${safe}%,telefone.ilike.%${safe}%`)
+          }
+          if (plano) {
+            if (plano === 'pro') {
+              fallback = fallback.in('plano', ['pro', 'team'])
+            } else {
+              fallback = fallback.eq('plano', plano)
+            }
+          }
+          if (statusPagamento) fallback = fallback.eq('status_pagamento', statusPagamento)
+          if (ativo) fallback = fallback.eq('ativo', ativo === 'true')
+
+          const { data: data2, error: err2 } = await fallback
+          if (err2) {
+            setError(err2.message)
+            setLoading(false)
+            return
+          }
+          setClientes((data2 ?? []) as unknown as Cliente[])
+          setLoading(false)
+          return
+        }
+
+        setError(msg)
         setLoading(false)
         return
       }
@@ -80,6 +127,34 @@ export function AdminClientesPage() {
     }, 250)
     return () => window.clearTimeout(t)
   }, [ativo, plano, query, statusPagamento])
+
+  const enableTemaProspectorSelected = async (enabled: boolean) => {
+    if (selectedCount === 0) return
+    setUpdatingTemaProspector(true)
+    setError(null)
+    const patch: Record<string, unknown> = enabled
+      ? {
+          tema_prospector_habilitado: true,
+        }
+      : {
+          tema_prospector_habilitado: false,
+        }
+
+    const { error: err } = await supabase.from('usuarios').update(patch).in('id', selectedIds)
+    if (err) {
+      const msg = err.message
+      if (msg.toLowerCase().includes('does not exist') && msg.toLowerCase().includes('column')) {
+        setError('Seu Supabase não tem a coluna de habilitação do Tema Prospector. Em /admin/configuracoes, execute o bloco “SQL do Tema Prospector (habilitação por cliente)”.')
+      } else {
+        setError(msg)
+      }
+      setUpdatingTemaProspector(false)
+      return
+    }
+
+    setClientes((prev) => prev.map((c) => (selectedIds.includes(c.id) ? { ...c, tema_prospector_habilitado: enabled } : c)))
+    setUpdatingTemaProspector(false)
+  }
 
   return (
     <AdminShell>
@@ -150,6 +225,13 @@ export function AdminClientesPage() {
 
         {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
 
+        {schemaTemaProspectorIncompleto ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            Seu Supabase ainda não tem a coluna do Tema Prospector por cliente. Execute o bloco “SQL do Tema Prospector (habilitação por cliente)” em{' '}
+            <span className="font-mono text-xs">/admin/configuracoes</span>.
+          </div>
+        ) : null}
+
         {!loading && !error && clientes.length === 0 ? (
           <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
             Nenhum cliente retornado.
@@ -165,25 +247,57 @@ export function AdminClientesPage() {
         ) : null}
         <Card>
           <div className="divide-y divide-slate-100">
+            <div className="p-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="text-sm text-slate-600">Selecionados: {selectedCount}</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button onClick={() => void enableTemaProspectorSelected(true)} disabled={selectedCount === 0 || updatingTemaProspector || schemaTemaProspectorIncompleto}>
+                  Habilitar Tema Prospector
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => void enableTemaProspectorSelected(false)}
+                  disabled={selectedCount === 0 || updatingTemaProspector || schemaTemaProspectorIncompleto}
+                >
+                  Desabilitar Tema Prospector
+                </Button>
+                <Button variant="secondary" onClick={selectAllFiltered} disabled={loading || filteredClientes.length === 0}>
+                  Selecionar filtrados
+                </Button>
+                <Button variant="secondary" onClick={clearSelection} disabled={selectedCount === 0}>
+                  Limpar seleção
+                </Button>
+              </div>
+            </div>
             {loading ? (
               <div className="p-6 text-sm text-slate-600">Carregando…</div>
             ) : clientes.length === 0 ? (
               <div className="p-6 text-sm text-slate-600">Nenhum cliente.</div>
             ) : (
               clientes.map((c) => (
-                <Link key={c.id} to={`/admin/clientes/${c.id}`} className="block p-4 hover:bg-slate-50">
+                <div key={c.id} className="p-4 hover:bg-slate-50">
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">{c.nome_negocio}</div>
-                      <div className="text-sm text-slate-600">/{c.slug}</div>
+                    <div className="flex items-start gap-3 min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={selected[c.id] === true}
+                        onChange={(e) => setSelected((prev) => ({ ...prev, [c.id]: e.target.checked }))}
+                        className="mt-1"
+                      />
+                      <div className="min-w-0">
+                        <Link to={`/admin/clientes/${c.id}`} className="block min-w-0">
+                          <div className="text-sm font-semibold text-slate-900 truncate">{c.nome_negocio}</div>
+                          <div className="text-sm text-slate-600 truncate">/{c.slug}</div>
+                        </Link>
+                      </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      {c.tema_prospector_habilitado === true ? <Badge tone="slate">Tema Prospector</Badge> : null}
                       {c.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}
                       <Badge tone="slate">{normalizePlanoLabel(c.plano)}</Badge>
                       <Badge tone={c.status_pagamento === 'inadimplente' ? 'red' : 'slate'}>{c.status_pagamento}</Badge>
                     </div>
                   </div>
-                </Link>
+                </div>
               ))
             )}
           </div>

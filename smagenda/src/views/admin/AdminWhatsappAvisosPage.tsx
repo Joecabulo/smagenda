@@ -16,6 +16,7 @@ type ClienteRow = {
   status_pagamento: string
   ativo: boolean
   whatsapp_habilitado?: boolean | null
+  tema_prospector_habilitado?: boolean | null
 }
 
 function normalizePlanoLabel(planoRaw: string) {
@@ -206,6 +207,9 @@ export function AdminWhatsappAvisosPage() {
   const [updatingClientesWhatsapp, setUpdatingClientesWhatsapp] = useState(false)
   const [schemaClientesWhatsappIncompleto, setSchemaClientesWhatsappIncompleto] = useState(false)
 
+  const [updatingClientesTemaProspector, setUpdatingClientesTemaProspector] = useState(false)
+  const [schemaClientesTemaProspectorIncompleto, setSchemaClientesTemaProspectorIncompleto] = useState(false)
+
   const [error, setError] = useState<string | null>(null)
   const aliveRef = useRef(true)
 
@@ -250,29 +254,51 @@ export function AdminWhatsappAvisosPage() {
     const loadClientes = async () => {
       setClientesLoading(true)
       setSchemaClientesWhatsappIncompleto(false)
+      setSchemaClientesTemaProspectorIncompleto(false)
 
       const first = await supabase
         .from('usuarios')
-        .select('id,nome_negocio,slug,telefone,plano,status_pagamento,ativo,whatsapp_habilitado')
+        .select('id,nome_negocio,slug,telefone,plano,status_pagamento,ativo,whatsapp_habilitado,tema_prospector_habilitado')
         .order('criado_em', { ascending: false })
         .limit(500)
       if (first.error) {
         if (isMissingColumnError(first.error.message)) {
-          setSchemaClientesWhatsappIncompleto(true)
-          const fallback = await supabase
+          const second = await supabase
             .from('usuarios')
-            .select('id,nome_negocio,slug,telefone,plano,status_pagamento,ativo')
+            .select('id,nome_negocio,slug,telefone,plano,status_pagamento,ativo,whatsapp_habilitado')
             .order('criado_em', { ascending: false })
             .limit(500)
-          if (fallback.error) {
-            const msg = fallback.error.message
+          if (second.error) {
+            if (isMissingColumnError(second.error.message)) {
+              setSchemaClientesWhatsappIncompleto(true)
+              setSchemaClientesTemaProspectorIncompleto(true)
+              const third = await supabase
+                .from('usuarios')
+                .select('id,nome_negocio,slug,telefone,plano,status_pagamento,ativo')
+                .order('criado_em', { ascending: false })
+                .limit(500)
+              if (third.error) {
+                const msg = third.error.message
+                const rls = msg.toLowerCase().includes('row-level security') || msg.toLowerCase().includes('permission denied')
+                setError(rls ? 'Sem permissão para listar clientes. Em /admin/configuracoes, execute “SQL de políticas (Super Admin)” e “SQL do WhatsApp (Super Admin)” no Supabase.' : msg)
+                setClientes([])
+                setClientesLoading(false)
+                return
+              }
+              setClientes((third.data ?? []) as unknown as ClienteRow[])
+              setClientesLoading(false)
+              return
+            }
+            const msg = second.error.message
             const rls = msg.toLowerCase().includes('row-level security') || msg.toLowerCase().includes('permission denied')
             setError(rls ? 'Sem permissão para listar clientes. Em /admin/configuracoes, execute “SQL de políticas (Super Admin)” e “SQL do WhatsApp (Super Admin)” no Supabase.' : msg)
             setClientes([])
             setClientesLoading(false)
             return
           }
-          setClientes((fallback.data ?? []) as unknown as ClienteRow[])
+
+          setSchemaClientesTemaProspectorIncompleto(true)
+          setClientes((second.data ?? []) as unknown as ClienteRow[])
           setClientesLoading(false)
           return
         }
@@ -342,6 +368,41 @@ export function AdminWhatsappAvisosPage() {
       })
     )
     setUpdatingClientesWhatsapp(false)
+  }
+
+  const enableTemaProspectorSelected = async (enabled: boolean) => {
+    if (selectedCount === 0) return
+    setUpdatingClientesTemaProspector(true)
+    setError(null)
+    setLastSendSummary(null)
+
+    const patch: Record<string, unknown> = enabled
+      ? {
+          tema_prospector_habilitado: true,
+        }
+      : {
+          tema_prospector_habilitado: false,
+        }
+
+    const { error: err } = await supabase.from('usuarios').update(patch).in('id', selectedIds)
+    if (err) {
+      const msg = err.message
+      if (msg.toLowerCase().includes('does not exist') && msg.toLowerCase().includes('column')) {
+        setError('Seu Supabase não tem a coluna de habilitação do Tema Prospector. Em /admin/configuracoes, execute o bloco “SQL do Tema Prospector (habilitação por cliente)”.')
+      } else {
+        setError(msg)
+      }
+      setUpdatingClientesTemaProspector(false)
+      return
+    }
+
+    setClientes((prev) =>
+      prev.map((c) => {
+        if (!selectedIds.includes(c.id)) return c
+        return { ...c, tema_prospector_habilitado: enabled }
+      })
+    )
+    setUpdatingClientesTemaProspector(false)
   }
 
   const saveConfig = async () => {
@@ -766,6 +827,20 @@ export function AdminWhatsappAvisosPage() {
                 <Button variant="secondary" onClick={() => void enableWhatsappSelected(false)} disabled={selectedCount === 0 || updatingClientesWhatsapp}>
                   Desabilitar WhatsApp
                 </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => void enableTemaProspectorSelected(true)}
+                  disabled={selectedCount === 0 || updatingClientesTemaProspector}
+                >
+                  Habilitar Tema Prospector
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => void enableTemaProspectorSelected(false)}
+                  disabled={selectedCount === 0 || updatingClientesTemaProspector}
+                >
+                  Desabilitar Tema Prospector
+                </Button>
                 <Button variant="secondary" onClick={selectAllFiltered} disabled={clientesLoading || filteredClientes.length === 0}>
                   Selecionar filtrados
                 </Button>
@@ -778,6 +853,12 @@ export function AdminWhatsappAvisosPage() {
             {schemaClientesWhatsappIncompleto ? (
               <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                 Seu Supabase ainda não tem a coluna de habilitação do WhatsApp por cliente. Execute o bloco “SQL do WhatsApp (habilitação por cliente)” em <span className="font-mono text-xs">/admin/configuracoes</span>.
+              </div>
+            ) : null}
+
+            {schemaClientesTemaProspectorIncompleto ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                Seu Supabase ainda não tem a coluna de habilitação do Tema Prospector por cliente. Execute o bloco “SQL do Tema Prospector (habilitação por cliente)” em <span className="font-mono text-xs">/admin/configuracoes</span>.
               </div>
             ) : null}
 
@@ -807,6 +888,7 @@ export function AdminWhatsappAvisosPage() {
                           </div>
                         <div className="flex items-center gap-2">
                           {c.whatsapp_habilitado === true ? <Badge tone="green">WhatsApp</Badge> : <Badge tone="yellow">Sem WhatsApp</Badge>}
+                          {c.tema_prospector_habilitado === true ? <Badge tone="slate">Tema Prospector</Badge> : null}
                           {c.ativo ? <Badge tone="green">Ativo</Badge> : <Badge tone="red">Inativo</Badge>}
                           <Badge tone="slate">{normalizePlanoLabel(c.plano)}</Badge>
                           <Badge tone={c.status_pagamento === 'inadimplente' ? 'red' : 'slate'}>{c.status_pagamento}</Badge>

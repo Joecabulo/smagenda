@@ -7,3 +7,128 @@ body,
 #root {
   height: 100%;
 }
+
+:root {
+  --sm-bg: #f8fafc;
+  --sm-surface: #ffffff;
+  --sm-surface2: #f1f5f9;
+  --sm-border: rgba(15, 23, 42, 0.12);
+  --sm-text: rgba(15, 23, 42, 0.95);
+  --sm-muted: rgba(15, 23, 42, 0.7);
+  --sm-muted2: rgba(15, 23, 42, 0.55);
+  --sm-shadow: 0 8px 20px rgba(2, 6, 23, 0.06);
+  --sm-ring: rgba(148, 163, 184, 0.55);
+  --sm-primary: #0f172a;
+  --sm-primary-hover: #111827;
+  --sm-danger: #e11d48;
+  --sm-success: #059669;
+  --sm-link: #2563eb;
+}
+
+.theme-prospector {
+  --sm-bg: #0b1220;
+  --sm-surface: #0f1b31;
+  --sm-surface2: #0c172b;
+  --sm-border: rgba(255, 255, 255, 0.08);
+  --sm-text: rgba(255, 255, 255, 0.92);
+  --sm-muted: rgba(255, 255, 255, 0.68);
+  --sm-muted2: rgba(255, 255, 255, 0.52);
+  --sm-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+  --sm-ring: rgba(148, 163, 184, 0.25);
+  --sm-primary: rgba(99, 102, 241, 0.95);
+  --sm-primary-hover: rgba(79, 70, 229, 0.95);
+  --sm-danger: #f43f5e;
+  --sm-success: #22c55e;
+  --sm-link: rgba(147, 197, 253, 0.95);
+  background: radial-gradient(1200px 600px at 15% 10%, rgba(99, 102, 241, 0.25), transparent 60%),
+    radial-gradient(900px 500px at 90% 0%, rgba(34, 197, 94, 0.18), transparent 60%), var(--sm-bg);
+  color: var(--sm-text);
+}
+
+.theme-prospector a {
+  color: var(--sm-link);
+}
+
+.theme-prospector .bg-slate-50 {
+  background-color: transparent !important;
+}
+
+.theme-prospector .bg-white {
+  background-color: var(--sm-surface) !important;
+}
+
+.theme-prospector .bg-slate-100 {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+}
+
+.theme-prospector .border-slate-200,
+.theme-prospector .divide-slate-100 {
+  border-color: var(--sm-border) !important;
+}
+
+.theme-prospector .text-slate-900 {
+  color: var(--sm-text) !important;
+}
+
+.theme-prospector .text-slate-800,
+.theme-prospector .text-slate-700 {
+  color: var(--sm-muted) !important;
+}
+
+.theme-prospector .text-slate-600,
+.theme-prospector .text-slate-500 {
+  color: var(--sm-muted2) !important;
+}
+
+.theme-prospector .shadow-sm {
+  box-shadow: var(--sm-shadow) !important;
+}
+
+.theme-prospector .bg-slate-900 {
+  background-color: var(--sm-primary) !important;
+}
+
+.theme-prospector .hover\:bg-slate-800:hover {
+  background-color: var(--sm-primary-hover) !important;
+}
+
+.theme-prospector .hover\:bg-slate-50:hover {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+}
+
+.theme-prospector .hover\:bg-slate-100:hover {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+.theme-prospector .focus\:ring-slate-300:focus {
+  --tw-ring-color: var(--sm-ring) !important;
+}
+
+.theme-prospector .bg-emerald-600 {
+  background-color: var(--sm-success) !important;
+}
+
+.theme-prospector .hover\:bg-emerald-500:hover {
+  background-color: rgba(34, 197, 94, 0.85) !important;
+}
+
+.theme-prospector .bg-rose-600 {
+  background-color: var(--sm-danger) !important;
+}
+
+.theme-prospector .hover\\:bg-rose-500:hover {
+  background-color: rgba(244, 63, 94, 0.9) !important;
+}
+
+.theme-prospector select,
+.theme-prospector textarea,
+.theme-prospector input {
+  background-color: var(--sm-surface) !important;
+  color: var(--sm-text) !important;
+  border-color: var(--sm-border) !important;
+}
+
+.theme-prospector select option {
+  background-color: #0b1220;
+  color: rgba(255, 255, 255, 0.92);
+}

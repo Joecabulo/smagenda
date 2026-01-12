@@ -21,6 +21,7 @@ export type UsuarioProfile = {
   status_pagamento: 'ativo' | 'inadimplente' | 'cancelado' | 'trial' | 'suspenso'
   data_vencimento: string | null
   free_trial_consumido: boolean
+  tema_prospector_habilitado: boolean
   ativo: boolean
 }
 
