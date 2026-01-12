@@ -51,6 +51,7 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
     intervalo_inicio: typeof row.intervalo_inicio === 'string' ? row.intervalo_inicio : null,
     intervalo_fim: typeof row.intervalo_fim === 'string' ? row.intervalo_fim : null,
     whatsapp_api_url: typeof row.whatsapp_api_url === 'string' ? row.whatsapp_api_url : null,
+    stripe_customer_id: typeof row.stripe_customer_id === 'string' ? row.stripe_customer_id : null,
     plano,
     tipo_conta: tipoConta,
     limite_funcionarios: typeof row.limite_funcionarios === 'number' ? row.limite_funcionarios : null,

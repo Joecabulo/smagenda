@@ -108,4 +108,32 @@
 
 2026-01-11 (site)
 - Landing page pública adicionada na rota / com CTA para cadastro/login
-- Landing page: correção do rodapé (© {ano} SMagenda)
+- Landing page: rodapé usa nome de marca configurável (© {ano} {brand})
+- Landing page: seção de diferenciais para posicionamento/exclusividade
+- Landing page: botão Copiar usa domínio real (window.location.origin)
+- Branding: suporte a VITE_PUBLIC_PRODUCT_NAME, VITE_PUBLIC_COMPANY_NAME e VITE_PUBLIC_COMPANY_LOGO_URL (com fallback)
+- Landing page: header exibe empresa (logo/nome) + nome do sistema
+- Landing page: seção Para quem é e FAQ
+- Site: favicon atualizado para ícone SingleMotion (substitui vite.svg)
+- Site: favicon atualizado para usar smagenda/public/favicon.png (logo SingleMotion)
+
+2026-01-12
+- Landing page: seção Planos com preços reais (BASIC/PRO/EMPRESA) e CTA para cadastro
+- Landing page: destaque de pré-venda com validade até 08/02/2026
+- Landing page: CTA “Falar no WhatsApp” usa número real via env (VITE_SUPORTE_WHATSAPP / VITE_SUPPORT_WHATSAPP*)
+- Landing page: bloco de confiança (checkout Stripe, cancelamento, suporte) e FAQ com cobrança/comparação de planos
+- Validação: lint (eslint .) e build (tsc -b + vite build) OK
+- Plano EMPRESA: limite definido para até 10 profissionais (UI + Edge Functions + pagamentos)
+- Pagamento: botão “Gerenciar / Cancelar” abre Stripe Billing Portal (assinaturas)
+- Auth: UsuarioProfile passa a carregar stripe_customer_id do Supabase
+- Validação: lint (eslint .) OK; build (tsc -b + vite build) OK
+- Pagamento: erro invalid_action agora orienta deploy da Edge Function payments
+- Deploy: Edge Function payments (v16) em ttecpztkoaxwttludgfl
+- Deploy: Edge Function payments (v17) com --no-verify-jwt em ttecpztkoaxwttludgfl
+- Pagamento: Billing Portal agora retorna mensagem real do Stripe em erros
+- Pagamento: suporta STRIPE_BILLING_PORTAL_CONFIGURATION (opcional)
+- Deploy: Edge Function payments (v18) em ttecpztkoaxwttludgfl
+- Pagamento: Billing Portal recria stripe_customer_id quando cliente não existe no Stripe
+- Deploy: Edge Function payments (v19) em ttecpztkoaxwttludgfl
+- Pagamento: PIX checkout resolve Price one-time real por plano (STRIPE_PRICE_{PLANO}_PIX ou fallback Stripe API)
+- Deploy: Edge Function payments (v20) em ttecpztkoaxwttludgfl

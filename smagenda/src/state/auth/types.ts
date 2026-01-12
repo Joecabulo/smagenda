@@ -14,6 +14,7 @@ export type UsuarioProfile = {
   intervalo_inicio: string | null
   intervalo_fim: string | null
   whatsapp_api_url: string | null
+  stripe_customer_id: string | null
   plano: 'free' | 'basic' | 'pro' | 'team' | 'enterprise'
   tipo_conta: 'master' | 'individual'
   limite_funcionarios: number | null

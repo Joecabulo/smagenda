@@ -155,6 +155,11 @@ async function createCheckoutPagamento(
   return callPaymentsFn(payload)
 }
 
+async function createBillingPortalPagamento(usuarioId: string): Promise<FnResult> {
+  const payload: Record<string, unknown> = { action: 'create_billing_portal', usuario_id: usuarioId }
+  return callPaymentsFn(payload)
+}
+
 async function syncCheckoutSessionPagamento(sessionId: string, usuarioId: string | null): Promise<FnResult> {
   const payload: Record<string, unknown> = { action: 'sync_checkout_session', session_id: sessionId }
   if (usuarioId) payload.usuario_id = usuarioId
@@ -211,6 +216,7 @@ export function PagamentoPage() {
   const [userSelectedPlan, setUserSelectedPlan] = useState<PlanKey | null>(null)
   const [selectedService, setSelectedService] = useState<ServiceCard['key'] | null>(null)
   const [creatingCheckout, setCreatingCheckout] = useState(false)
+  const [openingPortal, setOpeningPortal] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [funcionariosTotal, setFuncionariosTotal] = useState<number | null>(null)
 
@@ -230,6 +236,9 @@ export function PagamentoPage() {
         return message
       }
       if (err === 'missing_supabase_env') return 'Configuração do Supabase ausente no ambiente.'
+      if (err === 'invalid_action') {
+        return 'A função payments do Supabase está desatualizada (não reconhece a ação solicitada). Faça deploy da Edge Function payments e tente novamente.'
+      }
       if (err === 'network_error') return typeof obj.message === 'string' && obj.message.trim() ? obj.message : 'Falha de rede ao iniciar pagamento.'
       if (err === 'session_expired' || err === 'invalid_jwt') return 'Sessão expirada no Supabase. Saia e entre novamente.'
       if (err === 'jwt_project_mismatch') return 'Sessão do Supabase pertence a outro projeto. Saia e entre novamente.'
@@ -277,8 +286,8 @@ export function PagamentoPage() {
           key: 'enterprise',
           title: 'EMPRESA',
           priceLabel: 'R$ 98,99/mês',
-          subtitle: 'Ilimitado',
-          bullets: ['Profissionais ilimitados', 'Multi-unidades', 'Agendamentos ilimitados', 'Serviços ilimitados', 'Logo e fotos de serviços', 'Suporte via WhatsApp'],
+          subtitle: 'Até 10 profissionais',
+          bullets: ['Até 10 profissionais', 'Multi-unidades', 'Agendamentos ilimitados', 'Serviços ilimitados', 'Logo e fotos de serviços', 'Para mais profissionais, fale com o suporte'],
         },
       ] satisfies PlanCard[],
     [canShowFree]
@@ -287,7 +296,7 @@ export function PagamentoPage() {
   const services = useMemo<ServiceCard[]>(
     () =>
       [
-        { key: 'setup_completo', title: 'Setup Completo', priceLabel: 'R$ 150 (uma vez)', bullets: ['Você configura tudo para o cliente', 'Cadastra serviços, fotos, horários', 'Conecta WhatsApp', 'Testa envios', 'Treina o cliente em 15 minutos'] },
+        { key: 'setup_completo', title: 'Setup Completo', priceLabel: 'R$ 150 (uma vez)', bullets: ['Configuramos tudo para você', 'Cadastramos serviços, fotos, horários', 'Testamos envios do WhatsApp apos conexão', 'Treinamos o cliente em 15 minutos'] },
         { key: 'consultoria_hora', title: 'Consultoria por Hora', priceLabel: 'R$ 80/hora', bullets: ['Ajuda com configurações avançadas', 'Sugestões de otimização', 'Dúvidas gerais'] },
       ] satisfies ServiceCard[],
     []
@@ -391,6 +400,26 @@ export function PagamentoPage() {
     if (!url) {
       setError('A função não retornou o link de checkout.')
       setCreatingCheckout(false)
+      return
+    }
+    window.location.href = url
+  }
+
+  const openBillingPortal = async () => {
+    if (!usuarioId) return
+    setOpeningPortal(true)
+    setError(null)
+    const res = await createBillingPortalPagamento(usuarioId)
+    if (!res.ok) {
+      setError(formatCheckoutError(res.status, res.body))
+      setOpeningPortal(false)
+      return
+    }
+    const body = res.body as Record<string, unknown>
+    const url = typeof body.url === 'string' ? body.url : null
+    if (!url) {
+      setError('A função não retornou o link do portal.')
+      setOpeningPortal(false)
       return
     }
     window.location.href = url
@@ -610,6 +639,24 @@ export function PagamentoPage() {
                       </Button>
                     </div>
                   </div>
+
+                  {usuario.stripe_customer_id ? (
+                    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <div className="text-sm font-semibold text-slate-900">Assinatura</div>
+                          <div className="text-xs text-slate-600">Cancelar ou trocar forma de pagamento pelo Stripe.</div>
+                        </div>
+                        <Button variant="secondary" onClick={() => void openBillingPortal()} disabled={openingPortal}>
+                          {openingPortal ? 'Abrindo…' : 'Gerenciar / Cancelar'}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : usuario.status_pagamento === 'ativo' ? (
+                    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-700">
+                      Se você pagou por PIX (30 dias), não existe assinatura para cancelar. Ao vencer, basta não renovar.
+                    </div>
+                  ) : null}
                 </div>
               </Card>
             </div>

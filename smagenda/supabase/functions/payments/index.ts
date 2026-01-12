@@ -3,6 +3,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.89.0'
 type Payload =
   | { action: 'create_checkout'; usuario_id: string; plano: string; metodo?: 'card' | 'pix' | null; funcionarios_total?: number | null }
   | { action: 'sync_checkout_session'; session_id: string; usuario_id?: string | null }
+  | { action: 'create_billing_portal'; usuario_id: string }
   | {
       action: 'create_booking_fee_checkout'
       usuario_id: string
@@ -238,7 +239,7 @@ function mapStripeSubscriptionToPagamentoStatus(statusRaw: unknown) {
 function resolveLimiteFuncionariosFromPlano(planoRaw: unknown) {
   const plano = typeof planoRaw === 'string' ? planoRaw.trim().toLowerCase() : ''
   if (!plano) return undefined
-  if (plano === 'enterprise') return null
+  if (plano === 'enterprise') return 10
   if (plano === 'team') return 4
   if (plano === 'pro') return 4
   if (plano === 'basic') return 1
@@ -347,7 +348,7 @@ function resolveLimiteFuncionariosFromStripe(input: {
     extraProductId: input.extraProductId,
   })
 
-  const max = plano === 'pro' || plano === 'team' ? 6 : 200
+  const max = plano === 'pro' || plano === 'team' ? 6 : plano === 'enterprise' ? 10 : 200
 
   if (typeof extraQty === 'number') {
     const total = baseIncluded + Math.max(0, extraQty)
@@ -1143,10 +1144,9 @@ Deno.serve(async (req) => {
     return jsonResponse(401, { error: 'unauthorized', message: userErr?.message ?? 'invalid_session' })
   }
 
-  if (!payload || (payload as Payload).action !== 'create_checkout') {
-    if (!payload || (payload as Payload).action !== 'sync_checkout_session') {
-      return jsonResponse(400, { error: 'invalid_action' })
-    }
+  const action = payload ? String((payload as Payload).action ?? '').trim() : ''
+  if (!action || (action !== 'create_checkout' && action !== 'sync_checkout_session' && action !== 'create_billing_portal')) {
+    return jsonResponse(400, { error: 'invalid_action' })
   }
 
   if (payload.action === 'sync_checkout_session') {
@@ -1234,6 +1234,176 @@ Deno.serve(async (req) => {
     })
 
     return jsonResponse(200, { ok: true, usuario_id: finalUsuarioId, item, plano, status_pagamento: statusPagamento, data_vencimento: venc })
+  }
+
+  if (payload.action === 'create_billing_portal') {
+    const usuarioId = normalizeUuid(payload.usuario_id)
+    if (!usuarioId) return jsonResponse(400, { error: 'invalid_usuario_id' })
+
+    const callerId = userData.user.id
+    const { data: saRow } = await userClient.from('super_admin').select('id').eq('id', callerId).maybeSingle()
+    const isSuperAdmin = Boolean(saRow)
+    if (!isSuperAdmin && callerId !== usuarioId) {
+      return jsonResponse(403, { error: 'forbidden' })
+    }
+
+    const { data: usuarioRow, error: usuarioErr } = await adminClient
+      .from('usuarios')
+      .select('stripe_customer_id,email,nome_negocio')
+      .eq('id', usuarioId)
+      .maybeSingle()
+    if (usuarioErr) {
+      return jsonResponse(400, { error: 'db_error', message: usuarioErr.message })
+    }
+
+    const stripeMessageFromBody = (body: unknown) => {
+      if (!body || typeof body !== 'object') return null
+      const obj = body as Record<string, unknown>
+      const err = obj.error
+      if (!err || typeof err !== 'object') return null
+      const msg = (err as Record<string, unknown>).message
+      return typeof msg === 'string' && msg.trim() ? msg.trim() : null
+    }
+
+    const stripeCustomerNotFound = (body: unknown) => {
+      if (!body || typeof body !== 'object') return false
+      const obj = body as Record<string, unknown>
+      const err = obj.error
+      if (!err || typeof err !== 'object') return false
+      const e = err as Record<string, unknown>
+      const msg = typeof e.message === 'string' ? e.message.trim().toLowerCase() : ''
+      const code = typeof e.code === 'string' ? e.code.trim().toLowerCase() : ''
+      const param = typeof e.param === 'string' ? e.param.trim().toLowerCase() : ''
+      if (msg.includes('no such customer')) return true
+      if (code === 'resource_missing' && param === 'customer') return true
+      return false
+    }
+
+    const nowIso = new Date().toISOString()
+    const email = typeof (usuarioRow as Record<string, unknown> | null)?.email === 'string' ? String((usuarioRow as Record<string, unknown>).email).trim() : ''
+    const nomeNegocio =
+      typeof (usuarioRow as Record<string, unknown> | null)?.nome_negocio === 'string' ? String((usuarioRow as Record<string, unknown>).nome_negocio).trim() : ''
+
+    const createStripeCustomer = async () => {
+      const customerParams = new URLSearchParams()
+      if (email) customerParams.set('email', email)
+      if (nomeNegocio) customerParams.set('name', nomeNegocio)
+      customerParams.set('metadata[usuario_id]', usuarioId)
+
+      const customerRes = await stripeApiRequest('/customers', { method: 'POST', key: stripeKey, params: customerParams })
+      if (!customerRes.ok || !customerRes.body || typeof customerRes.body !== 'object') {
+        return { ok: false as const, status: customerRes.status, body: customerRes.body }
+      }
+      const id = typeof (customerRes.body as Record<string, unknown>).id === 'string' ? String((customerRes.body as Record<string, unknown>).id).trim() : ''
+      if (!id) {
+        return { ok: false as const, status: customerRes.status, body: customerRes.body }
+      }
+
+      const persisted = await applyUsuarioPaymentUpdate(adminClient, usuarioId, {
+        stripe_customer_id: id,
+        stripe_last_event_id: `billing_portal:customer_created:${id}`,
+        stripe_last_event_at: nowIso,
+      })
+      if (!persisted.ok) {
+        return { ok: false as const, status: 400, body: { error: 'db_error', message: persisted.error } }
+      }
+
+      return { ok: true as const, id }
+    }
+
+    let customerId = typeof (usuarioRow as Record<string, unknown> | null)?.stripe_customer_id === 'string' ? String((usuarioRow as Record<string, unknown>).stripe_customer_id).trim() : ''
+    if (!customerId) {
+      const created = await createStripeCustomer()
+      if (!created.ok) {
+        return jsonResponse(400, {
+          error: 'stripe_error',
+          message: 'Falha ao criar o cliente no Stripe para abrir o portal.',
+          stripe_status: created.status,
+          stripe_key_mode: stripeKeyMode,
+          stripe: created.body,
+        })
+      }
+      customerId = created.id
+    }
+
+    const origin = cleanUrl(req.headers.get('origin') ?? '')
+    const siteUrl = cleanUrl(Deno.env.get('SITE_URL') ?? Deno.env.get('APP_URL') ?? origin)
+    if (!siteUrl) {
+      return jsonResponse(500, { error: 'missing_env', message: 'Defina SITE_URL/APP_URL para montar return_url.' })
+    }
+
+    const params = new URLSearchParams()
+    params.set('customer', customerId)
+    params.set('return_url', `${siteUrl}/pagamento`)
+
+    const portalConfig = cleanEnvValue(Deno.env.get('STRIPE_BILLING_PORTAL_CONFIGURATION') ?? '')
+    if (portalConfig) params.set('configuration', portalConfig)
+
+    const portalRes = await stripeApiRequest('/billing_portal/sessions', { method: 'POST', key: stripeKey, params })
+    if (!portalRes.ok || !portalRes.body || typeof portalRes.body !== 'object') {
+      if (stripeCustomerNotFound(portalRes.body)) {
+        const created = await createStripeCustomer()
+        if (!created.ok) {
+          return jsonResponse(400, {
+            error: 'stripe_error',
+            message: 'Falha ao recriar o cliente no Stripe para abrir o portal.',
+            stripe_status: created.status,
+            stripe_key_mode: stripeKeyMode,
+            stripe: created.body,
+          })
+        }
+
+        const retryParams = new URLSearchParams()
+        retryParams.set('customer', created.id)
+        retryParams.set('return_url', `${siteUrl}/pagamento`)
+        if (portalConfig) retryParams.set('configuration', portalConfig)
+        const retryRes = await stripeApiRequest('/billing_portal/sessions', { method: 'POST', key: stripeKey, params: retryParams })
+        if (!retryRes.ok || !retryRes.body || typeof retryRes.body !== 'object') {
+          const stripeMessage = stripeMessageFromBody(retryRes.body)
+          return jsonResponse(400, {
+            error: 'stripe_error',
+            message: stripeMessage ? `Falha ao abrir o portal do Stripe: ${stripeMessage}` : 'Falha ao abrir o portal do Stripe.',
+            stripe_status: retryRes.status,
+            stripe_key_mode: stripeKeyMode,
+            stripe: retryRes.body,
+          })
+        }
+
+        const url = typeof (retryRes.body as Record<string, unknown>).url === 'string' ? String((retryRes.body as Record<string, unknown>).url) : ''
+        if (!url.trim()) {
+          return jsonResponse(400, {
+            error: 'stripe_error',
+            message: 'Stripe não retornou a URL do portal.',
+            stripe_status: retryRes.status,
+            stripe_key_mode: stripeKeyMode,
+            stripe: retryRes.body,
+          })
+        }
+        return jsonResponse(200, { ok: true, url })
+      }
+
+      const stripeMessage = stripeMessageFromBody(portalRes.body)
+      return jsonResponse(400, {
+        error: 'stripe_error',
+        message: stripeMessage ? `Falha ao abrir o portal do Stripe: ${stripeMessage}` : 'Falha ao abrir o portal do Stripe.',
+        stripe_status: portalRes.status,
+        stripe_key_mode: stripeKeyMode,
+        stripe: portalRes.body,
+      })
+    }
+
+    const url = typeof (portalRes.body as Record<string, unknown>).url === 'string' ? String((portalRes.body as Record<string, unknown>).url) : ''
+    if (!url.trim()) {
+      return jsonResponse(400, {
+        error: 'stripe_error',
+        message: 'Stripe não retornou a URL do portal.',
+        stripe_status: portalRes.status,
+        stripe_key_mode: stripeKeyMode,
+        stripe: portalRes.body,
+      })
+    }
+
+    return jsonResponse(200, { ok: true, url })
   }
 
   const usuarioId = normalizeUuid(payload.usuario_id)
@@ -1381,41 +1551,77 @@ Deno.serve(async (req) => {
     return true
   }
 
-  const defaultPriceOk = await validatePriceForProduct(price, productId, mode)
-  if (!defaultPriceOk) {
-    const expectedType = mode === 'subscription' ? 'recurring' : 'one_time'
-    return jsonResponse(400, {
-      error: 'invalid_default_price',
-      message: `default_price inválido para o modo ${mode} (esperado ${expectedType}) (item=${item}, product=${productId}, price=${price}).`,
-    })
-  }
+  let finalPrice: string | null = null
+  const expectedType = mode === 'subscription' ? 'recurring' : 'one_time'
 
-  let finalPrice = price
-  if (metodo !== 'pix') {
-    const envKey = `STRIPE_PRICE_${item.toUpperCase()}`
-    const altEnvKey = item === 'enterprise' ? 'STRIPE_PRICE_EMPRESA' : null
-    const fromEnv = ((Deno.env.get(envKey) ?? '').trim() || (altEnvKey ? (Deno.env.get(altEnvKey) ?? '').trim() : '')).trim()
-    if (fromEnv) {
-      const ok = await validatePriceForProduct(fromEnv, productId, mode)
-      if (ok) finalPrice = fromEnv
-    }
-  }
   if (metodo === 'pix' && isPlan) {
     const envKey = `STRIPE_PRICE_${item.toUpperCase()}_PIX`
     const altEnvKey = item === 'enterprise' ? 'STRIPE_PRICE_EMPRESA_PIX' : null
     const fromEnv = ((Deno.env.get(envKey) ?? '').trim() || (altEnvKey ? (Deno.env.get(altEnvKey) ?? '').trim() : '')).trim()
-    if (!fromEnv) {
-      return jsonResponse(400, {
-        error: 'missing_env',
-        message:
-          item === 'enterprise'
-            ? `Para PIX em planos, configure ${envKey} (ou ${altEnvKey}) com um Price (one-time) em BRL.`
-            : `Para PIX em planos, configure ${envKey} com um Price (one-time) em BRL.`,
+
+    if (fromEnv) {
+      const ok = await validatePriceForProduct(fromEnv, productId, 'payment')
+      if (!ok) {
+        return jsonResponse(400, {
+          error: 'invalid_price',
+          message: `O Price informado em ${envKey} não está ativo, não é one-time, ou não pertence ao produto ${productId}.`,
+        })
+      }
+      finalPrice = fromEnv
+    } else {
+      const resolved = await resolveActivePriceIdForProduct({
+        productId,
+        key: stripeKey,
+        expectedMode: 'payment',
+        currency: 'brl',
       })
+      if (resolved) {
+        finalPrice = resolved
+      } else {
+        return jsonResponse(400, {
+          error: 'missing_env',
+          message:
+            item === 'enterprise'
+              ? `Não encontrei um Price one-time (BRL) ativo no Stripe para o produto ${productId}. Crie um Price one-time no Stripe ou configure ${envKey} (ou ${altEnvKey}).`
+              : `Não encontrei um Price one-time (BRL) ativo no Stripe para o produto ${productId}. Crie um Price one-time no Stripe ou configure ${envKey}.`,
+        })
+      }
     }
-    const ok = await validatePriceForProduct(fromEnv, productId, 'payment')
-    if (!ok) return jsonResponse(400, { error: 'invalid_price', message: `O Price informado em ${envKey} não está ativo, não é one-time, ou não pertence ao produto ${productId}.` })
-    finalPrice = fromEnv
+  } else {
+    const envKey = `STRIPE_PRICE_${item.toUpperCase()}`
+    const altEnvKey = item === 'enterprise' ? 'STRIPE_PRICE_EMPRESA' : null
+    const fromEnv = ((Deno.env.get(envKey) ?? '').trim() || (altEnvKey ? (Deno.env.get(altEnvKey) ?? '').trim() : '')).trim()
+
+    if (fromEnv) {
+      const ok = await validatePriceForProduct(fromEnv, productId, mode)
+      if (ok) finalPrice = fromEnv
+    }
+
+    if (!finalPrice) {
+      const defaultOk = await validatePriceForProduct(price, productId, mode)
+      if (defaultOk) {
+        finalPrice = price
+      } else {
+        const resolved = await resolveActivePriceIdForProduct({
+          productId,
+          key: stripeKey,
+          expectedMode: mode,
+          currency: 'brl',
+        })
+        if (resolved) {
+          finalPrice = resolved
+        } else {
+          return jsonResponse(400, {
+            error: 'invalid_default_price',
+            message: `default_price inválido para o modo ${mode} (esperado ${expectedType}) (item=${item}, product=${productId}, price=${price}).`,
+          })
+        }
+      }
+    }
+  }
+
+  if (!finalPrice) {
+    return jsonResponse(400, { error: 'missing_price', message: `Não foi possível resolver um Price para item=${item}.` })
   }
 
   params.set('payment_method_types[0]', metodo)

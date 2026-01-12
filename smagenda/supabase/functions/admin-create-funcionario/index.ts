@@ -114,7 +114,7 @@ Deno.serve(async (req) => {
 
   let limiteEfetivo: number | null | undefined = masterRow.limite_funcionarios
   if (plano === 'enterprise') {
-    limiteEfetivo = null
+    limiteEfetivo = 10
   } else if (plano === 'pro' || plano === 'team') {
     const raw = masterRow.limite_funcionarios
     const n = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null
