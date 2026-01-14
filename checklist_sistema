@@ -183,3 +183,4 @@
 - Prospector: importação padrão agora é por cidade + estado (UF), cobrindo a cidade inteira
 - Prospector: raio de busca derivado do viewport do Geocode (fallback 14km) para resultado real
 - Prospector: botão "Excluir tudo" para limpar importes salvos no dispositivo (localStorage)
+- Segurança: removido prospector/server/.env do Git (chaves não devem ficar no repo)
