@@ -1,14 +1,14 @@
 {
   "name": "Prospector",
   "short_name": "Prospector",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "/142555787po/",
+  "scope": "/142555787po/",
   "display": "standalone",
   "background_color": "#0b1220",
   "theme_color": "#0b1220",
   "icons": [
     {
-      "src": "/icon.svg",
+      "src": "/142555787po/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"

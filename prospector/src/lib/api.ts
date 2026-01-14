@@ -30,13 +30,13 @@ async function getJson<T>(url: string): Promise<T> {
   try {
     res = await fetch(url)
   } catch {
-    throw new Error('Backend indisponível. Inicie o prospector/server e tente novamente.')
+    throw new Error('Backend indisponível. Verifique se o Prospector está publicado e tente novamente.')
   }
 
   const text = await res.text()
   if (!text.trim()) {
     if (String(url).startsWith('/api')) {
-      throw new Error(`Backend indisponível (${res.status}). Inicie o prospector/server e tente novamente.`)
+      throw new Error(`Backend indisponível (${res.status}). Verifique se o Prospector está publicado e tente novamente.`)
     }
     throw new Error(`Resposta vazia do backend (${res.status}).`)
   }

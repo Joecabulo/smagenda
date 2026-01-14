@@ -1,10 +1,28 @@
 const CACHE_NAME = 'prospector-shell-v1'
 
+function getScopePath() {
+  try {
+    const u = new URL(self.registration.scope)
+    return u.pathname.endsWith('/') ? u.pathname : `${u.pathname}/`
+  } catch {
+    return '/'
+  }
+}
+
+const SCOPE = getScopePath()
+
+function inScope(path) {
+  const p = String(path || '')
+  if (!p) return SCOPE
+  if (p.startsWith('/')) return `${SCOPE}${p.slice(1)}`
+  return `${SCOPE}${p}`
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(['/', '/index.html', '/manifest.webmanifest', '/icon.svg']))
+      .then((cache) => cache.addAll([SCOPE, inScope('index.html'), inScope('manifest.webmanifest'), inScope('icon.svg')]))
       .then(() => self.skipWaiting())
   )
 })
@@ -33,7 +51,7 @@ self.addEventListener('fetch', (event) => {
           caches.open(CACHE_NAME).then((cache) => cache.put(req, copy))
           return res
         })
-        .catch(() => caches.match('/'))
+        .catch(() => caches.match(SCOPE))
     )
     return
   }
@@ -50,4 +68,3 @@ self.addEventListener('fetch', (event) => {
     )
   )
 })
-
