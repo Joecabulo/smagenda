@@ -180,3 +180,6 @@
 - Deploy: build da raiz agora gera SMagenda (/) + Prospector (/142555787po) no mesmo dist
 - Cloudflare Pages Functions: endpoints /api/* para Google Places/Geocode (sem servidor local)
 - Cloudflare redirects: fallback SPA para /142555787po e para /
+- Prospector: importação padrão agora é por cidade + estado (UF), cobrindo a cidade inteira
+- Prospector: raio de busca derivado do viewport do Geocode (fallback 14km) para resultado real
+- Prospector: botão "Excluir tudo" para limpar importes salvos no dispositivo (localStorage)

@@ -193,8 +193,50 @@ function sleep(ms: number) {
 
 async function assertBackendReady() {
   const h = await health()
-  if (!h?.ok) throw new Error('Backend indisponível. Inicie o prospector/server e tente novamente.')
-  if (h.hasKey === false) throw new Error('Defina GOOGLE_MAPS_API_KEY no prospector/server/.env e reinicie o server.')
+  if (!h?.ok) throw new Error('Backend /api indisponível. Verifique Cloudflare Pages Functions (produção) ou prospector/server (dev).')
+  if (h.hasKey === false) throw new Error('Defina GOOGLE_MAPS_API_KEY no Cloudflare Pages (produção) ou no prospector/server/.env (dev).')
+}
+
+function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const R = 6371000
+  const toRad = (deg: number) => (deg * Math.PI) / 180
+  const dLat = toRad(b.lat - a.lat)
+  const dLng = toRad(b.lng - a.lng)
+  const lat1 = toRad(a.lat)
+  const lat2 = toRad(b.lat)
+  const x =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2)
+  const c = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x))
+  return R * c
+}
+
+type GeocodeViewportPoint = { lat?: number; lng?: number }
+type GeocodeResponse = {
+  results?: Array<{
+    geometry?: {
+      viewport?: {
+        northeast?: GeocodeViewportPoint
+        southwest?: GeocodeViewportPoint
+      }
+    }
+  }>
+}
+
+function computeRadiusFromGeocode(geo: unknown) {
+  const g = geo as GeocodeResponse | null
+  const viewport = g?.results?.[0]?.geometry?.viewport
+  const ne = viewport?.northeast
+  const sw = viewport?.southwest
+  const nelat = typeof ne?.lat === 'number' ? ne.lat : null
+  const nelng = typeof ne?.lng === 'number' ? ne.lng : null
+  const swlat = typeof sw?.lat === 'number' ? sw.lat : null
+  const swlng = typeof sw?.lng === 'number' ? sw.lng : null
+
+  if (nelat === null || nelng === null || swlat === null || swlng === null) return 14000
+  const diagonal = haversineMeters({ lat: nelat, lng: nelng }, { lat: swlat, lng: swlng })
+  const raw = Math.round(diagonal / 2 + 2500)
+  return Math.min(50000, Math.max(6000, raw))
 }
 
 async function copyText(text: string) {
@@ -313,7 +355,7 @@ a:hover{text-decoration:underline}
 export function App() {
   const [state, setState] = useState(() => loadState())
   const [city, setCity] = useState('')
-  const [street, setStreet] = useState('')
+  const [uf, setUf] = useState('')
   const [presetKey, setPresetKey] = useState(PRESETS[0]?.key ?? 'beleza')
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState<{ active: boolean; done: number; total: number; message: string }>(() => ({ active: false, done: 0, total: 0, message: '' }))
@@ -427,9 +469,9 @@ export function App() {
 
   const runImport = async () => {
     const c = city.trim()
-    const s = street.trim()
-    if (!c || !s) {
-      setError('Informe cidade e rua.')
+    const u = uf.trim()
+    if (!c || !u) {
+      setError('Informe cidade e estado (UF).')
       return
     }
     setError(null)
@@ -440,86 +482,94 @@ export function App() {
       progressSetMessage('Verificando backend…')
       await assertBackendReady()
       progressIncDone(1)
-      const all: Establishment[] = []
+      const CITY_QUERY = `${c} ${u} Brasil`
 
-      const streets = s
-        .split(/[\n;]+/g)
-        .map((x) => x.trim())
-        .filter(Boolean)
+      progressAddTotal(1)
+      progressSetMessage(`Geocodificando: ${CITY_QUERY}`)
+      const geo = await geocode(CITY_QUERY)
+      progressIncDone(1)
 
-      for (const streetName of streets) {
-        progressAddTotal(1)
-        progressSetMessage(`Geocodificando: ${streetName}`)
-        const geo = await geocode(`${streetName} ${c}`)
-        progressIncDone(1)
-        const loc0 = geo.results?.[0]?.geometry?.location
-        const lat0 = typeof loc0?.lat === 'number' ? loc0.lat : null
-        const lng0 = typeof loc0?.lng === 'number' ? loc0.lng : null
-        const location = lat0 !== null && lng0 !== null ? `${lat0},${lng0}` : null
+      const loc0 = geo.results?.[0]?.geometry?.location
+      const lat0 = typeof loc0?.lat === 'number' ? loc0.lat : null
+      const lng0 = typeof loc0?.lng === 'number' ? loc0.lng : null
+      const location = lat0 !== null && lng0 !== null ? `${lat0},${lng0}` : null
+      const radius = computeRadiusFromGeocode(geo)
 
-        for (const q of preset.queries) {
-          const fullQuery = `${q} ${streetName} ${c}`
-          let pageToken: string | null = null
-          let pages = 0
-          do {
-            progressAddTotal(1)
-            progressSetMessage(`Buscando: ${q} • ${streetName}`)
-            const res = await placesTextSearch({ query: fullQuery, pageToken, location, radius: 6000 })
-            progressIncDone(1)
-            const results = Array.isArray(res.results) ? res.results : []
-            const validResults = results.filter((r) => String(r.place_id ?? '').trim())
-            progressAddTotal(validResults.length)
-            for (const r of validResults) {
-              const pid = (r.place_id ?? '').trim()
-              progressSetMessage(`Detalhando: ${(r.name ?? '').trim() || pid}`)
-              const det = await placesDetails(pid)
+      const byPlaceId = new Map<string, Establishment>()
+
+      for (const q of preset.queries) {
+        const fullQuery = `${q} ${CITY_QUERY}`
+        let pageToken: string | null = null
+        let pages = 0
+        do {
+          progressAddTotal(1)
+          progressSetMessage(`Buscando: ${q} • ${c}`)
+          const res = await placesTextSearch({ query: fullQuery, pageToken, location, radius })
+          progressIncDone(1)
+          const results = Array.isArray(res.results) ? res.results : []
+          const validResults = results.filter((r) => String(r.place_id ?? '').trim())
+          progressAddTotal(validResults.length)
+          for (const r of validResults) {
+            const pid = (r.place_id ?? '').trim()
+
+            const existing = byPlaceId.get(pid)
+            if (existing) {
+              const nextSegs = new Set([...(existing.segments ?? []), q])
+              existing.segments = Array.from(nextSegs)
+              byPlaceId.set(pid, existing)
               progressIncDone(1)
-              const d = det.result
-              const parts = extractAddressParts(d)
-              const now = new Date().toISOString()
-              const phone = (d.formatted_phone_number ?? d.international_phone_number ?? '').trim() || null
-              const url = (d.url ?? '').trim() || null
-              const website = (d.website ?? '').trim() || null
-              const formattedAddress = (d.formatted_address ?? r.formatted_address ?? '').trim()
-              const lat = typeof d.geometry?.location?.lat === 'number' ? d.geometry?.location?.lat : typeof r.geometry?.location?.lat === 'number' ? r.geometry?.location?.lat : null
-              const lng = typeof d.geometry?.location?.lng === 'number' ? d.geometry?.location?.lng : typeof r.geometry?.location?.lng === 'number' ? r.geometry?.location?.lng : null
-              const types = Array.isArray(d.types) ? d.types.filter((t) => typeof t === 'string') : Array.isArray(r.types) ? r.types.filter((t) => typeof t === 'string') : []
-              all.push({
-                id: newId(),
-                placeId: pid,
-                name: (d.name ?? r.name ?? '').trim() || 'Sem nome',
-                formattedAddress,
-                street: parts.street,
-                number: parts.number,
-                city: parts.city,
-                state: parts.state,
-                postalCode: parts.postalCode,
-                lat,
-                lng,
-                types,
-                segments: [q],
-                googleMapsUrl: url,
-                phone,
-                website,
-                fetchedAt: now,
-                status: 'novo',
-                contactName: null,
-                contactPhone: null,
-                notes: null,
-                lastVisitAt: null,
-                updatedAt: now,
-                createdAt: now,
-              })
-              await sleep(70)
+              continue
             }
-            pageToken = typeof res.next_page_token === 'string' ? res.next_page_token : null
-            pages += 1
-            if (pageToken) await new Promise((r) => setTimeout(r, 2200))
-          } while (pageToken && pages < 3)
-        }
+
+            progressSetMessage(`Detalhando: ${(r.name ?? '').trim() || pid}`)
+            const det = await placesDetails(pid)
+            progressIncDone(1)
+            const d = det.result
+            const parts = extractAddressParts(d)
+            const now = new Date().toISOString()
+            const phone = (d.formatted_phone_number ?? d.international_phone_number ?? '').trim() || null
+            const url = (d.url ?? '').trim() || null
+            const website = (d.website ?? '').trim() || null
+            const formattedAddress = (d.formatted_address ?? r.formatted_address ?? '').trim()
+            const lat = typeof d.geometry?.location?.lat === 'number' ? d.geometry?.location?.lat : typeof r.geometry?.location?.lat === 'number' ? r.geometry?.location?.lat : null
+            const lng = typeof d.geometry?.location?.lng === 'number' ? d.geometry?.location?.lng : typeof r.geometry?.location?.lng === 'number' ? r.geometry?.location?.lng : null
+            const types = Array.isArray(d.types) ? d.types.filter((t) => typeof t === 'string') : Array.isArray(r.types) ? r.types.filter((t) => typeof t === 'string') : []
+            byPlaceId.set(pid, {
+              id: newId(),
+              placeId: pid,
+              name: (d.name ?? r.name ?? '').trim() || 'Sem nome',
+              formattedAddress,
+              street: parts.street,
+              number: parts.number,
+              city: parts.city,
+              state: parts.state,
+              postalCode: parts.postalCode,
+              lat,
+              lng,
+              types,
+              segments: [q],
+              googleMapsUrl: url,
+              phone,
+              website,
+              fetchedAt: now,
+              status: 'novo',
+              contactName: null,
+              contactPhone: null,
+              notes: null,
+              lastVisitAt: null,
+              updatedAt: now,
+              createdAt: now,
+            })
+            await sleep(70)
+          }
+          pageToken = typeof res.next_page_token === 'string' ? res.next_page_token : null
+          pages += 1
+          if (pageToken) await sleep(2200)
+        } while (pageToken && pages < 3)
       }
       progressAddTotal(1)
       progressSetMessage('Salvando no sistema…')
+      const all = Array.from(byPlaceId.values())
       upsertMany(all)
       progressIncDone(1)
       if (all.length > 0) setSelectedPlaceId(all[0]?.placeId ?? null)
@@ -560,7 +610,7 @@ export function App() {
       ]
 
       setCity('Itabirito')
-      setStreet('')
+      setUf('MG')
       setSortKey('street_number')
 
       progressAddTotal(1)
@@ -818,19 +868,19 @@ export function App() {
               </button>
             </div>
             <div className="sep" />
-            <div className="row">
-              <div className="field" style={{ minWidth: 220 }}>
-                <span>Cidade</span>
-                <input className="input" value={city} onChange={(e) => setCity(e.target.value)} placeholder="Ex: Belo Horizonte" />
-              </div>
-              <div className="field" style={{ minWidth: 280 }}>
-                <span>Rua (aceita várias; separe com ; ou quebra de linha)</span>
-                <input className="input" value={street} onChange={(e) => setStreet(e.target.value)} placeholder="Ex: Av. Afonso Pena; Rua X" />
-              </div>
-              <div className="field" style={{ minWidth: 200, flex: '0 0 auto' }}>
-                <span>Segmento</span>
-                <select className="select" value={presetKey} onChange={(e) => setPresetKey(e.target.value)}>
-                  {PRESETS.map((p) => (
+              <div className="row">
+                <div className="field" style={{ minWidth: 220 }}>
+                  <span>Cidade</span>
+                  <input className="input" value={city} onChange={(e) => setCity(e.target.value)} placeholder="Ex: Belo Horizonte" />
+                </div>
+                <div className="field" style={{ minWidth: 280 }}>
+                  <span>Estado (UF)</span>
+                  <input className="input" value={uf} onChange={(e) => setUf(e.target.value)} placeholder="Ex: MG" />
+                </div>
+                <div className="field" style={{ minWidth: 200, flex: '0 0 auto' }}>
+                  <span>Segmento</span>
+                  <select className="select" value={presetKey} onChange={(e) => setPresetKey(e.target.value)}>
+                    {PRESETS.map((p) => (
                     <option key={p.key} value={p.key}>
                       {p.label}
                     </option>
@@ -848,6 +898,20 @@ export function App() {
                 onClick={() => downloadText(`prospector-${new Date().toISOString().slice(0, 10)}.json`, exportJson(state.establishments))}
               >
                 Exportar JSON
+              </button>
+              <button
+                className="btn btnDanger"
+                onClick={() => {
+                  const ok = window.confirm('Excluir todos os estabelecimentos salvos neste dispositivo?')
+                  if (!ok) return
+                  const next = { establishments: [] as Establishment[] }
+                  setState(next)
+                  saveState(next)
+                  setSelectedPlaceId(null)
+                  toastNow('Dados excluídos')
+                }}
+              >
+                Excluir tudo
               </button>
               <button
                 className="btn"
