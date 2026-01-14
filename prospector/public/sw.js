@@ -1,4 +1,4 @@
-const CACHE_NAME = 'prospector-shell-v1'
+const CACHE_NAME = 'prospector-shell-v2'
 
 function getScopePath() {
   try {
@@ -42,6 +42,7 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(req.url)
   if (url.origin !== self.location.origin) return
+  if (url.pathname.startsWith('/api/')) return
 
   if (req.mode === 'navigate') {
     event.respondWith(
