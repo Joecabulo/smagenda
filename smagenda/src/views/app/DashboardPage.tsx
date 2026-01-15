@@ -132,14 +132,16 @@ function normalizeText(value: string) {
     .replace(/\p{Diacritic}/gu, '')
 }
 
-function resolveStatusUi(status: string): { label: string; tone: 'slate' | 'green' | 'yellow' | 'red' } {
-  const s = status.trim().toLowerCase()
+function resolveStatusUi(status: string | null | undefined): { label: string; tone: 'slate' | 'green' | 'yellow' | 'red' } {
+  const raw = String(status ?? '')
+  const s = raw.trim().toLowerCase()
+  if (!s) return { label: 'Pendente', tone: 'yellow' }
   if (s === 'confirmado') return { label: 'Confirmado', tone: 'green' }
   if (s === 'cancelado') return { label: 'Cancelado', tone: 'red' }
   if (s === 'pendente') return { label: 'Pendente', tone: 'yellow' }
   if (s === 'concluido' || s === 'concluído') return { label: 'Concluído', tone: 'green' }
   if (s === 'nao_compareceu' || s === 'não_compareceu' || s === 'no_show') return { label: 'No-show', tone: 'red' }
-  return { label: status || 'Status', tone: 'slate' }
+  return { label: raw || 'Status', tone: 'slate' }
 }
 
 async function sendConfirmacaoWhatsapp(agendamentoId: string) {
@@ -190,6 +192,124 @@ async function sendConfirmacaoWhatsapp(agendamentoId: string) {
           'x-user-jwt': jwt,
         },
         body: JSON.stringify({ action: 'send_confirmacao', agendamento_id: agendamentoId }),
+      })
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Falha de rede'
+      return { ok: false as const, status: 0, body: { error: 'network_error', message: msg } }
+    }
+
+    const fnVersion = res.headers.get('x-smagenda-fn')
+
+    const text = await res.text()
+    let parsed: unknown = null
+    try {
+      parsed = text ? JSON.parse(text) : null
+    } catch {
+      parsed = text
+    }
+
+    if (!res.ok && res.status === 401 && !fnVersion) {
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        (parsed as Record<string, unknown>).message === 'Invalid JWT' &&
+        (parsed as Record<string, unknown>).code === 401
+      ) {
+        return { ok: false as const, status: 401, body: { error: 'supabase_gateway_invalid_jwt' } }
+      }
+    }
+
+    if (!res.ok) return { ok: false as const, status: res.status, body: parsed }
+    return { ok: true as const, status: res.status, body: parsed }
+  }
+
+  const isInvalidJwtPayload = (payload: unknown) => {
+    if (typeof payload === 'string') return payload.includes('Invalid JWT')
+    if (!payload || typeof payload !== 'object') return false
+    const obj = payload as Record<string, unknown>
+    return obj.message === 'Invalid JWT' || obj.error === 'invalid_jwt'
+  }
+
+  const first = await callFetch(token)
+  if (
+    !first.ok &&
+    first.status === 401 &&
+    typeof first.body === 'object' &&
+    first.body !== null &&
+    (first.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
+  ) {
+    const refreshed = await tryRefresh()
+    const nextToken = refreshed?.access_token ?? null
+    if (!nextToken) {
+      await supabase.auth.signOut().catch(() => undefined)
+      return { ok: false as const, status: 401, body: { error: 'invalid_jwt' } }
+    }
+    const nextProject = checkJwtProject(nextToken, supabaseUrl)
+    if (!nextProject.ok) {
+      await supabase.auth.signOut().catch(() => undefined)
+      return { ok: false as const, status: 401, body: { error: 'jwt_project_mismatch', iss: nextProject.iss, expected: nextProject.expectedPrefix } }
+    }
+    return callFetch(nextToken)
+  }
+
+  if (!first.ok && first.status === 401 && isInvalidJwtPayload(first.body)) {
+    const refreshed = await tryRefresh()
+    const nextToken = refreshed?.access_token ?? null
+    if (!nextToken) return { ok: false as const, status: 401, body: { error: 'invalid_jwt' } }
+    return callFetch(nextToken)
+  }
+
+  return first
+}
+
+async function sendCancelamentoWhatsapp(agendamentoId: string) {
+  if (!supabaseEnv.ok) {
+    return { ok: false as const, status: 0, body: { error: 'missing_supabase_env' } }
+  }
+
+  const supabaseUrl = supabaseEnv.values.VITE_SUPABASE_URL
+  const supabaseAnonKey = supabaseEnv.values.VITE_SUPABASE_ANON_KEY
+
+  const tryRefresh = async () => {
+    const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession()
+    if (refreshErr) return null
+    return refreshed.session ?? null
+  }
+
+  const { data: sessionData } = await supabase.auth.getSession()
+  let session = sessionData.session
+  const now = Math.floor(Date.now() / 1000)
+  const expiresAt = session?.expires_at ?? null
+
+  if (session && expiresAt && expiresAt <= now + 60) {
+    const refreshed = await tryRefresh()
+    if (refreshed) session = refreshed
+  }
+
+  const token = session?.access_token ?? null
+  if (!token) {
+    return { ok: false as const, status: 401, body: { error: 'session_expired' } }
+  }
+
+  const tokenProject = checkJwtProject(token, supabaseUrl)
+  if (!tokenProject.ok) {
+    await supabase.auth.signOut().catch(() => undefined)
+    return { ok: false as const, status: 401, body: { error: 'jwt_project_mismatch', iss: tokenProject.iss, expected: tokenProject.expectedPrefix } }
+  }
+
+  const callFetch = async (jwt: string) => {
+    const fnUrl = `${supabaseUrl}/functions/v1/whatsapp`
+    let res: Response
+    try {
+      res = await fetch(fnUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: supabaseAnonKey,
+          Authorization: `Bearer ${jwt}`,
+          'x-user-jwt': jwt,
+        },
+        body: JSON.stringify({ action: 'send_cancelamento', agendamento_id: agendamentoId }),
       })
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Falha de rede'
@@ -341,6 +461,7 @@ export function DashboardPage() {
   const [bloqueios, setBloqueios] = useState<Bloqueio[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
 
   const [blockStart, setBlockStart] = useState('')
   const [blockEnd, setBlockEnd] = useState('')
@@ -355,6 +476,19 @@ export function DashboardPage() {
   const dayKey = useMemo(() => toISODate(date), [date])
   const weekStartKey = useMemo(() => toISODate(weekStartDate), [weekStartDate])
   const weekEndKey = useMemo(() => toISODate(weekEndDate), [weekEndDate])
+
+  const setDateFromIso = (iso: string) => {
+    const parts = iso.split('-')
+    if (parts.length !== 3) return
+    const y = Number(parts[0])
+    const m = Number(parts[1])
+    const d = Number(parts[2])
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return
+    const next = new Date(y, m - 1, d)
+    if (!Number.isFinite(next.getTime())) return
+    next.setHours(0, 0, 0, 0)
+    setDate(next)
+  }
 
   const rangeLabel = useMemo(() => {
     if (viewMode === 'dia') {
@@ -839,10 +973,22 @@ export function DashboardPage() {
             </div>
 
             <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-12">
-              <div className="sm:col-span-5">
+              <div className="sm:col-span-3">
+                <Input
+                  label="Data"
+                  type="date"
+                  value={dayKey}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (!v.trim()) return
+                    setDateFromIso(v.trim())
+                  }}
+                />
+              </div>
+              <div className="sm:col-span-4">
                 <Input label="Buscar" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Nome, telefone, serviço…" />
               </div>
-              <label className="block sm:col-span-3">
+              <label className="block sm:col-span-2">
                 <div className="text-sm font-medium text-slate-700 mb-1">Status</div>
                 <select
                   className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
@@ -857,7 +1003,7 @@ export function DashboardPage() {
                   <option value="cancelado">Cancelado</option>
                 </select>
               </label>
-              <label className="block sm:col-span-4">
+              <label className="block sm:col-span-3">
                 <div className="text-sm font-medium text-slate-700 mb-1">Serviço</div>
                 <select
                   className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
@@ -877,6 +1023,7 @@ export function DashboardPage() {
         </Card>
 
         {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
+        {success ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">{success}</div> : null}
 
         <div
           className={
@@ -1076,7 +1223,7 @@ export function DashboardPage() {
                         <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
                         {agCover.status !== 'cancelado' && visible ? (
                           <div className="flex gap-2">
-                            {canConfirmarAgendamento ? (
+                            {canConfirmarAgendamento && String(agCover.status ?? '').trim().toLowerCase() !== 'confirmado' ? (
                               <Button
                                 variant="secondary"
                                 onClick={async () => {
@@ -1158,6 +1305,7 @@ export function DashboardPage() {
                                 onClick={async () => {
                                   if (!canCancelarAgendamento) return
                                 setError(null)
+                                setSuccess(null)
                                 const { error: updErr } = await supabase
                                   .from('agendamentos')
                                   .update({ status: 'cancelado', cancelado_em: new Date().toISOString() })
@@ -1167,6 +1315,53 @@ export function DashboardPage() {
                                   return
                                 }
                                 setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'cancelado' } : x)))
+                                setSuccess('Agendamento cancelado.')
+                                const sendRes = await sendCancelamentoWhatsapp(agCover.id)
+                                if (sendRes.ok) {
+                                  if (typeof sendRes.body === 'object' && sendRes.body !== null) {
+                                    const skipped = (sendRes.body as Record<string, unknown>).skipped
+                                    if (skipped === 'not_configured') {
+                                      setSuccess('Agendamento cancelado. WhatsApp não configurado.')
+                                      return
+                                    }
+                                    if (skipped === 'disabled') {
+                                      setSuccess('Agendamento cancelado. Envio automático desabilitado.')
+                                      return
+                                    }
+                                  }
+                                  setSuccess('Agendamento cancelado e aviso enviado.')
+                                  return
+                                }
+                                if (
+                                  typeof sendRes.body === 'object' &&
+                                  sendRes.body !== null &&
+                                  (sendRes.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
+                                ) {
+                                  setError('JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).')
+                                  return
+                                }
+                                if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'jwt_project_mismatch') {
+                                  setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
+                                  return
+                                }
+                                if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'invalid_jwt') {
+                                  setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
+                                  return
+                                }
+                                if (typeof sendRes.body === 'object' && sendRes.body !== null) {
+                                  const hint = (sendRes.body as Record<string, unknown>).hint
+                                  if (typeof hint === 'string' && hint.trim()) {
+                                    setError(hint)
+                                    return
+                                  }
+                                  const code = (sendRes.body as Record<string, unknown>).error
+                                  if (code === 'instance_not_connected') {
+                                    setError('WhatsApp não conectado. Vá em Configurações > WhatsApp e conecte a instância (QR Code).')
+                                    return
+                                  }
+                                }
+                                const details = typeof sendRes.body === 'string' ? sendRes.body : JSON.stringify(sendRes.body)
+                                setError(`Falha ao enviar cancelamento (HTTP ${sendRes.status}): ${details}`)
                               }}
                               >
                                 ✗ Cancelar

@@ -31,7 +31,7 @@ export function PaginaPublicaSettingsPage() {
       [
         {
           title: 'Seu link público',
-          body: 'Defina o slug e copie/abra sua URL de agendamento. Esse link é o que você divulga aos clientes.',
+          body: 'Copie/abra sua URL de agendamento. Esse link é o que você divulga aos clientes.',
           target: 'link' as const,
         },
         {
@@ -283,12 +283,6 @@ export function PaginaPublicaSettingsPage() {
     return publicUrl
   }
 
-  const generateFromBusiness = () => {
-    const base = (nomeNegocio ?? '').trim()
-    const next = normalizeSlug(base)
-    setSlug(next)
-  }
-
   const save = async () => {
     if (!usuarioId) return
     setSaving(true)
@@ -304,7 +298,8 @@ export function PaginaPublicaSettingsPage() {
       return
     }
 
-    const nextSlug = normalizeSlug(slug)
+    const slugSource = slug.trim() ? slug : ((nomeNegocio ?? '').trim() || `user-${usuarioId}`)
+    const nextSlug = normalizeSlug(slugSource)
     if (!isValidSlug(nextSlug)) {
       setError('Slug inválido. Use letras minúsculas, números e hífen.')
       setSaving(false)
@@ -520,21 +515,8 @@ export function PaginaPublicaSettingsPage() {
               }
             >
               <Card>
-                <div className="p-6 space-y-4">
+                  <div className="p-6 space-y-4">
                   <div className="text-sm font-semibold text-slate-900">Link público</div>
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <Input
-                      label="Slug (ex: single-motion)"
-                      value={slug}
-                      onChange={(e) => setSlug(normalizeSlug(e.target.value))}
-                      placeholder="sua-empresa"
-                    />
-                    <div className="flex items-end">
-                      <Button variant="secondary" onClick={generateFromBusiness} disabled={!nomeNegocio || saving || loading}>
-                        Gerar do nome
-                      </Button>
-                    </div>
-                  </div>
 
                   <label className="block">
                     <div className="text-sm font-medium text-slate-700 mb-1">Tipo de negócio</div>

@@ -186,3 +186,36 @@
 - Prospector: botão "Excluir tudo" para limpar importes salvos no dispositivo (localStorage)
 - Segurança: removido prospector/server/.env do Git (chaves não devem ficar no repo)
 - Prospector PWA: service worker não faz cache de /api/* (evita travar hasKey/erros antigos)
+
+2026-01-14 (SMagenda)
+- Página pública (config): removido campo de slug; URL pública somente leitura; slug gerado no salvar quando vazio
+- Agenda: agendamento público inicia como "pendente"; ao confirmar vira "confirmado" e botão Confirmar some
+- Agenda: filtro ganhou campo de Data (type=date) para pular direto para um dia
+- Agenda: ao cancelar agendamento, envia aviso real via WhatsApp (Edge Function) e mostra feedback
+- Mensagens automáticas: adicionados campo/toggle e modelos prontos de cancelamento (com variáveis reais)
+- Admin (configurações): SQL do WhatsApp (automação + config global) inclui enviar_cancelamento e mensagem_cancelamento
+- Edge Function whatsapp: envio de cancelamento respeita enviar_cancelamento e mensagem_cancelamento (fallback seguro)
+- Mensagens automáticas: botões de “Modelos prontos” agora ficam em grid e com tamanho uniforme
+- Link público: janela padrão de agendamento aumentada para 30 dias (mantém override por serviço)
+- Link público: seleção de data agora abre calendário popup e preenche a data escolhida
+
+2026-01-15
+- Agenda (funcionário): notificação em tempo real quando entrar novo agendamento (Supabase Realtime)
+- Agenda (funcionário): botão “Ativar notificações” usa Notification API (fallback visual no topo)
+- WhatsApp: Edge Function whatsapp-lembretes aceita action=funcionario_novo_agendamento e envia ao profissional
+- Admin (configurações): SQL adiciona trigger para avisar profissional no WhatsApp ao criar/atribuir agendamento
+- Funcionários: removido bloco duplicado de botões “Cancelar/Salvar” no formulário
+
+2026-01-15 (validação geral)
+- Root: npm run lint OK (smagenda + prospector)
+- Root: npm run build OK (smagenda + prospector)
+- Link público: removido limite curto e liberado até 1 ano (considera ano bissexto)
+- Link público: calendário carrega disponibilidade real apenas do mês visível
+- Link público: pagamento com taxa usa hora efetiva também em serviços dia_inteiro
+- Link público: calendário popup desabilita dias sem horários disponíveis (consulta RPC real)
+- Link público: texto de ajuda abaixo da data atualizado para orientar troca de mês e disponibilidade
+- Admin (configurações): SQL do link público agora libera janela de 365 dias nas RPCs (slots/criação)
+- Link público: removida seleção automática inicial (serviço/profissional/data) — exige clique do cliente
+- Link público: quando data fica inválida, limpa seleção em vez de escolher outra automaticamente
+- Link público: botões Continuar/Confirmar com mais destaque e efeito visual no clique
+- Link público: pop-up exibido após envio real do agendamento (RPC/pagamento)

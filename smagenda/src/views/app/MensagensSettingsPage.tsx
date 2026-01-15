@@ -9,12 +9,14 @@ import { useAuth } from '../../state/auth/useAuth'
 
 const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nLocal: {endereco}\n\nNos vemos em breve!\n{nome_negocio}`
 const defaultLembrete = `Oi {nome}!\n\nLembrete: você tem agendamento em {data} às {hora}.\n\nSe não puder comparecer, me avise!\n{telefone_profissional}`
+const defaultCancelamento = `Olá {nome}!\n\nSeu agendamento foi cancelado:\n📅 {data} às {hora}\n✂️ {servico}\n\nSe quiser remarcar, é só me chamar.\n{nome_negocio}`
 
 type TemplatePreset = {
   key: string
   title: string
   confirmacao: string
   lembrete: string
+  cancelamento: string
 }
 
 const templatePresets: TemplatePreset[] = [
@@ -23,6 +25,7 @@ const templatePresets: TemplatePreset[] = [
     title: 'Padrão (serviços)',
     confirmacao: defaultConfirmacao,
     lembrete: defaultLembrete,
+    cancelamento: defaultCancelamento,
   },
   {
     key: 'lava_jatos',
@@ -31,6 +34,8 @@ const templatePresets: TemplatePreset[] = [
       `Olá {nome}!\n\n✅ Sua lavagem está confirmada:\n📅 {data} às {hora}\n🚗 {servico}\n💰 {preco}\n\nLocal: {unidade_nome}\n{unidade_endereco}\n\nDúvidas/alterações: {telefone_profissional}\n{nome_negocio}`,
     lembrete:
       `Oi {nome}!\n\n⏰ Lembrete da sua lavagem:\n📅 {data} às {hora}\n🚗 {servico}\n\nLocal: {unidade_nome}\n{unidade_endereco}\n\nSe precisar remarcar: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Sua lavagem foi cancelada:\n📅 {data} às {hora}\n🚗 {servico}\n\nSe quiser remarcar, fale com a gente: {telefone_profissional}\n{nome_negocio}`,
   },
   {
     key: 'barbearia',
@@ -39,6 +44,8 @@ const templatePresets: TemplatePreset[] = [
       `Olá {nome}!\n\n✅ Seu horário está confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nBarbeiro: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté já!\n{nome_negocio}`,
     lembrete:
       `Oi {nome}!\n\n⏰ Lembrete do seu horário:\n📅 {data} às {hora}\n✂️ {servico}\n\nBarbeiro: {profissional_nome}\n\nSe precisar remarcar: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Seu horário foi cancelado:\n📅 {data} às {hora}\n✂️ {servico}\n\nSe quiser remarcar, chama aqui: {telefone_profissional}\n{nome_negocio}`,
   },
   {
     key: 'salao',
@@ -47,6 +54,8 @@ const templatePresets: TemplatePreset[] = [
       `Olá {nome}!\n\n✅ Seu horário está confirmado:\n📅 {data} às {hora}\n💇 {servico}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté já!\n{nome_negocio}`,
     lembrete:
       `Oi {nome}!\n\n⏰ Lembrete do seu horário:\n📅 {data} às {hora}\n💇 {servico}\nProfissional: {profissional_nome}\n\nSe precisar remarcar, fale com a gente: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Seu horário foi cancelado:\n📅 {data} às {hora}\n💇 {servico}\n\nSe quiser remarcar, fale com a gente: {telefone_profissional}\n{nome_negocio}`,
   },
   {
     key: 'estetica',
@@ -55,6 +64,8 @@ const templatePresets: TemplatePreset[] = [
       `Olá {nome}!\n\n✅ Seu atendimento está confirmado:\n📅 {data} às {hora}\n✨ {servico}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté breve!\n{nome_negocio}`,
     lembrete:
       `Oi {nome}!\n\n✨ Lembrete do seu atendimento:\n📅 {data} às {hora}\n✨ {servico}\n\nQualquer ajuste: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Seu atendimento foi cancelado:\n📅 {data} às {hora}\n✨ {servico}\n\nSe quiser remarcar, é só me chamar: {telefone_profissional}\n{nome_negocio}`,
   },
   {
     key: 'odontologia',
@@ -63,6 +74,8 @@ const templatePresets: TemplatePreset[] = [
       `Olá {nome}!\n\n✅ Sua consulta está confirmada:\n📅 {data} às {hora}\n🦷 {servico}\n\nDentista: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nQualquer dúvida: {telefone_profissional}\n{nome_negocio}`,
     lembrete:
       `Olá {nome}!\n\n🦷 Lembrete da sua consulta:\n📅 {data} às {hora}\nProcedimento: {servico}\n\nSe precisar remarcar: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Sua consulta foi cancelada:\n📅 {data} às {hora}\n🦷 {servico}\n\nSe quiser remarcar: {telefone_profissional}\n{nome_negocio}`,
   },
   {
     key: 'manicure',
@@ -71,6 +84,8 @@ const templatePresets: TemplatePreset[] = [
       `Olá {nome}!\n\n✅ Seu horário está confirmado:\n📅 {data} às {hora}\n💅 {servico}\n💰 {preco}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté já!\n{nome_negocio}`,
     lembrete:
       `Oi {nome}!\n\n⏰ Lembrete do seu horário:\n📅 {data} às {hora}\n💅 {servico}\n\nSe precisar remarcar: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Seu horário foi cancelado:\n📅 {data} às {hora}\n💅 {servico}\n\nSe quiser remarcar: {telefone_profissional}\n{nome_negocio}`,
   },
   {
     key: 'pilates',
@@ -79,6 +94,8 @@ const templatePresets: TemplatePreset[] = [
       `Olá {nome}!\n\n✅ Sua aula está confirmada:\n📅 {data} às {hora}\n🏋️ {servico}\n\nInstrutor: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté lá!\n{nome_negocio}`,
     lembrete:
       `Oi {nome}!\n\n⏰ Lembrete da sua aula:\n📅 {data} às {hora}\n🏋️ {servico}\n\nSe precisar remarcar: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Sua aula foi cancelada:\n📅 {data} às {hora}\n🏋️ {servico}\n\nSe quiser remarcar: {telefone_profissional}\n{nome_negocio}`,
   },
   {
     key: 'faxina',
@@ -87,6 +104,8 @@ const templatePresets: TemplatePreset[] = [
       `Olá {nome}!\n\n✅ Sua diária está confirmada:\n📅 {data} às {hora}\n🧹 {servico}\n💰 {preco}\n\nEndereço do cliente:\n{cliente_endereco}\n\nProfissional: {profissional_nome}\n\nQualquer ajuste: {telefone_profissional}\n{nome_negocio}`,
     lembrete:
       `Oi {nome}!\n\n⏰ Lembrete da sua diária:\n📅 {data} às {hora}\n🧹 {servico}\n\nEndereço do cliente:\n{cliente_endereco}\n\nSe precisar remarcar: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Sua diária foi cancelada:\n📅 {data} às {hora}\n🧹 {servico}\n\nSe quiser remarcar, é só me chamar: {telefone_profissional}\n{nome_negocio}`,
   },
 ]
 
@@ -254,12 +273,15 @@ export function MensagensSettingsPage() {
 
   const [mensagemConfirmacao, setMensagemConfirmacao] = useState(defaultConfirmacao)
   const [mensagemLembrete, setMensagemLembrete] = useState(defaultLembrete)
+  const [mensagemCancelamento, setMensagemCancelamento] = useState(defaultCancelamento)
   const [presetKey, setPresetKey] = useState(templatePresets[0]?.key ?? 'padrao_servicos')
-  const [lastField, setLastField] = useState<'confirmacao' | 'lembrete'>('confirmacao')
+  const [lastField, setLastField] = useState<'confirmacao' | 'lembrete' | 'cancelamento'>('confirmacao')
   const confirmacaoRef = useRef<HTMLTextAreaElement | null>(null)
   const lembreteRef = useRef<HTMLTextAreaElement | null>(null)
+  const cancelamentoRef = useRef<HTMLTextAreaElement | null>(null)
   const [enviarConfirmacao, setEnviarConfirmacao] = useState(true)
   const [enviarLembrete, setEnviarLembrete] = useState(false)
+  const [enviarCancelamento, setEnviarCancelamento] = useState(true)
   const [lembreteHorasAntes, setLembreteHorasAntes] = useState(24)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -286,25 +308,44 @@ export function MensagensSettingsPage() {
       setError(null)
       setSchemaIncompleto(false)
 
-      const { data: baseData, error: baseErr } = await supabase
-        .from('usuarios')
-        .select('mensagem_confirmacao,mensagem_lembrete')
-        .eq('id', usuarioId)
-        .maybeSingle()
+      const baseSelect = 'mensagem_confirmacao,mensagem_lembrete,mensagem_cancelamento'
+      const baseFallbackSelect = 'mensagem_confirmacao,mensagem_lembrete'
+      const baseFirst = await supabase.from('usuarios').select(baseSelect).eq('id', usuarioId).maybeSingle()
 
-      if (baseErr) {
-        setError(baseErr.message)
-        setLoading(false)
-        return
+      if (baseFirst.error) {
+        if (!isMissingColumnError(baseFirst.error.message)) {
+          setError(baseFirst.error.message)
+          setLoading(false)
+          return
+        }
+        const baseSecond = await supabase.from('usuarios').select(baseFallbackSelect).eq('id', usuarioId).maybeSingle()
+        if (baseSecond.error) {
+          setError(baseSecond.error.message)
+          setLoading(false)
+          return
+        }
+        const baseRow = (baseSecond.data ?? null) as unknown as {
+          mensagem_confirmacao?: string | null
+          mensagem_lembrete?: string | null
+          mensagem_cancelamento?: string | null
+        } | null
+        setMensagemConfirmacao(baseRow?.mensagem_confirmacao ?? defaultConfirmacao)
+        setMensagemLembrete(baseRow?.mensagem_lembrete ?? defaultLembrete)
+        setMensagemCancelamento(defaultCancelamento)
+      } else {
+        const baseRow = (baseFirst.data ?? null) as unknown as {
+          mensagem_confirmacao?: string | null
+          mensagem_lembrete?: string | null
+          mensagem_cancelamento?: string | null
+        } | null
+        setMensagemConfirmacao(baseRow?.mensagem_confirmacao ?? defaultConfirmacao)
+        setMensagemLembrete(baseRow?.mensagem_lembrete ?? defaultLembrete)
+        setMensagemCancelamento(baseRow?.mensagem_cancelamento ?? defaultCancelamento)
       }
-
-      const baseRow = (baseData ?? null) as unknown as { mensagem_confirmacao?: string | null; mensagem_lembrete?: string | null } | null
-      setMensagemConfirmacao(baseRow?.mensagem_confirmacao ?? defaultConfirmacao)
-      setMensagemLembrete(baseRow?.mensagem_lembrete ?? defaultLembrete)
 
       const { data: extraData, error: extraErr } = await supabase
         .from('usuarios')
-        .select('enviar_confirmacao,enviar_lembrete,lembrete_horas_antes')
+        .select('enviar_confirmacao,enviar_lembrete,enviar_cancelamento,lembrete_horas_antes')
         .eq('id', usuarioId)
         .maybeSingle()
 
@@ -313,6 +354,7 @@ export function MensagensSettingsPage() {
           setSchemaIncompleto(true)
           setEnviarConfirmacao(true)
           setEnviarLembrete(false)
+          setEnviarCancelamento(true)
           setLembreteHorasAntes(24)
           setLoading(false)
           return
@@ -325,10 +367,12 @@ export function MensagensSettingsPage() {
         (extraData ?? null) as unknown as {
           enviar_confirmacao?: boolean | null
           enviar_lembrete?: boolean | null
+          enviar_cancelamento?: boolean | null
           lembrete_horas_antes?: number | null
         } | null
       setEnviarConfirmacao(row?.enviar_confirmacao ?? true)
       setEnviarLembrete(row?.enviar_lembrete ?? false)
+      setEnviarCancelamento(row?.enviar_cancelamento ?? true)
       setLembreteHorasAntes(typeof row?.lembrete_horas_antes === 'number' ? row?.lembrete_horas_antes : 24)
       setLoading(false)
     }
@@ -410,20 +454,28 @@ export function MensagensSettingsPage() {
     setSaved(false)
     setError(null)
 
-    const { error: baseErr } = await supabase
-      .from('usuarios')
-      .update({ mensagem_confirmacao: mensagemConfirmacao, mensagem_lembrete: mensagemLembrete })
-      .eq('id', usuarioId)
+    const baseUpdate = { mensagem_confirmacao: mensagemConfirmacao, mensagem_lembrete: mensagemLembrete, mensagem_cancelamento: mensagemCancelamento }
+    const first = await supabase.from('usuarios').update(baseUpdate).eq('id', usuarioId)
 
-    if (baseErr) {
-      setError(baseErr.message)
-      setSaving(false)
-      return
+    if (first.error) {
+      if (isMissingColumnError(first.error.message)) {
+        const fallbackUpdate = { mensagem_confirmacao: mensagemConfirmacao, mensagem_lembrete: mensagemLembrete }
+        const second = await supabase.from('usuarios').update(fallbackUpdate).eq('id', usuarioId)
+        if (second.error) {
+          setError(second.error.message)
+          setSaving(false)
+          return
+        }
+      } else {
+        setError(first.error.message)
+        setSaving(false)
+        return
+      }
     }
 
     const { error: extraErr } = await supabase
       .from('usuarios')
-      .update({ enviar_confirmacao: enviarConfirmacao, enviar_lembrete: enviarLembrete, lembrete_horas_antes: lembreteHorasAntes })
+      .update({ enviar_confirmacao: enviarConfirmacao, enviar_lembrete: enviarLembrete, enviar_cancelamento: enviarCancelamento, lembrete_horas_antes: lembreteHorasAntes })
       .eq('id', usuarioId)
 
     if (extraErr) {
@@ -446,18 +498,20 @@ export function MensagensSettingsPage() {
 
   const getPreset = (key: string) => templatePresets.find((p) => p.key === key) ?? templatePresets[0]
 
-  const applyPreset = (target: 'confirmacao' | 'lembrete' | 'both', keyOverride?: string) => {
+  const applyPreset = (target: 'confirmacao' | 'lembrete' | 'cancelamento' | 'both' | 'all', keyOverride?: string) => {
     const preset = getPreset(keyOverride ?? presetKey)
     if (!preset) return
-    if (target === 'confirmacao' || target === 'both') setMensagemConfirmacao(preset.confirmacao)
-    if (target === 'lembrete' || target === 'both') setMensagemLembrete(preset.lembrete)
+    if (target === 'confirmacao' || target === 'both' || target === 'all') setMensagemConfirmacao(preset.confirmacao)
+    if (target === 'lembrete' || target === 'both' || target === 'all') setMensagemLembrete(preset.lembrete)
+    if (target === 'cancelamento' || target === 'all') setMensagemCancelamento(preset.cancelamento)
   }
 
   const insertVar = (key: string) => {
     const token = `{${key}}`
-    const active = lastField === 'confirmacao' ? confirmacaoRef.current : lembreteRef.current
-    const getter = lastField === 'confirmacao' ? mensagemConfirmacao : mensagemLembrete
-    const setter = lastField === 'confirmacao' ? setMensagemConfirmacao : setMensagemLembrete
+    const active = lastField === 'confirmacao' ? confirmacaoRef.current : lastField === 'lembrete' ? lembreteRef.current : cancelamentoRef.current
+    const getter = lastField === 'confirmacao' ? mensagemConfirmacao : lastField === 'lembrete' ? mensagemLembrete : mensagemCancelamento
+    const setter =
+      lastField === 'confirmacao' ? setMensagemConfirmacao : lastField === 'lembrete' ? setMensagemLembrete : setMensagemCancelamento
     if (!active) {
       setter(`${getter}${getter ? ' ' : ''}${token}`)
       return
@@ -723,7 +777,7 @@ export function MensagensSettingsPage() {
                           onChange={(e) => {
                             const nextKey = e.target.value
                             setPresetKey(nextKey)
-                            applyPreset('both', nextKey)
+                            applyPreset('all', nextKey)
                           }}
                           disabled={!canEditTemplates || saving || loading}
                         >
@@ -735,30 +789,38 @@ export function MensagensSettingsPage() {
                         </select>
                       </label>
 
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-end">
+                      <div className="grid grid-cols-2 gap-2 sm:self-end md:grid-cols-4">
                         <Button
                           variant="secondary"
                           onClick={() => applyPreset('confirmacao')}
                           disabled={!canEditTemplates || saving || loading}
-                          className="w-full sm:w-auto"
+                          className="w-full h-10"
                         >
-                          Aplicar na confirmação
+                          Aplicar confirmação
                         </Button>
                         <Button
                           variant="secondary"
                           onClick={() => applyPreset('lembrete')}
                           disabled={!canEditTemplates || saving || loading}
-                          className="w-full sm:w-auto"
+                          className="w-full h-10"
                         >
-                          Aplicar no lembrete
+                          Aplicar lembrete
                         </Button>
                         <Button
                           variant="secondary"
-                          onClick={() => applyPreset('both')}
+                          onClick={() => applyPreset('cancelamento')}
                           disabled={!canEditTemplates || saving || loading}
-                          className="w-full sm:w-auto"
+                          className="w-full h-10"
                         >
-                          Aplicar nos dois
+                          Aplicar cancelamento
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          onClick={() => applyPreset('all')}
+                          disabled={!canEditTemplates || saving || loading}
+                          className="w-full h-10"
+                        >
+                          Aplicar tudo
                         </Button>
                       </div>
                     </div>
@@ -768,7 +830,7 @@ export function MensagensSettingsPage() {
                 <Card>
                   <div className="space-y-4 p-4 sm:p-6">
                     <div className="text-sm font-semibold text-slate-900">Variáveis</div>
-                    <div className="text-sm text-slate-600">Clique para inserir no campo selecionado (confirmação/lembrete).</div>
+                    <div className="text-sm text-slate-600">Clique para inserir no campo selecionado (confirmação/lembrete/cancelamento).</div>
 
                     <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
                       {templateVars.map((v) => (
@@ -817,6 +879,24 @@ export function MensagensSettingsPage() {
                         disabled={!canEditTemplates || saving}
                         ref={lembreteRef}
                         onFocus={() => setLastField('lembrete')}
+                      />
+                    )}
+                  </div>
+                </Card>
+
+                <Card>
+                  <div className="space-y-4 p-4 sm:p-6">
+                    <div className="text-sm font-semibold text-slate-900">Mensagem de cancelamento</div>
+                    {loading ? (
+                      <div className="text-sm text-slate-600">Carregando…</div>
+                    ) : (
+                      <textarea
+                        className="w-full min-h-[160px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-base text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 sm:text-sm"
+                        value={mensagemCancelamento}
+                        onChange={(e) => setMensagemCancelamento(e.target.value)}
+                        disabled={!canEditTemplates || saving}
+                        ref={cancelamentoRef}
+                        onFocus={() => setLastField('cancelamento')}
                       />
                     )}
                   </div>

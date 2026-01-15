@@ -6,6 +6,7 @@ type Payload =
   | { action: 'disconnect' }
   | { action: 'send_test'; number: string; text: string }
   | { action: 'send_confirmacao'; agendamento_id: string }
+  | { action: 'send_cancelamento'; agendamento_id: string }
   | { action: 'config_status' }
   | { action: 'admin_diagnostics' }
   | { action: 'admin_status' }
@@ -43,9 +44,11 @@ type UsuarioExtraRow = {
   whatsapp_instance_name: string | null
   enviar_confirmacao: boolean | null
   enviar_lembrete: boolean | null
+  enviar_cancelamento?: boolean | null
   lembrete_horas_antes: number | null
   mensagem_confirmacao: string | null
   mensagem_lembrete: string | null
+  mensagem_cancelamento?: string | null
 }
 
 type ServicoRow = { nome: string | null; preco: number | null }
@@ -74,7 +77,9 @@ type AgendamentoConfirmacaoRow = { confirmacao_enviada: boolean | null }
 
 const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nLocal: {endereco}\n\nNos vemos em breve!\n{nome_negocio}`
 
-const FN_VERSION = 'whatsapp@2025-12-27'
+const defaultCancelamento = `Olá {nome}!\n\nSeu agendamento foi cancelado:\n📅 {data} às {hora}\n✂️ {servico}\n\nSe precisar remarcar, é só me chamar.\n{nome_negocio}`
+
+const FN_VERSION = 'whatsapp@2026-01-14.1'
 
 function jsonResponse(status: number, body: unknown) {
   const withFn = (() => {
@@ -1453,14 +1458,21 @@ Deno.serve(async (req) => {
     return jsonResponse(403, { error: 'not_allowed' })
   }
 
-  const { data: userExtraRaw, error: userExtraErr } = await dbClient
-    .from('usuarios')
-    .select('whatsapp_instance_name,enviar_confirmacao,enviar_lembrete,lembrete_horas_antes,mensagem_confirmacao,mensagem_lembrete')
-    .eq('id', masterId)
-    .maybeSingle()
+  const selectExtraFull =
+    'whatsapp_instance_name,enviar_confirmacao,enviar_lembrete,enviar_cancelamento,lembrete_horas_antes,mensagem_confirmacao,mensagem_lembrete,mensagem_cancelamento'
+  const selectExtraFallback = 'whatsapp_instance_name,enviar_confirmacao,enviar_lembrete,lembrete_horas_antes,mensagem_confirmacao,mensagem_lembrete'
+
+  const userExtraFirst = await dbClient.from('usuarios').select(selectExtraFull).eq('id', masterId).maybeSingle()
+  const userExtraSecond =
+    userExtraFirst.error && isMissingColumnError(userExtraFirst.error.message)
+      ? await dbClient.from('usuarios').select(selectExtraFallback).eq('id', masterId).maybeSingle()
+      : null
+
+  const userExtraRaw = (userExtraSecond ? userExtraSecond.data : userExtraFirst.data) as unknown
+  const userExtraErr = userExtraSecond ? userExtraSecond.error : userExtraFirst.error
 
   const userExtraOk = !userExtraErr || !isMissingColumnError(userExtraErr.message)
-  const userExtraSafe = userExtraOk ? userExtraRaw : null
+  const userExtraSafe = userExtraOk ? (userExtraRaw as unknown) : null
 
   const userBaseRow = userBase as unknown as UsuarioBaseRow
   const userExtra = (userExtraSafe ?? null) as unknown as UsuarioExtraRow | null
@@ -1513,11 +1525,11 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (payload.action !== 'send_confirmacao' && (!apiUrl || !apiKey)) {
+  if (payload.action !== 'send_confirmacao' && payload.action !== 'send_cancelamento' && (!apiUrl || !apiKey)) {
     return jsonResponse(400, { error: 'whatsapp_not_configured' })
   }
 
-  if (payload.action !== 'send_confirmacao') {
+  if (payload.action !== 'send_confirmacao' && payload.action !== 'send_cancelamento') {
     const v = validateEvolutionBaseUrl(apiUrl ?? '')
     if (!v.ok) {
       const cleaned = (v as unknown as { cleaned?: string }).cleaned ?? null
@@ -1947,6 +1959,170 @@ Deno.serve(async (req) => {
       if (updErr && !isMissingColumnError(updErr.message)) {
         return jsonResponse(400, { error: 'save_confirmacao_flag_failed', message: updErr.message })
       }
+    }
+
+    return jsonResponse(200, { ok: true, state })
+  }
+
+  if (payload.action === 'send_cancelamento') {
+    const agendamentoId = String(payload.agendamento_id ?? '').trim()
+    if (!agendamentoId) return jsonResponse(400, { error: 'invalid_payload' })
+
+    const selectFull =
+      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,funcionario_id,unidade_id,extras,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+    const selectBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,status,extras,servico:servicos(nome,preco)'
+
+    const first = await userClient.from('agendamentos').select(selectFull).eq('id', agendamentoId).maybeSingle()
+    const second =
+      first.error && (isMissingTableError(first.error.message) || isMissingColumnError(first.error.message) || isMissingRelationshipError(first.error.message))
+        ? await userClient.from('agendamentos').select(selectBase).eq('id', agendamentoId).maybeSingle()
+        : null
+
+    const ag = (second ? second.data : first.data) as unknown
+    const agErr = second ? second.error : first.error
+
+    if (agErr || !ag) return jsonResponse(404, { error: 'agendamento_not_found' })
+    const agRow = ag as unknown as AgendamentoRow
+    if (agRow.usuario_id !== masterId) return jsonResponse(403, { error: 'not_allowed' })
+
+    const statusNormalized = String(agRow.status ?? '')
+      .trim()
+      .toLowerCase()
+    if (statusNormalized !== 'cancelado') {
+      return jsonResponse(400, {
+        error: 'agendamento_not_cancelled',
+        status: agRow.status,
+        hint: 'O aviso de cancelamento só envia quando o status do agendamento está como “cancelado”.',
+      })
+    }
+
+    const shouldSend = (userExtra?.enviar_cancelamento ?? true) !== false
+    if (!shouldSend) return jsonResponse(200, { ok: true, skipped: 'disabled' })
+
+    const tmplCandidate = (userExtra?.mensagem_cancelamento ?? '').trim()
+    const tmpl = tmplCandidate ? (userExtra?.mensagem_cancelamento ?? '') : defaultCancelamento
+
+    const clienteEndereco = readExtrasEndereco(agRow.extras)
+    const unidadeEndereco = (agRow.unidade?.endereco ?? '').trim()
+    const endereco = clienteEndereco || unidadeEndereco || (userBaseRow.endereco ?? '')
+    const telefoneProfissional = (agRow.funcionario?.telefone ?? '').trim() || (userBaseRow.telefone ?? '')
+
+    const vars = {
+      nome: agRow.cliente_nome ?? '',
+      data: formatBRDate(agRow.data),
+      hora: agRow.hora_inicio ?? '',
+      servico: agRow.servico?.nome ?? '',
+      preco: agRow.servico?.preco != null ? formatBRL(Number(agRow.servico.preco)) : '',
+      cliente_endereco: clienteEndereco,
+      endereco,
+      nome_negocio: userBaseRow.nome_negocio ?? '',
+      telefone_profissional: telefoneProfissional,
+      profissional_nome: agRow.funcionario?.nome_completo ?? '',
+      unidade_nome: agRow.unidade?.nome ?? '',
+      unidade_endereco: unidadeEndereco,
+      unidade_telefone: agRow.unidade?.telefone ?? '',
+    }
+    const message = interpolateTemplate(tmpl, vars).trim()
+    const phoneRaw = String(agRow.cliente_telefone ?? '')
+    const phoneOk = Boolean(sanitizePhone(phoneRaw))
+    const msgOk = Boolean(message)
+
+    const clienteEmail = readExtrasEmail(agRow.extras)
+    const canEmail = Boolean(resendApiKey && clienteEmail)
+
+    const tryEmail = async (reason: string) => {
+      if (!canEmail) return null
+      if (!msgOk) return null
+      const negocio = (userBaseRow.nome_negocio ?? '').trim() || 'SMagenda'
+      const subject = `Agendamento cancelado — ${negocio}`
+      const res = await resendSendEmail({ apiKey: resendApiKey, from: resendFrom, to: clienteEmail, subject, text: message })
+      return { ok: res.ok, status: res.status, reason, to: clienteEmail, body: res.body }
+    }
+
+    const canWhatsapp = Boolean(apiUrl && apiKey)
+    if (!msgOk) {
+      return jsonResponse(400, {
+        error: 'missing_message_data',
+        phone_ok: phoneOk,
+        message_ok: msgOk,
+        phone_masked: phoneRaw ? maskRecipient(phoneRaw) : null,
+        hint: 'A mensagem de cancelamento ficou vazia.',
+      })
+    }
+
+    if (!phoneOk) {
+      const emailFallback = await tryEmail('invalid_phone')
+      if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, fallback: { email: emailFallback } })
+      return jsonResponse(400, {
+        error: 'missing_message_data',
+        phone_ok: phoneOk,
+        message_ok: msgOk,
+        phone_masked: phoneRaw ? maskRecipient(phoneRaw) : null,
+        hint: 'O agendamento não tem telefone válido do cliente. Preencha o telefone com DDD (ex.: 11999999999).',
+      })
+    }
+
+    if (!canWhatsapp) {
+      const emailFallback = await tryEmail('whatsapp_not_configured')
+      if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, skipped: 'not_configured', fallback: { email: emailFallback } })
+      return jsonResponse(200, { ok: true, skipped: 'not_configured' })
+    }
+
+    const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
+
+    const stateRes = await evolutionRequestAuto({ baseUrl: apiUrl, apiKey, path: `/instance/connectionState/${instanceName}`, method: 'GET', stopOn404 })
+    const state = stateRes.ok ? extractInstanceState(stateRes.body) : null
+    const stateNormalized = (state ?? '').trim().toLowerCase()
+
+    let sendRes = await evolutionSendTextWithFallback({ apiUrl, apiKey, instanceName, phoneRaw, text: message, stopOn404 })
+
+    if (!sendRes.ok && sendRes.status === 404 && isEvolutionInstanceNotFound(sendRes.body, instanceName)) {
+      const createRes = await createEvolutionInstance({ apiUrl, apiKey, instanceName })
+      if (!createRes.ok && createRes.status !== 409) {
+        const hint = evolutionHint(createRes.body)
+        return jsonResponse(createRes.status, { error: 'evolution_error', details: createRes.body, hint })
+      }
+      sendRes = await evolutionSendTextWithFallback({ apiUrl, apiKey, instanceName, phoneRaw, text: message, stopOn404 })
+    }
+
+    if (!sendRes.ok) {
+      if (stateNormalized && stateNormalized !== 'open' && stateNormalized !== 'connected') {
+        const emailFallback = await tryEmail('instance_not_connected')
+        if (emailFallback) {
+          return jsonResponse(emailFallback.ok ? 200 : 502, {
+            ok: emailFallback.ok,
+            error: 'instance_not_connected',
+            state,
+            instanceName,
+            fallback: { email: emailFallback },
+          })
+        }
+        return jsonResponse(409, {
+          error: 'instance_not_connected',
+          state,
+          instanceName,
+          hint: 'WhatsApp ainda não está conectado nessa instância. Vá em Configurações > WhatsApp e clique em Conectar (QR Code) e depois tente novamente.',
+        })
+      }
+
+      const hint = evolutionHint(sendRes.body)
+      const emailFallback = await tryEmail('evolution_error')
+      if (emailFallback) {
+        return jsonResponse(emailFallback.ok ? 200 : 502, {
+          ok: emailFallback.ok,
+          error: 'evolution_error',
+          details: sendRes.body,
+          hint,
+          attempts: (sendRes as unknown as { attempts?: unknown }).attempts ?? null,
+          fallback: { email: emailFallback },
+        })
+      }
+      return jsonResponse(sendRes.status, {
+        error: 'evolution_error',
+        details: sendRes.body,
+        hint,
+        attempts: (sendRes as unknown as { attempts?: unknown }).attempts ?? null,
+      })
     }
 
     return jsonResponse(200, { ok: true, state })

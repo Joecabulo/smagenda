@@ -465,7 +465,7 @@ alter table public.servicos add column if not exists taxa_agendamento numeric no
 alter table public.servicos add column if not exists buffer_antes_min int not null default 0;
 alter table public.servicos add column if not exists buffer_depois_min int not null default 0;
 alter table public.servicos add column if not exists antecedencia_minutos int not null default 120;
-alter table public.servicos add column if not exists janela_max_dias int not null default 15;
+alter table public.servicos add column if not exists janela_max_dias int not null default 365;
 alter table public.servicos add column if not exists dia_inteiro boolean not null default false;
 
 alter table public.funcionarios add column if not exists capacidade_dia_inteiro int not null default 1;
@@ -930,7 +930,7 @@ grant execute on function public.public_get_ocupacoes(uuid, date, uuid) to authe
 alter table public.servicos add column if not exists buffer_antes_min int not null default 0;
 alter table public.servicos add column if not exists buffer_depois_min int not null default 0;
 alter table public.servicos add column if not exists antecedencia_minutos int not null default 120;
-alter table public.servicos add column if not exists janela_max_dias int not null default 15;
+alter table public.servicos add column if not exists janela_max_dias int not null default 365;
 
 create table if not exists public.taxa_agendamento_pagamentos (
   id uuid primary key default gen_random_uuid(),
@@ -1081,7 +1081,7 @@ begin
     coalesce(s.buffer_antes_min, 0)::int,
     coalesce(s.buffer_depois_min, 0)::int,
     coalesce(s.antecedencia_minutos, 120)::int,
-    coalesce(s.janela_max_dias, 15)::int,
+    365::int,
     coalesce(s.dia_inteiro, false)::boolean,
     s.preco::numeric,
     s.taxa_agendamento::numeric,
@@ -1121,7 +1121,7 @@ begin
         p_cliente_telefone text,
         p_funcionario_id uuid,
         p_extras jsonb default null,
-        p_status text default 'confirmado'
+        p_status text default 'pendente'
       )
       returns uuid
       language plpgsql
@@ -1132,7 +1132,7 @@ begin
         v_created_id uuid;
         v_status text;
       begin
-        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'confirmado'));
+        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'pendente'));
         if v_status not in ('confirmado', 'pendente') then
           raise exception 'status_invalido';
         end if;
@@ -1185,7 +1185,7 @@ begin
         p_funcionario_id uuid,
         p_unidade_id uuid default null,
         p_extras jsonb default null,
-        p_status text default 'confirmado'
+        p_status text default 'pendente'
       )
       returns uuid
       language plpgsql
@@ -1196,7 +1196,7 @@ begin
         v_created_id uuid;
         v_status text;
       begin
-        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'confirmado'));
+        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'pendente'));
         if v_status not in ('confirmado', 'pendente') then
           raise exception 'status_invalido';
         end if;
@@ -1248,7 +1248,7 @@ begin
         p_cliente_nome text,
         p_cliente_telefone text,
         p_funcionario_id uuid,
-        p_status text default 'confirmado'
+        p_status text default 'pendente'
       )
       returns uuid
       language plpgsql
@@ -1259,7 +1259,7 @@ begin
         v_created_id uuid;
         v_status text;
       begin
-        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'confirmado'));
+        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'pendente'));
         if v_status not in ('confirmado', 'pendente') then
           raise exception 'status_invalido';
         end if;
@@ -1310,7 +1310,7 @@ begin
         p_cliente_telefone text,
         p_funcionario_id uuid,
         p_unidade_id uuid default null,
-        p_status text default 'confirmado'
+        p_status text default 'pendente'
       )
       returns uuid
       language plpgsql
@@ -1321,7 +1321,7 @@ begin
         v_created_id uuid;
         v_status text;
       begin
-        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'confirmado'));
+        v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'pendente'));
         if v_status not in ('confirmado', 'pendente') then
           raise exception 'status_invalido';
         end if;
@@ -1394,7 +1394,7 @@ alter table public.servicos add column if not exists taxa_agendamento numeric no
 alter table public.servicos add column if not exists buffer_antes_min int not null default 0;
 alter table public.servicos add column if not exists buffer_depois_min int not null default 0;
 alter table public.servicos add column if not exists antecedencia_minutos int not null default 120;
-alter table public.servicos add column if not exists janela_max_dias int not null default 15;
+alter table public.servicos add column if not exists janela_max_dias int not null default 365;
 alter table public.servicos add column if not exists dia_inteiro boolean not null default false;
 
 alter table public.funcionarios add column if not exists capacidade_dia_inteiro int not null default 1;
@@ -1681,7 +1681,7 @@ begin
     coalesce(s.buffer_antes_min, 0)::int,
     coalesce(s.buffer_depois_min, 0)::int,
     coalesce(s.antecedencia_minutos, 120)::int,
-    coalesce(s.janela_max_dias, 15)::int,
+    365::int,
     coalesce(s.dia_inteiro, false)::boolean,
     s.preco::numeric,
     s.taxa_agendamento::numeric,
@@ -1795,7 +1795,7 @@ begin
     coalesce(s.buffer_antes_min, 0),
     coalesce(s.buffer_depois_min, 0),
     coalesce(s.antecedencia_minutos, 120),
-    coalesce(s.janela_max_dias, 15),
+    365,
     coalesce(s.dia_inteiro, false)::boolean
   into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
   from public.servicos s
@@ -2010,7 +2010,7 @@ create or replace function public.public_create_agendamento_publico(
   p_funcionario_id uuid,
   p_unidade_id uuid default null,
   p_extras jsonb default null,
-  p_status text default 'confirmado'
+  p_status text default 'pendente'
 )
 returns uuid
 language plpgsql
@@ -2056,7 +2056,7 @@ begin
     raise exception 'invalid_payload';
   end if;
 
-  v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'confirmado'));
+  v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'pendente'));
   if v_status not in ('confirmado', 'pendente') then
     raise exception 'status_invalido';
   end if;
@@ -2108,7 +2108,7 @@ begin
     coalesce(s.buffer_antes_min, 0),
     coalesce(s.buffer_depois_min, 0),
     coalesce(s.antecedencia_minutos, 120),
-    coalesce(s.janela_max_dias, 15),
+    365,
     coalesce(s.dia_inteiro, false)::boolean
   into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
   from public.servicos s
@@ -2599,7 +2599,7 @@ begin
     coalesce(s.buffer_antes_min, 0)::int,
     coalesce(s.buffer_depois_min, 0)::int,
     coalesce(s.antecedencia_minutos, 120)::int,
-    coalesce(s.janela_max_dias, 15)::int,
+    365::int,
     s.preco::numeric,
     s.taxa_agendamento::numeric,
     s.cor::text,
@@ -2922,7 +2922,7 @@ begin
     coalesce(s.buffer_antes_min, 0)::int,
     coalesce(s.buffer_depois_min, 0)::int,
     coalesce(s.antecedencia_minutos, 120)::int,
-    coalesce(s.janela_max_dias, 15)::int,
+    365::int,
     coalesce(s.dia_inteiro, false)::boolean
   into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
   from public.servicos s
@@ -3113,7 +3113,7 @@ create or replace function public.public_create_agendamento_publico(
   p_funcionario_id uuid,
   p_unidade_id uuid default null,
   p_extras jsonb default null,
-  p_status text default 'confirmado'
+  p_status text default 'pendente'
 )
 returns uuid
 language plpgsql
@@ -3160,7 +3160,7 @@ begin
     raise exception 'invalid_payload';
   end if;
 
-  v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'confirmado'));
+  v_status := lower(coalesce(nullif(trim(coalesce(p_status, '')), ''), 'pendente'));
   if v_status not in ('confirmado', 'pendente') then
     raise exception 'status_invalido';
   end if;
@@ -3213,7 +3213,7 @@ begin
     coalesce(s.buffer_antes_min, 0)::int,
     coalesce(s.buffer_depois_min, 0)::int,
     coalesce(s.antecedencia_minutos, 120)::int,
-    coalesce(s.janela_max_dias, 15)::int,
+    365::int,
     coalesce(s.dia_inteiro, false)::boolean
   into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
   from public.servicos s
@@ -3439,9 +3439,11 @@ grant execute on function public.public_create_agendamento_publico(uuid, date, t
     return `alter table public.usuarios add column if not exists whatsapp_instance_name text;
 alter table public.usuarios add column if not exists enviar_confirmacao boolean not null default true;
 alter table public.usuarios add column if not exists enviar_lembrete boolean not null default false;
+alter table public.usuarios add column if not exists enviar_cancelamento boolean not null default true;
 alter table public.usuarios add column if not exists lembrete_horas_antes int not null default 24;
 alter table public.usuarios add column if not exists mensagem_confirmacao text;
 alter table public.usuarios add column if not exists mensagem_lembrete text;
+alter table public.usuarios add column if not exists mensagem_cancelamento text;
 
 alter table public.agendamentos add column if not exists confirmacao_enviada boolean not null default false;
 alter table public.agendamentos add column if not exists confirmacao_enviada_em timestamptz;
@@ -3606,9 +3608,11 @@ alter table public.usuarios add column if not exists whatsapp_habilitado boolean
 alter table public.usuarios add column if not exists whatsapp_instance_name text;
 alter table public.usuarios add column if not exists enviar_confirmacao boolean not null default true;
 alter table public.usuarios add column if not exists enviar_lembrete boolean not null default false;
+alter table public.usuarios add column if not exists enviar_cancelamento boolean not null default true;
 alter table public.usuarios add column if not exists lembrete_horas_antes int not null default 24;
 alter table public.usuarios add column if not exists mensagem_confirmacao text;
 alter table public.usuarios add column if not exists mensagem_lembrete text;
+alter table public.usuarios add column if not exists mensagem_cancelamento text;
 
 create index if not exists usuarios_whatsapp_habilitado_idx on public.usuarios (whatsapp_habilitado);
 
@@ -3865,7 +3869,55 @@ $$;
 drop trigger if exists agendamentos_whatsapp_confirmacao_trg on public.agendamentos;
 create trigger agendamentos_whatsapp_confirmacao_trg
 after insert or update of status on public.agendamentos
-for each row execute function public.agendamentos_notify_whatsapp_confirmacao();`
+for each row execute function public.agendamentos_notify_whatsapp_confirmacao();
+
+create or replace function public.agendamentos_notify_whatsapp_funcionario_novo_agendamento()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  begin
+    if TG_OP = 'INSERT' then
+      if NEW.funcionario_id is not null and coalesce(lower(NEW.status), '') <> 'cancelado' then
+        begin
+          perform net.http_post(
+            url:='${supabaseProjectUrl}/functions/v1/whatsapp-lembretes',
+            headers:='{ "Content-Type": "application/json", "apikey": "${supabaseAnonKey}", "Authorization": "Bearer ${supabaseAnonKey}", "x-cron-secret": "<CRON_SECRET>" }'::jsonb,
+            body:=jsonb_build_object('action', 'funcionario_novo_agendamento', 'agendamento_id', NEW.id::text)
+          );
+        exception
+          when others then
+            null;
+        end;
+      end if;
+    elsif TG_OP = 'UPDATE' then
+      if NEW.funcionario_id is not null and (OLD.funcionario_id is distinct from NEW.funcionario_id) and coalesce(lower(NEW.status), '') <> 'cancelado' then
+        begin
+          perform net.http_post(
+            url:='${supabaseProjectUrl}/functions/v1/whatsapp-lembretes',
+            headers:='{ "Content-Type": "application/json", "apikey": "${supabaseAnonKey}", "Authorization": "Bearer ${supabaseAnonKey}", "x-cron-secret": "<CRON_SECRET>" }'::jsonb,
+            body:=jsonb_build_object('action', 'funcionario_novo_agendamento', 'agendamento_id', NEW.id::text)
+          );
+        exception
+          when others then
+            null;
+        end;
+      end if;
+    end if;
+  exception
+    when others then
+      null;
+  end;
+  return NEW;
+end;
+$$;
+
+drop trigger if exists agendamentos_whatsapp_funcionario_novo_agendamento_trg on public.agendamentos;
+create trigger agendamentos_whatsapp_funcionario_novo_agendamento_trg
+after insert or update of funcionario_id on public.agendamentos
+for each row execute function public.agendamentos_notify_whatsapp_funcionario_novo_agendamento();`
   }, [supabaseAnonKey, supabaseProjectUrl])
 
   const sqlAuditLogs = useMemo(() => {

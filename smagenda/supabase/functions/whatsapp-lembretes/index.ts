@@ -68,6 +68,8 @@ type UsuarioPartialRow = {
 
 const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nLocal: {endereco}\n\nNos vemos em breve!\n{nome_negocio}`
 
+const defaultFuncionarioNovoAgendamento = `Novo agendamento:\n📅 {data} às {hora}\n👤 {cliente_nome}\n✂️ {servico}\n📍 {endereco}`
+
 const FN_VERSION = 'whatsapp-lembretes@2025-12-31'
 
 function jsonResponse(status: number, body: unknown) {
@@ -659,6 +661,85 @@ Deno.serve(async (req) => {
     }
 
     return jsonResponse(200, { ok: true, action: 'billing_daily', today: todayIso, updated, sent, skipped })
+  }
+
+  if (action === 'funcionario_novo_agendamento') {
+    const agendamentoId = (() => {
+      if (!bodyJson || typeof bodyJson !== 'object') return null
+      const raw = (bodyJson as Record<string, unknown>).agendamento_id
+      if (typeof raw !== 'string') return null
+      const id = raw.trim()
+      return id ? id : null
+    })()
+
+    if (!agendamentoId) return jsonResponse(400, { error: 'invalid_payload' })
+
+    const agSelFull =
+      'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,extras,servico:servicos(nome,preco),funcionario:funcionarios(nome_completo,telefone),unidade:unidades(nome,endereco,telefone)'
+    const agSelBase = 'id,usuario_id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,extras,servico:servicos(nome,preco)'
+
+    const agFirst = await adminClient.from('agendamentos').select(agSelFull).eq('id', agendamentoId).maybeSingle()
+    const agRes =
+      agFirst.error && (isMissingTableError(agFirst.error.message) || isMissingRelationshipError(agFirst.error.message) || isMissingColumnError(agFirst.error.message))
+        ? await adminClient.from('agendamentos').select(agSelBase).eq('id', agendamentoId).maybeSingle()
+        : null
+
+    const agData = (agRes ? agRes.data : agFirst.data) as unknown as AgendamentoRow | null
+    const agErr = agRes ? agRes.error : agFirst.error
+    if (agErr) {
+      if (isMissingColumnError(agErr.message) || isMissingTableError(agErr.message)) return jsonResponse(400, { error: 'schema_incomplete', message: agErr.message })
+      return jsonResponse(400, { error: 'load_agendamento_failed', message: agErr.message })
+    }
+    if (!agData) return jsonResponse(404, { error: 'agendamento_not_found' })
+
+    const status = String(agData.status ?? '').trim().toLowerCase()
+    if (status === 'cancelado') return jsonResponse(200, { ok: true, skipped: 'cancelado' })
+
+    const funcionarioTelefone = (agData.funcionario?.telefone ?? '').trim()
+    if (!sanitizePhoneDigits(funcionarioTelefone)) return jsonResponse(200, { ok: true, skipped: 'missing_funcionario_phone' })
+
+    const userSel = 'id,whatsapp_instance_name,slug,nome_negocio,telefone,endereco'
+    const userRes = await adminClient.from('usuarios').select(userSel).eq('id', agData.usuario_id).maybeSingle()
+    if (userRes.error) {
+      if (isMissingColumnError(userRes.error.message) || isMissingTableError(userRes.error.message)) {
+        return jsonResponse(400, { error: 'schema_incomplete', message: userRes.error.message })
+      }
+      return jsonResponse(400, { error: 'load_user_failed', message: userRes.error.message })
+    }
+    if (!userRes.data) return jsonResponse(404, { error: 'usuario_not_found' })
+
+    const uRow = userRes.data as unknown as UsuarioPartialRow
+    const instanceNameRaw = uRow.whatsapp_instance_name ?? uRow.slug ?? ''
+    const instanceName = sanitizeInstanceName(instanceNameRaw)
+
+    const clienteEndereco = readExtrasEndereco(agData.extras)
+    const unidadeEndereco = (agData.unidade?.endereco ?? '').trim()
+    const endereco = clienteEndereco || unidadeEndereco || (uRow.endereco ?? '')
+
+    const vars = {
+      data: formatBRDate(agData.data),
+      hora: String(agData.hora_inicio ?? ''),
+      cliente_nome: String(agData.cliente_nome ?? ''),
+      servico: String(agData.servico?.nome ?? ''),
+      endereco,
+      nome_negocio: String(uRow.nome_negocio ?? ''),
+      cliente_telefone: String(agData.cliente_telefone ?? ''),
+      profissional_nome: String(agData.funcionario?.nome_completo ?? ''),
+    }
+
+    const text = interpolateTemplate(defaultFuncionarioNovoAgendamento, vars).trim()
+    if (!text) return jsonResponse(200, { ok: true, skipped: 'missing_message_data' })
+
+    const sendRes = await evolutionSendTextWithFallback({
+      apiUrl: globalApiUrl,
+      apiKey: globalApiKey,
+      instanceName,
+      phoneRaw: funcionarioTelefone,
+      text,
+    })
+
+    if (!sendRes.ok) return jsonResponse(502, { ok: false, error: 'evolution_error', details: sendRes.body, attempts: sendRes.attempts })
+    return jsonResponse(200, { ok: true, sent: true, usuario_id: uRow.id, agendamento_id: agendamentoId })
   }
 
   const agendamentoId = (() => {

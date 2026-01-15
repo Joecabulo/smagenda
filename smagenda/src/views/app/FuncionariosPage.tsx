@@ -686,15 +686,7 @@ export function FuncionariosPage() {
                 </Button>
               </div>
 
-                  <div className="flex flex-wrap justify-end gap-2">
-                    <Button variant="secondary" onClick={closeForm} disabled={saving}>
-                      Cancelar
-                    </Button>
-                    <Button onClick={submit} disabled={!canSubmit || saving}>
-                      Salvar
-                    </Button>
-                  </div>
-                  </div>
+                </div>
                 </Card>
               </div>
             ) : null}

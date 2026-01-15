@@ -7,7 +7,7 @@ type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
 
 export function Button({ variant = 'primary', fullWidth, className, ...props }: Props) {
   const base =
-    'inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:opacity-60 disabled:cursor-not-allowed'
+    'inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:opacity-60 disabled:cursor-not-allowed transform transition-transform active:scale-[0.98]'
   const styles: Record<string, string> = {
     primary: 'bg-slate-900 text-white hover:bg-slate-800',
     secondary: 'bg-white text-slate-900 border border-slate-200 hover:bg-slate-50',
@@ -24,4 +24,3 @@ export function Button({ variant = 'primary', fullWidth, className, ...props }: 
     />
   )
 }
-

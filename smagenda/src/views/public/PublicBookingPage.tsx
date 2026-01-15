@@ -67,6 +67,32 @@ function addMonths(d: Date, months: number) {
   return new Date(d.getFullYear(), d.getMonth() + months, 1)
 }
 
+function addYears(d: Date, years: number) {
+  return new Date(d.getFullYear() + years, d.getMonth(), d.getDate())
+}
+
+function monthRangeIsos(monthIso: string, minDate: Date, maxDate: Date) {
+  const base = monthIso ? new Date(`${monthIso}T00:00:00`) : null
+  if (!base || !Number.isFinite(base.getTime())) return [] as string[]
+
+  const mStart = startOfMonth(base)
+  const mEnd = endOfMonth(base)
+  const start = mStart < minDate ? minDate : mStart
+  const end = mEnd > maxDate ? maxDate : mEnd
+
+  const out: string[] = []
+  const cur = new Date(start)
+  cur.setHours(0, 0, 0, 0)
+  const last = new Date(end)
+  last.setHours(0, 0, 0, 0)
+
+  while (cur <= last) {
+    out.push(toIsoDateLocal(cur))
+    cur.setDate(cur.getDate() + 1)
+  }
+  return out
+}
+
 function monthLabelPTBR(d: Date) {
   const months = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
   return `${months[d.getMonth()] ?? ''} ${d.getFullYear()}`.trim()
@@ -76,13 +102,16 @@ function DiaInteiroCalendar(args: {
   primaryColor: string
   selectedIso: string
   setSelectedIso: (iso: string) => void
-  dateOptionIsos: string[]
+  minIso: string
+  maxIso: string
+  monthIso: string
+  setMonthIso: (iso: string) => void
   isDayDisabled: (d: Date) => boolean
   diaInteiroDisponibilidade: Record<string, string>
   calendarioLoading: boolean
 }) {
-  const minIso = args.dateOptionIsos[0] ?? ''
-  const maxIso = args.dateOptionIsos[args.dateOptionIsos.length - 1] ?? ''
+  const minIso = args.minIso ?? ''
+  const maxIso = args.maxIso ?? ''
 
   const minDate = useMemo(() => {
     if (!minIso) return null
@@ -96,7 +125,7 @@ function DiaInteiroCalendar(args: {
     return Number.isFinite(d.getTime()) ? d : null
   }, [maxIso])
 
-  const initialMonthIso = useMemo(() => {
+  const fallbackMonthIso = useMemo(() => {
     const fromSelected = args.selectedIso ? new Date(`${args.selectedIso}T00:00:00`) : null
     const base = fromSelected && Number.isFinite(fromSelected.getTime()) ? fromSelected : minDate
     if (base) return toIsoDateLocal(startOfMonth(base))
@@ -105,7 +134,7 @@ function DiaInteiroCalendar(args: {
     return toIsoDateLocal(startOfMonth(today))
   }, [args.selectedIso, minDate])
 
-  const [monthIso, setMonthIso] = useState(() => initialMonthIso)
+  const monthIso = args.monthIso || fallbackMonthIso
 
   const calendarMonth = useMemo(() => {
     const base = monthIso ? new Date(`${monthIso}T00:00:00`) : null
@@ -126,13 +155,13 @@ function DiaInteiroCalendar(args: {
   const goPrevMonth = () => {
     const prev = addMonths(calendarMonth, -1)
     if (minDate && Number.isFinite(minDate.getTime()) && prev < startOfMonth(minDate)) return
-    setMonthIso(toIsoDateLocal(prev))
+    args.setMonthIso(toIsoDateLocal(prev))
   }
 
   const goNextMonth = () => {
     const next = addMonths(calendarMonth, 1)
     if (maxDate && Number.isFinite(maxDate.getTime()) && startOfMonth(next) > startOfMonth(maxDate)) return
-    setMonthIso(toIsoDateLocal(next))
+    args.setMonthIso(toIsoDateLocal(next))
   }
 
   return (
@@ -193,6 +222,175 @@ function DiaInteiroCalendar(args: {
       </div>
 
       <div className="text-xs text-slate-600">{args.calendarioLoading ? 'Carregando disponibilidade…' : 'Selecione um dia disponível.'}</div>
+    </div>
+  )
+}
+
+function DatePopupCalendar(args: {
+  open: boolean
+  primaryColor: string
+  selectedIso: string
+  monthIso: string
+  setMonthIso: (iso: string) => void
+  onClose: () => void
+  onSelect: (iso: string) => void
+  minIso: string
+  maxIso: string
+  isDayDisabled: (d: Date) => boolean
+  dayHasSlots: Record<string, boolean>
+  availabilityLoading: boolean
+}) {
+  const minIso = args.minIso ?? ''
+  const maxIso = args.maxIso ?? ''
+
+  const minDate = useMemo(() => {
+    if (!minIso) return null
+    const d = new Date(`${minIso}T00:00:00`)
+    return Number.isFinite(d.getTime()) ? d : null
+  }, [minIso])
+
+  const maxDate = useMemo(() => {
+    if (!maxIso) return null
+    const d = new Date(`${maxIso}T00:00:00`)
+    return Number.isFinite(d.getTime()) ? d : null
+  }, [maxIso])
+
+  const fallbackMonthIso = useMemo(() => {
+    const fromSelected = args.selectedIso ? new Date(`${args.selectedIso}T00:00:00`) : null
+    const base = fromSelected && Number.isFinite(fromSelected.getTime()) ? fromSelected : minDate
+    if (base) return toIsoDateLocal(startOfMonth(base))
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    return toIsoDateLocal(startOfMonth(today))
+  }, [args.selectedIso, minDate])
+
+  const monthIso = args.monthIso || fallbackMonthIso
+
+  const calendarMonth = useMemo(() => {
+    const base = monthIso ? new Date(`${monthIso}T00:00:00`) : null
+    if (!base || !Number.isFinite(base.getTime())) return startOfMonth(new Date())
+    return startOfMonth(base)
+  }, [monthIso])
+
+  const calendarGridDays = useMemo(() => {
+    const monthStart = startOfMonth(calendarMonth)
+    const monthEnd = endOfMonth(calendarMonth)
+    const startWeekday = monthStart.getDay()
+    const gridStart = addDays(monthStart, -startWeekday)
+    const gridDays: Date[] = []
+    for (let i = 0; i < 42; i += 1) gridDays.push(addDays(gridStart, i))
+    return { monthStart, monthEnd, gridDays }
+  }, [calendarMonth])
+
+  const canPrev = useMemo(() => {
+    if (!minDate) return true
+    const prevMonth = addMonths(calendarMonth, -1)
+    return prevMonth >= startOfMonth(minDate)
+  }, [calendarMonth, minDate])
+
+  const canNext = useMemo(() => {
+    if (!maxDate) return true
+    const nextMonth = addMonths(calendarMonth, 1)
+    return nextMonth <= startOfMonth(maxDate)
+  }, [calendarMonth, maxDate])
+
+  useEffect(() => {
+    if (!args.open) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') args.onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [args])
+
+  if (!args.open) return null
+
+  return (
+    <div className="fixed inset-0 z-50">
+      <button type="button" className="absolute inset-0 bg-slate-900/40" onClick={args.onClose} />
+      <div className="relative h-full w-full flex items-end sm:items-center justify-center p-4">
+        <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white shadow-xl">
+          <div className="p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!canPrev) return
+                  args.setMonthIso(toIsoDateLocal(addMonths(calendarMonth, -1)))
+                }}
+                disabled={!canPrev}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 disabled:opacity-40"
+              >
+                ‹
+              </button>
+              <div className="text-sm font-semibold text-slate-900">{monthLabelPTBR(calendarMonth)}</div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!canNext) return
+                  args.setMonthIso(toIsoDateLocal(addMonths(calendarMonth, 1)))
+                }}
+                disabled={!canNext}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 disabled:opacity-40"
+              >
+                ›
+              </button>
+            </div>
+
+            <div className="grid grid-cols-7 gap-1">
+              {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map((w) => (
+                <div key={w} className="text-center text-[11px] font-semibold text-slate-500 py-1">
+                  {w}
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-7 gap-1">
+              {calendarGridDays.gridDays.map((dObj) => {
+                const iso = toIsoDateLocal(dObj)
+                const inMonth = dObj >= calendarGridDays.monthStart && dObj <= calendarGridDays.monthEnd
+                const disabled = !inMonth || args.isDayDisabled(dObj) || args.dayHasSlots[iso] === false
+                const selected = args.selectedIso === iso && !disabled
+                return (
+                  <button
+                    key={iso}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => {
+                      if (disabled) return
+                      args.onSelect(iso)
+                      args.onClose()
+                    }}
+                    className={[
+                      'h-10 rounded-xl border text-sm font-semibold',
+                      disabled
+                        ? 'opacity-40 cursor-not-allowed bg-white border-slate-200 text-slate-400'
+                        : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
+                      !inMonth && !selected ? 'opacity-60' : '',
+                    ].join(' ')}
+                    style={selected ? { backgroundColor: args.primaryColor, borderColor: args.primaryColor, color: '#fff' } : undefined}
+                  >
+                    {dObj.getDate()}
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="flex justify-end">
+              <Button variant="secondary" onClick={args.onClose}>
+                Fechar
+              </Button>
+            </div>
+
+            <div className="text-xs text-slate-600">{args.availabilityLoading ? 'Carregando disponibilidade…' : 'Selecione um dia disponível.'}</div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -276,17 +474,6 @@ function addDays(d: Date, days: number) {
   const x = new Date(d)
   x.setDate(x.getDate() + days)
   return x
-}
-
-function weekdayShortLabel(d: Date) {
-  const wd = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
-  return wd[d.getDay()] ?? ''
-}
-
-function formatShortDayMonth(d: Date) {
-  const dd = String(d.getDate()).padStart(2, '0')
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  return `${dd}/${mm}`
 }
 
 function toWhatsappNumber(value: string) {
@@ -530,7 +717,7 @@ export function PublicBookingPage() {
 
   const [servicoId, setServicoId] = useState('')
   const [funcionarioId, setFuncionarioId] = useState('')
-  const [data, setData] = useState(() => toIsoDateLocal(new Date()))
+  const [data, setData] = useState('')
   const [hora, setHora] = useState('')
   const [clienteNome, setClienteNome] = useState('')
   const [clienteTelefone, setClienteTelefone] = useState('')
@@ -553,6 +740,10 @@ export function PublicBookingPage() {
   })
 
   const [modalOpen, setModalOpen] = useState(false)
+
+  const [datePopupOpen, setDatePopupOpen] = useState(false)
+  const [datePopupMonthIso, setDatePopupMonthIso] = useState('')
+  const [diaInteiroMonthIso, setDiaInteiroMonthIso] = useState('')
 
   const [step, setStep] = useState<'servico' | 'profissional' | 'quando'>('servico')
 
@@ -637,7 +828,6 @@ export function PublicBookingPage() {
       }
       const serviceList = (servicesData ?? []) as unknown as Servico[]
       setServicos(serviceList)
-      if (serviceList.length > 0) setServicoId(serviceList[0].id)
 
       const staffArgs: Record<string, unknown> = { p_usuario_master_id: usuarioPublico.id }
       if (unidadeId) staffArgs.p_unidade_id = unidadeId
@@ -652,7 +842,6 @@ export function PublicBookingPage() {
       }
       const staffList = (staffData ?? []) as unknown as Funcionario[]
       setFuncionarios(staffList)
-      if (staffList.length > 0) setFuncionarioId(staffList[0].id)
       setLoading(false)
     }
 
@@ -669,11 +858,6 @@ export function PublicBookingPage() {
 
   const usuarioId = usuario?.id ?? null
 
-  const maxDays = useMemo(() => {
-    const v = selectedServico?.janela_max_dias
-    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 15
-  }, [selectedServico?.janela_max_dias])
-
   const minLeadMinutes = useMemo(() => {
     const v = selectedServico?.antecedencia_minutos
     return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 120
@@ -689,7 +873,18 @@ export function PublicBookingPage() {
     d.setHours(0, 0, 0, 0)
     return d
   }, [])
-  const maxDate = useMemo(() => addDays(today, maxDays), [maxDays, today])
+
+  const maxDate = useMemo(() => {
+    const d = addYears(today, 1)
+    d.setHours(0, 0, 0, 0)
+    return d
+  }, [today])
+
+  const maxDays = useMemo(() => {
+    const diff = maxDate.getTime() - today.getTime()
+    if (!Number.isFinite(diff) || diff <= 0) return 0
+    return Math.max(0, Math.round(diff / (24 * 60 * 60 * 1000)))
+  }, [maxDate, today])
 
   const allowedWeekdays = useMemo(() => {
     const base = usuario?.dias_trabalho ?? null
@@ -697,7 +892,7 @@ export function PublicBookingPage() {
     return new Set(base)
   }, [usuario?.dias_trabalho])
 
-  const isDayDisabled = useCallback(
+  const isDayDisabledByRule = useCallback(
     (d: Date) => {
       const x = new Date(d)
       x.setHours(0, 0, 0, 0)
@@ -709,38 +904,54 @@ export function PublicBookingPage() {
     [allowedWeekdays, maxDate, today]
   )
 
-  const dateOptions = useMemo(() => {
-    const days: Date[] = []
-    const horizon = maxDays + 1
-    for (let i = 0; i < horizon; i += 1) {
-      const d = addDays(today, i)
-      if (d > maxDate) break
-      days.push(d)
-    }
-    return days
-  }, [maxDate, maxDays, today])
-
   const [diaInteiroDisponibilidade, setDiaInteiroDisponibilidade] = useState<Record<string, string>>({})
+  const [calendarDayHasSlots, setCalendarDayHasSlots] = useState<Record<string, boolean>>({})
   const [calendarioLoading, setCalendarioLoading] = useState(false)
 
-  const dateOptionIsos = useMemo(() => dateOptions.map((d) => toIsoDateLocal(d)), [dateOptions])
+  const minIso = useMemo(() => toIsoDateLocal(today), [today])
+  const maxIso = useMemo(() => toIsoDateLocal(maxDate), [maxDate])
+
+  const activeCalendarMonthIso = useMemo(() => {
+    if (!usuarioId || !selectedServico) return ''
+    if (hasStaff && !funcionarioId) return ''
+    if (step !== 'quando') return ''
+    if (isDiaInteiro) {
+      if (diaInteiroMonthIso) return diaInteiroMonthIso
+      const base = data ? new Date(`${data}T00:00:00`) : null
+      const safe = base && Number.isFinite(base.getTime()) ? base : today
+      return toIsoDateLocal(startOfMonth(safe))
+    }
+    if (datePopupOpen) return datePopupMonthIso || toIsoDateLocal(startOfMonth(today))
+    return ''
+  }, [data, datePopupMonthIso, datePopupOpen, diaInteiroMonthIso, funcionarioId, hasStaff, isDiaInteiro, selectedServico, step, today, usuarioId])
+
+  const calendarFetchIsos = useMemo(() => {
+    if (!activeCalendarMonthIso) return [] as string[]
+    return monthRangeIsos(activeCalendarMonthIso, today, maxDate)
+  }, [activeCalendarMonthIso, maxDate, today])
 
   useEffect(() => {
     let alive = true
     const run = async () => {
-      if (!isDiaInteiro) {
-        setDiaInteiroDisponibilidade({})
+      if (!usuarioId || !selectedServico) {
         setCalendarioLoading(false)
         return
       }
-      if (!usuarioId || !selectedServico) return
-      if (hasStaff && !funcionarioId) return
-
+      if (hasStaff && !funcionarioId) {
+        setCalendarioLoading(false)
+        return
+      }
+      if (calendarFetchIsos.length === 0) {
+        setCalendarioLoading(false)
+        return
+      }
+      setDiaInteiroDisponibilidade({})
+      setCalendarDayHasSlots({})
       setCalendarioLoading(true)
       const entries = await Promise.all(
-        dateOptionIsos.map(async (iso) => {
+        calendarFetchIsos.map(async (iso) => {
           const dObj = new Date(`${iso}T00:00:00`)
-          if (!Number.isFinite(dObj.getTime()) || isDayDisabled(dObj)) return null
+          if (!Number.isFinite(dObj.getTime()) || isDayDisabledByRule(dObj)) return null
 
           const slotsArgs: Record<string, unknown> = {
             p_usuario_id: usuarioId,
@@ -766,18 +977,21 @@ export function PublicBookingPage() {
             })
             .filter(Boolean)
           const slot = list[0] ?? ''
-          if (!slot) return null
-          return { iso, slot }
+          return { iso, has: Boolean(slot), slot }
         })
       )
 
       if (!alive) return
+      const nextHasSlots: Record<string, boolean> = {}
+      for (const iso of calendarFetchIsos) nextHasSlots[iso] = false
       const next: Record<string, string> = {}
       for (const e of entries) {
         if (!e) continue
-        next[e.iso] = e.slot
+        nextHasSlots[e.iso] = e.has
+        if (e.has && e.slot) next[e.iso] = e.slot
       }
-      setDiaInteiroDisponibilidade(next)
+      setCalendarDayHasSlots(nextHasSlots)
+      setDiaInteiroDisponibilidade(isDiaInteiro ? next : {})
       setCalendarioLoading(false)
     }
     run().catch(() => {
@@ -787,20 +1001,19 @@ export function PublicBookingPage() {
     return () => {
       alive = false
     }
-  }, [dateOptionIsos, funcionarioId, hasStaff, isDayDisabled, isDiaInteiro, selectedServico, usuario?.unidade_id, usuarioId])
+  }, [calendarFetchIsos, funcionarioId, hasStaff, isDayDisabledByRule, isDiaInteiro, selectedServico, usuario?.unidade_id, usuarioId])
 
   useEffect(() => {
     if (!usuario) return
     if (!data) return
     const current = new Date(`${data}T00:00:00`)
     if (!Number.isFinite(current.getTime())) return
-    if (!isDayDisabled(current)) return
-    const next = dateOptions.find((d) => !isDayDisabled(d))
-    if (!next) return
-    const nextIso = toIsoDateLocal(next)
-    if (nextIso === data) return
-    setTimeout(() => setData(nextIso), 0)
-  }, [data, dateOptions, isDayDisabled, usuario])
+    if (!isDayDisabledByRule(current)) return
+    setTimeout(() => {
+      setHora('')
+      setData('')
+    }, 0)
+  }, [data, isDayDisabledByRule, today, usuario])
 
   useEffect(() => {
     let alive = true
@@ -847,7 +1060,7 @@ export function PublicBookingPage() {
         } else if (lower.includes('data_passada')) {
           setError('Selecione uma data futura.')
         } else if (lower.includes('data_muito_futura')) {
-          setError(`Selecione uma data dentro de ${maxDays} dias.`)
+          setError('Selecione uma data dentro de 1 ano.')
         } else if (lower.includes('fora_do_dia_de_trabalho')) {
           setError('Esse dia não está disponível para agendamento.')
         } else if (lower.includes('horarios_nao_configurados')) {
@@ -878,7 +1091,7 @@ export function PublicBookingPage() {
               maxDays,
               minLeadMinutes,
               allowedWeekdays: Array.isArray(usuario?.dias_trabalho) ? usuario?.dias_trabalho : null,
-              isDayDisabled: Number.isFinite(current.getTime()) ? isDayDisabled(current) : null,
+              isDayDisabled: Number.isFinite(current.getTime()) ? isDayDisabledByRule(current) : null,
               weekday: Number.isFinite(current.getTime()) ? current.getDay() : null,
             },
             base: {
@@ -944,7 +1157,7 @@ export function PublicBookingPage() {
             maxDays,
             minLeadMinutes,
             allowedWeekdays: Array.isArray(usuario?.dias_trabalho) ? usuario?.dias_trabalho : null,
-            isDayDisabled: Number.isFinite(current.getTime()) ? isDayDisabled(current) : null,
+            isDayDisabled: Number.isFinite(current.getTime()) ? isDayDisabledByRule(current) : null,
             weekday: Number.isFinite(current.getTime()) ? current.getDay() : null,
           },
           base: {
@@ -983,7 +1196,7 @@ export function PublicBookingPage() {
     return () => {
       alive = false
     }
-  }, [data, debugEnabled, funcionarioId, hasStaff, isDayDisabled, maxDays, minLeadMinutes, selectedFuncionario, selectedServico, slug, unidadeSlug, usuario, usuarioId])
+  }, [data, debugEnabled, funcionarioId, hasStaff, isDayDisabledByRule, maxDays, minLeadMinutes, selectedFuncionario, selectedServico, slug, unidadeSlug, usuario, usuarioId])
 
   const effectiveHora = useMemo(() => {
     if (!isDiaInteiro) return hora
@@ -993,7 +1206,7 @@ export function PublicBookingPage() {
   }, [data, diaInteiroDisponibilidade, hora, isDiaInteiro])
 
   const submit = async () => {
-    if (!usuarioId || !selectedServico || !effectiveHora || !clienteNome.trim() || !clienteTelefone.trim()) return
+    if (!usuarioId || !selectedServico || !data || !effectiveHora || !clienteNome.trim() || !clienteTelefone.trim()) return
     if (needsPlaca && !clientePlaca.trim()) return
     if (needsEndereco && !clienteEndereco.trim()) return
     setSubmitting(true)
@@ -1031,7 +1244,7 @@ export function PublicBookingPage() {
         usuario_id: usuarioId,
         servico_id: selectedServico.id,
         data,
-        hora_inicio: hora,
+        hora_inicio: effectiveHora,
         cliente_nome: clienteNomeFinal,
         cliente_telefone: telefone,
         cliente_endereco: needsEndereco ? clienteEndereco.trim() : null,
@@ -1103,7 +1316,7 @@ export function PublicBookingPage() {
       } else if (lower.includes('data_passada')) {
         setError('Selecione uma data futura.')
       } else if (lower.includes('data_muito_futura')) {
-        setError(`Selecione uma data dentro de ${maxDays} dias.`)
+        setError('Selecione uma data dentro de 1 ano.')
       } else if (lower.includes('antecedencia_minima')) {
         setError(`Selecione um horário com no mínimo ${Math.round(minLeadMinutes / 60)}h de antecedência.`)
       } else if (lower.includes('ocupado')) {
@@ -1164,6 +1377,7 @@ export function PublicBookingPage() {
   const canSubmit = Boolean(
     usuarioId &&
       selectedServico &&
+      data &&
       effectiveHora &&
       clienteNome.trim() &&
       clienteTelefone.trim() &&
@@ -1183,10 +1397,10 @@ export function PublicBookingPage() {
     const servicoPreco = typeof selectedServico?.preco === 'number' ? selectedServico.preco : null
     const servicoTaxa = typeof selectedServico?.taxa_agendamento === 'number' ? selectedServico.taxa_agendamento : null
     const profissionalNome = hasStaff ? (selectedFuncionario?.nome_completo ?? null) : null
-    const canContinue = Boolean(usuarioId && selectedServico && effectiveHora && (!hasStaff || funcionarioId))
+    const canContinue = Boolean(usuarioId && selectedServico && data && effectiveHora && (!hasStaff || funcionarioId))
     const actionLabel = canContinue ? 'Continuar' : 'Escolher horário'
     return { servicoNome, servicoPreco, servicoTaxa, profissionalNome, canContinue, actionLabel }
-  }, [effectiveHora, funcionarioId, hasStaff, selectedFuncionario?.nome_completo, selectedServico, usuarioId])
+  }, [data, effectiveHora, funcionarioId, hasStaff, selectedFuncionario?.nome_completo, selectedServico, usuarioId])
 
   const openFromFooter = () => {
     if (!usuario) return
@@ -1525,44 +1739,60 @@ export function PublicBookingPage() {
                           setData(iso)
                           setStep('quando')
                         }}
-                        dateOptionIsos={dateOptionIsos}
-                        isDayDisabled={isDayDisabled}
+                        minIso={minIso}
+                        maxIso={maxIso}
+                        monthIso={diaInteiroMonthIso}
+                        setMonthIso={setDiaInteiroMonthIso}
+                        isDayDisabled={isDayDisabledByRule}
                         diaInteiroDisponibilidade={diaInteiroDisponibilidade}
                         calendarioLoading={calendarioLoading}
                       />
                     ) : (
-                      <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
-                        {dateOptions.map((dObj) => {
-                          const iso = toIsoDateLocal(dObj)
-                          const disabled = isDayDisabled(dObj)
-                          const selected = data === iso && !disabled
-                          return (
-                            <button
-                              key={iso}
-                              type="button"
-                              disabled={disabled}
-                              onClick={() => {
-                                setError(null)
-                                setSuccessId(null)
-                                setHora('')
-                                setData(iso)
-                                setStep('quando')
-                              }}
-                              className={[
-                                'min-w-[4.5rem] rounded-xl border px-3 py-2 text-left',
-                                disabled ? 'opacity-40 cursor-not-allowed bg-white border-slate-200 text-slate-500' : 'bg-white border-slate-200 text-slate-900 hover:bg-slate-50',
-                              ].join(' ')}
-                              style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : undefined}
-                            >
-                              <div className={['text-xs font-semibold', selected ? 'text-white/90' : 'text-slate-600'].join(' ')}>{weekdayShortLabel(dObj)}</div>
-                              <div className="text-sm font-semibold">{formatShortDayMonth(dObj)}</div>
-                            </button>
-                          )
-                        })}
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const baseIso = data || minIso
+                          const base = baseIso ? new Date(`${baseIso}T00:00:00`) : null
+                          const safeBase = base && Number.isFinite(base.getTime()) ? base : new Date()
+                          setDatePopupMonthIso(toIsoDateLocal(startOfMonth(safeBase)))
+                          setDatePopupOpen(true)
+                        }}
+                        aria-haspopup="dialog"
+                        aria-expanded={datePopupOpen}
+                        className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-left hover:bg-slate-50"
+                      >
+                        <div className="text-xs font-semibold text-slate-500">Data selecionada</div>
+                        <div className="mt-0.5 text-sm font-semibold text-slate-900">{formatIsoDateBR(data)}</div>
+                      </button>
                     )}
+
+                    {!isDiaInteiro ? (
+                      <DatePopupCalendar
+                        open={datePopupOpen}
+                        primaryColor={primaryColor}
+                        selectedIso={data}
+                        monthIso={datePopupMonthIso}
+                        setMonthIso={setDatePopupMonthIso}
+                        onClose={() => setDatePopupOpen(false)}
+                        onSelect={(iso) => {
+                          setError(null)
+                          setSuccessId(null)
+                          setHora('')
+                          setData(iso)
+                          setDatePopupMonthIso(toIsoDateLocal(startOfMonth(new Date(`${iso}T00:00:00`))))
+                          setDatePopupOpen(false)
+                          setStep('quando')
+                        }}
+                        minIso={minIso}
+                        maxIso={maxIso}
+                        isDayDisabled={isDayDisabledByRule}
+                        dayHasSlots={calendarDayHasSlots}
+                        availabilityLoading={calendarioLoading}
+                      />
+                    ) : null}
+
                     <div className="mt-2 text-xs text-slate-600">
-                      Janela de agendamento: hoje até {maxDays} dias. Antecedência mínima: {Math.round(minLeadMinutes / 60)}h.
+                      {calendarioLoading ? 'Carregando disponibilidade do calendário… ' : ''}Escolha qualquer data até 1 ano a partir de hoje (mude o mês no calendário). Antecedência mínima: {Math.round(minLeadMinutes / 60)}h.
                     </div>
                   </div>
 
@@ -1701,7 +1931,11 @@ export function PublicBookingPage() {
                     </div>
                   ) : null}
                 </div>
-                <Button onClick={openFromFooter} style={{ backgroundColor: primaryColor, borderColor: primaryColor }}>
+                <Button
+                  onClick={openFromFooter}
+                  style={{ backgroundColor: primaryColor, borderColor: primaryColor }}
+                  className="px-6 py-3 text-base shadow-md"
+                >
                   {summary.actionLabel}
                 </Button>
               </div>
@@ -1776,11 +2010,54 @@ export function PublicBookingPage() {
                     <Button variant="secondary" onClick={closeModal}>
                       Voltar
                     </Button>
-                    <Button onClick={submit} disabled={!canSubmit || submitting} style={{ backgroundColor: primaryColor, borderColor: primaryColor }}>
+                    <Button
+                      onClick={submit}
+                      disabled={!canSubmit || submitting}
+                      style={{ backgroundColor: primaryColor, borderColor: primaryColor }}
+                      className="px-7 py-3 text-base shadow-lg"
+                    >
                       {submitting ? 'Confirmando…' : 'Confirmar'}
                     </Button>
                   </div>
                 </div>
+              </div>
+            </Card>
+          </div>
+        </div>
+      ) : null}
+
+      {successId ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-900/40" />
+          <div className="relative w-full max-w-lg">
+            <Card>
+              <div className="p-6 space-y-4 text-center">
+                <div className="text-lg font-semibold text-slate-900">Agendamento enviado!</div>
+                <div className="text-sm text-slate-700">Seu agendamento foi enviado. Você receberá a confirmação em breve.</div>
+                {data || hora ? (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>Dia</div>
+                      <div className="font-semibold">{data ? formatIsoDateBR(data) : '—'}</div>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div>Hora</div>
+                      <div className="font-semibold">{hora || '—'}</div>
+                    </div>
+                  </div>
+                ) : null}
+                <Button
+                  onClick={() => {
+                    setSuccessId(null)
+                    setModalOpen(false)
+                    setError(null)
+                  }}
+                  style={{ backgroundColor: primaryColor, borderColor: primaryColor }}
+                  className="py-3 text-base shadow-md"
+                  fullWidth
+                >
+                  Fechar
+                </Button>
               </div>
             </Card>
           </div>
