@@ -17,12 +17,23 @@ function formatDetails(payload: unknown) {
   if (typeof payload === 'string') {
     const s = payload.trim()
     const lower = s.toLowerCase()
-    if (lower.includes('cloudflare tunnel error')) return 'Cloudflare Tunnel error (HTML)'
+    const isHtml = lower.includes('<!doctype html') || lower.includes('<html') || lower.includes('<head')
+    const isCloudflare =
+      lower.includes('cloudflare tunnel error') ||
+      (lower.includes('cloudflare') && (lower.includes('cf-ray') || lower.includes('tunnel') || lower.includes('cloudflareapps')))
+    if (isCloudflare) return 'Cloudflare Tunnel indisponível. Verifique Cloudflare Tunnel ativo e URL da Evolution API.'
+    if (isHtml) return 'Resposta HTML inesperada ao chamar o WhatsApp. Verifique proxy/túnel e a URL configurada.'
     if (s.length > 900) return `${s.slice(0, 900)}…`
     return s
   }
+  if (payload && typeof payload === 'object') {
+    const msg = getOptionalString(payload, 'message') ?? getOptionalString(payload, 'details') ?? getOptionalString(payload, 'error')
+    if (msg) return formatDetails(msg)
+  }
   try {
-    return JSON.stringify(payload)
+    const s = JSON.stringify(payload)
+    if (s.length > 900) return `${s.slice(0, 900)}…`
+    return s
   } catch {
     return String(payload)
   }

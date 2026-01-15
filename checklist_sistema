@@ -205,6 +205,7 @@
 - WhatsApp: Edge Function whatsapp-lembretes aceita action=funcionario_novo_agendamento e envia ao profissional
 - Admin (configurações): SQL adiciona trigger para avisar profissional no WhatsApp ao criar/atribuir agendamento
 - Funcionários: removido bloco duplicado de botões “Cancelar/Salvar” no formulário
+- WhatsApp (app): erro 530 do Cloudflare Tunnel agora mostra mensagem curta com dica de correção
 
 2026-01-15 (validação geral)
 - Root: npm run lint OK (smagenda + prospector)
