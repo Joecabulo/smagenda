@@ -215,6 +215,9 @@
 - Onboarding: texto da etapa WhatsApp ajustado para refletir habilitação por plano/suporte
 - Onboarding: adicionado campo "Endereço do estabelecimento" e persiste em usuarios.endereco + unidades.endereco
 - Mensagens automáticas: prévia dos templates com dados reais do agendamento selecionado (mesmas variáveis do envio)
+- PWA (instalação): manifest agora usa ícones quadrados 192/512 e service worker instala sem falhar por cache.addAll
+- PWA (sessão/notificações): Supabase auth com persistSession/storageKey e notificações lembradas via localStorage
+- Notificações (usuário): Dashboard assina Realtime e notifica novo agendamento (browser)
 
 2026-01-15
 - Agenda (funcionário): notificação em tempo real quando entrar novo agendamento (Supabase Realtime)

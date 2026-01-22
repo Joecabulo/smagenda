@@ -65,7 +65,21 @@ export function LoginPage() {
 
       const hasCallback = Boolean(code || tokenHash)
       const hasHashSession = Boolean(accessToken && refreshToken)
-      if (!hasCallback && !hasHashSession) return
+
+      if (!hasCallback && !hasHashSession) {
+        const { data } = await supabase.auth.getSession()
+        if (!data.session?.user?.id) return
+        const next = await refresh()
+        if (!next) return
+        if (next.kind === 'funcionario') {
+          navigate('/funcionario/agenda', { replace: true })
+        } else if (next.kind === 'super_admin') {
+          navigate('/admin/dashboard', { replace: true })
+        } else {
+          navigate('/dashboard', { replace: true })
+        }
+        return
+      }
 
       setSubmitting(true)
       setError(null)

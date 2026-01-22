@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { checkJwtProject, supabase, supabaseEnv, supabasePublicUrl } from '../../lib/supabase'
 import type { FuncionarioProfile, Principal, SuperAdminProfile, UsuarioProfile } from './types'
 import { AuthContext, type AuthState, type Impersonation } from './AuthContext'
@@ -171,6 +171,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   })
 
   const [impersonatedUsuario, setImpersonatedUsuario] = useState<UsuarioProfile | null>(null)
+
+  const storagePersistAttemptedRef = useRef(false)
 
   const refresh = useCallback(async () => {
     const { data, error } = await supabase.auth.getSession()
@@ -347,6 +349,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       subscription.subscription.unsubscribe()
     }
   }, [refresh])
+
+  useEffect(() => {
+    if (!session?.user?.id) return
+    if (storagePersistAttemptedRef.current) return
+    storagePersistAttemptedRef.current = true
+
+    const run = async () => {
+      if (typeof navigator === 'undefined') return
+      const storage = (navigator as unknown as { storage?: { persisted?: () => Promise<boolean>; persist?: () => Promise<boolean> } }).storage
+      if (!storage?.persisted || !storage?.persist) return
+      try {
+        const attempted = window.localStorage.getItem('smagenda:storage_persist_attempted') === '1'
+        if (attempted) return
+        window.localStorage.setItem('smagenda:storage_persist_attempted', '1')
+      } catch {
+        return
+      }
+
+      try {
+        const already = await storage.persisted()
+        if (already) return
+        await storage.persist()
+      } catch {
+        return
+      }
+    }
+
+    run().catch(() => undefined)
+  }, [session?.user?.id])
 
   useEffect(() => {
     const onFocus = () => {

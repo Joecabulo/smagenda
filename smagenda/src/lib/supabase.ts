@@ -24,6 +24,16 @@ export const supabase = createClient(supabasePublicUrl, supabasePublicAnonKey, {
   global: {
     fetch: fetchWithApiKey,
   },
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+    storageKey: 'smagenda:auth',
+    storage:
+      typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+        ? window.localStorage
+        : undefined,
+  },
 })
 
 function decodeJwtPayload(jwt: string): Record<string, unknown> | null {

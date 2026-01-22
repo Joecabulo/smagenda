@@ -501,6 +501,11 @@ export function FuncionarioAgendaPage() {
     return Notification.permission
   })
 
+  const browserNotifsKey = useMemo(() => {
+    const id = typeof funcionarioId === 'string' ? funcionarioId.trim() : ''
+    return id ? `smagenda:notifs:funcionario:${id}` : 'smagenda:notifs:funcionario'
+  }, [funcionarioId])
+
   const notifiedIdsRef = useRef<Set<string>>(new Set())
 
   const [blockStart, setBlockStart] = useState('')
@@ -848,7 +853,21 @@ export function FuncionarioAgendaPage() {
       const msg = `Novo agendamento: ${dateLabel} ${ag.hora_inicio} • ${ag.cliente_nome}`
       setSuccess(msg)
 
-      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+      const browserNotifsEnabled = (() => {
+        try {
+          return window.localStorage.getItem(browserNotifsKey) === '1'
+        } catch {
+          return false
+        }
+      })()
+
+      if (
+        browserNotifsEnabled &&
+        typeof window !== 'undefined' &&
+        'Notification' in window &&
+        Notification.permission === 'granted' &&
+        document.visibilityState !== 'visible'
+      ) {
         try {
           new Notification('Novo agendamento', { body: `${dateLabel} ${ag.hora_inicio} • ${ag.cliente_nome}` })
         } catch (e: unknown) {
@@ -888,7 +907,7 @@ export function FuncionarioAgendaPage() {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [capacidadePorHorarioColumnAvailable, funcionario?.permissao, funcionarioId, isAcademia, qtdVagasColumnAvailable, usuarioMasterId])
+  }, [browserNotifsKey, capacidadePorHorarioColumnAvailable, funcionario?.permissao, funcionarioId, isAcademia, qtdVagasColumnAvailable, usuarioMasterId])
 
   const enableBrowserNotifications = async () => {
     if (typeof window === 'undefined' || !('Notification' in window)) {
@@ -900,7 +919,14 @@ export function FuncionarioAgendaPage() {
     try {
       const perm = await Notification.requestPermission()
       setBrowserNotifsPermission(perm)
-      if (perm === 'granted') setSuccess('Notificações do navegador ativadas.')
+      if (perm === 'granted') {
+        try {
+          window.localStorage.setItem(browserNotifsKey, '1')
+        } catch {
+          return
+        }
+        setSuccess('Notificações do navegador ativadas.')
+      }
       if (perm === 'denied') setError('Notificações bloqueadas pelo navegador.')
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Falha ao ativar notificações.')

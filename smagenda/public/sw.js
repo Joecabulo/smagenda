@@ -1,11 +1,14 @@
-const CACHE_NAME = 'smagenda-shell-v1'
+const CACHE_NAME = 'smagenda-shell-v2'
+
+const CORE_URLS = ['/', '/index.html', '/manifest.webmanifest', '/favicon.png', '/pwa-192.png', '/pwa-512.png']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches
-      .open(CACHE_NAME)
-      .then((cache) => cache.addAll(['/', '/index.html', '/manifest.webmanifest', '/favicon.png']))
-      .then(() => self.skipWaiting())
+    (async () => {
+      const cache = await caches.open(CACHE_NAME)
+      await Promise.allSettled(CORE_URLS.map((url) => cache.add(new Request(url, { cache: 'reload' }))))
+      await self.skipWaiting()
+    })()
   )
 })
 
@@ -27,13 +30,17 @@ self.addEventListener('fetch', (event) => {
 
   if (req.mode === 'navigate') {
     event.respondWith(
-      fetch(req)
-        .then((res) => {
+      (async () => {
+        try {
+          const res = await fetch(req)
           const copy = res.clone()
           caches.open(CACHE_NAME).then((cache) => cache.put(req, copy))
           return res
-        })
-        .catch(() => caches.match('/'))
+        } catch {
+          const cached = (await caches.match('/index.html')) || (await caches.match('/'))
+          return cached || Response.error()
+        }
+      })()
     )
     return
   }

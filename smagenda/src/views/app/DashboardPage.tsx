@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AppShell } from '../../components/layout/AppShell'
 import { Badge } from '../../components/ui/Badge'
@@ -483,6 +483,25 @@ export function DashboardPage() {
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
 
+  const browserNotifsKey = useMemo(() => {
+    const id = typeof usuarioId === 'string' ? usuarioId.trim() : ''
+    return id ? `smagenda:notifs:usuario:${id}` : 'smagenda:notifs:usuario'
+  }, [usuarioId])
+
+  const [browserNotifsEnabledLocal, setBrowserNotifsEnabledLocal] = useState(false)
+
+  const browserNotifsEnabled = useMemo(() => {
+    if (browserNotifsEnabledLocal) return true
+    if (typeof window === 'undefined') return false
+    try {
+      return window.localStorage.getItem(browserNotifsKey) === '1'
+    } catch {
+      return false
+    }
+  }, [browserNotifsEnabledLocal, browserNotifsKey])
+
+  const notifiedIdsRef = useRef<Set<string>>(new Set())
+
   const [participantsOpen, setParticipantsOpen] = useState(false)
   const [participantsCtx, setParticipantsCtx] = useState<{
     data: string
@@ -706,6 +725,100 @@ export function DashboardPage() {
       return normalizeTimeHHMM(a.hora_inicio) === h
     })
   }
+
+  const enableBrowserNotifications = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setError('Seu navegador não suporta notificações.')
+      return
+    }
+    setError(null)
+    try {
+      const perm = await Notification.requestPermission()
+      if (perm === 'granted') {
+        try {
+          window.localStorage.setItem(browserNotifsKey, '1')
+          setBrowserNotifsEnabledLocal(true)
+        } catch {
+          return
+        }
+        setSuccess('Notificações do navegador ativadas.')
+      }
+      if (perm === 'denied') setError('Notificações bloqueadas pelo navegador.')
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Falha ao ativar notificações.')
+    }
+  }
+
+  useEffect(() => {
+    if (!usuarioId) return
+
+    const channel = supabase.channel(`agendamentos-usuario:${usuarioId}`)
+
+    const handleIncoming = async (idRaw: unknown) => {
+      const id = typeof idRaw === 'string' ? idRaw.trim() : ''
+      if (!id) return
+      if (notifiedIdsRef.current.has(id)) return
+      notifiedIdsRef.current.add(id)
+
+      const { data: agRow, error: agErr } = await supabase
+        .from('agendamentos')
+        .select('id,cliente_nome,data,hora_inicio,status')
+        .eq('id', id)
+        .eq('usuario_id', usuarioId)
+        .maybeSingle()
+
+      if (agErr || !agRow) return
+
+      const r = agRow as unknown as Record<string, unknown>
+      if (String(r.status ?? '').trim().toLowerCase() === 'cancelado') return
+
+      const data = String(r.data ?? '')
+      const hora = normalizeTimeHHMM(String(r.hora_inicio ?? ''))
+      const nome = String(r.cliente_nome ?? '').trim()
+
+      const dateLabel = (() => {
+        const parts = data.split('-')
+        if (parts.length !== 3) return data
+        return `${parts[2]}/${parts[1]}/${parts[0]}`
+      })()
+
+      const msg = `Novo agendamento: ${dateLabel} ${hora}${nome ? ` • ${nome}` : ''}`
+      setSuccess(msg)
+
+      if (
+        browserNotifsEnabled &&
+        typeof window !== 'undefined' &&
+        'Notification' in window &&
+        Notification.permission === 'granted' &&
+        document.visibilityState !== 'visible'
+      ) {
+        try {
+          new Notification('Novo agendamento', { body: `${dateLabel} ${hora}${nome ? ` • ${nome}` : ''}` })
+        } catch (e: unknown) {
+          void e
+        }
+      }
+    }
+
+    channel.on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'agendamentos',
+        filter: `usuario_id=eq.${usuarioId}`,
+      },
+      (payload) => {
+        void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
+      }
+    )
+
+    channel.subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [browserNotifsEnabled, usuarioId])
 
   const resolveGroupStatusUi = (items: Agendamento[]) => {
     if (items.length === 0) return resolveStatusUi('pendente')
@@ -1049,6 +1162,14 @@ export function DashboardPage() {
                     <Button variant="secondary" onClick={resetTutorial}>
                       Rever tutorial
                     </Button>
+
+                    {typeof window !== 'undefined' &&
+                    'Notification' in window &&
+                    (Notification.permission !== 'granted' || !browserNotifsEnabled) ? (
+                      <Button variant="secondary" onClick={() => void enableBrowserNotifications()}>
+                        Ativar notificações
+                      </Button>
+                    ) : null}
                   </div>
 
                   <div
