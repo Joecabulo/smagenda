@@ -165,19 +165,6 @@ function toIsoDateFromIsoPlusDays(value: unknown, days: number) {
   return d.toISOString().slice(0, 10)
 }
 
-function addMonthsToIsoDate(baseIsoDate: string, months: number) {
-  const base = typeof baseIsoDate === 'string' ? baseIsoDate.trim() : ''
-  if (!base) return null
-  const m = Math.floor(Number(months))
-  if (!Number.isFinite(m) || m <= 0) return null
-  const d = new Date(`${base}T00:00:00`)
-  if (!Number.isFinite(d.getTime())) return null
-  const day = d.getDate()
-  d.setMonth(d.getMonth() + m)
-  if (d.getDate() !== day) d.setDate(0)
-  return d.toISOString().slice(0, 10)
-}
-
 function mapStatusToLabel(statusRaw: string) {
   const s = String(statusRaw ?? '').trim().toLowerCase()
   if (s === 'inadimplente') return { label: 'inadimplente', tone: 'red' as const }
@@ -307,8 +294,8 @@ export function AdminPagamentosPage() {
       const statusPagamento = stripe?.status_pagamento ? stripe.status_pagamento : u.status_pagamento
       const dias = resolveDiasRestantes(dataVenc)
       const status = mapStatusToLabel(statusPagamento)
-      const hasSubscription = Boolean(((stripe?.stripe_subscription_id ?? u.stripe_subscription_id) ?? '').trim())
-      const canCancel = hasSubscription
+      const hasSubscription = Boolean(((stripe?.stripe_subscription_id ?? u.stripe_subscription_id) ?? '').trim() || ((stripe?.stripe_customer_id ?? '')).trim())
+      const canCancel = true
       return { u, stripe, dias, status, plano, statusPagamento, hasSubscription, canCancel }
     })
   }, [stripeStatusByUsuario, usuarios])
@@ -386,10 +373,6 @@ export function AdminPagamentosPage() {
     const parsedMonths = Number.isFinite(n) ? Math.floor(n) : null
     const months = parsedMonths && parsedMonths >= 1 && parsedMonths <= 24 ? parsedMonths : null
     const couponId = months ? null : trimmed
-    if (!modalHasSubscription && couponId) {
-      setModalError('Este cliente não tem assinatura no Stripe. Informe apenas meses (1–24) para estender o teste.')
-      return
-    }
     if (!months && (!couponId || couponId.length < 3)) {
       setModalError('Valor inválido. Informe um número (1–24) ou um cupom/promoção válido.')
       return
@@ -399,44 +382,6 @@ export function AdminPagamentosPage() {
     setError(null)
     setSuccess(null)
     setModalError(null)
-
-    if (!modalHasSubscription && months) {
-      const row = usuarios.find((u) => u.id === usuarioId) ?? null
-      const currentVenc = row?.data_vencimento ?? null
-      const todayIso = new Date().toISOString().slice(0, 10)
-      const baseIso = (() => {
-        if (currentVenc) {
-          const exp = new Date(`${currentVenc}T00:00:00`)
-          const today = new Date(`${todayIso}T00:00:00`)
-          if (Number.isFinite(exp.getTime()) && exp >= today) return currentVenc
-        }
-        return todayIso
-      })()
-
-      const newVenc = addMonthsToIsoDate(baseIso, months)
-      if (!newVenc) {
-        setModalError('Não foi possível calcular a nova data de vencimento.')
-        setGranting((prev) => ({ ...prev, [usuarioId]: false }))
-        return
-      }
-
-      const { error: updErr } = await supabase
-        .from('usuarios')
-        .update({ status_pagamento: 'trial', data_vencimento: newVenc, ativo: true })
-        .eq('id', usuarioId)
-
-      if (updErr) {
-        setModalError(`Falha ao estender teste no banco: ${updErr.message}`)
-        setGranting((prev) => ({ ...prev, [usuarioId]: false }))
-        return
-      }
-
-      closeModal()
-      await reloadAll().catch(() => undefined)
-      setGranting((prev) => ({ ...prev, [usuarioId]: false }))
-      setSuccess(`Teste estendido: +${months} meses (até ${newVenc}).`)
-      return
-    }
 
     const payload: Record<string, unknown> = { action: 'grant_free_months', usuario_id: usuarioId }
     if (months) payload.months = months

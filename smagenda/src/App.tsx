@@ -36,6 +36,7 @@ const AdminClienteDetalhesPage = lazy(() =>
   import('./views/admin/AdminClienteDetalhesPage').then((m) => ({ default: m.AdminClienteDetalhesPage }))
 )
 const AdminLogsPage = lazy(() => import('./views/admin/AdminLogsPage').then((m) => ({ default: m.AdminLogsPage })))
+const AdminPagamentosPage = lazy(() => import('./views/admin/AdminPagamentosPage').then((m) => ({ default: m.AdminPagamentosPage })))
 const AdminConfiguracoesPage = lazy(() => import('./views/admin/AdminConfiguracoesPage').then((m) => ({ default: m.AdminConfiguracoesPage })))
 const AdminWhatsappAvisosPage = lazy(() => import('./views/admin/AdminWhatsappAvisosPage').then((m) => ({ default: m.AdminWhatsappAvisosPage })))
 
@@ -193,6 +194,14 @@ function App() {
           element={
             <RequireAuth requiredKind="super_admin">
               <AdminLogsPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/admin/pagamentos"
+          element={
+            <RequireAuth requiredKind="super_admin">
+              <AdminPagamentosPage />
             </RequireAuth>
           }
         />

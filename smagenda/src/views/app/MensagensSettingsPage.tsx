@@ -11,6 +11,32 @@ const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n�
 const defaultLembrete = `Oi {nome}!\n\nLembrete: você tem agendamento em {data} às {hora}.\n\nSe não puder comparecer, me avise!\n{telefone_profissional}`
 const defaultCancelamento = `Olá {nome}!\n\nSeu agendamento foi cancelado:\n📅 {data} às {hora}\n✂️ {servico}\n\nSe quiser remarcar, é só me chamar.\n{nome_negocio}`
 
+function formatBRDateFromISO(isoDate: string) {
+  const parts = isoDate.split('-')
+  if (parts.length !== 3) return isoDate
+  return `${parts[2]}/${parts[1]}/${parts[0]}`
+}
+
+function formatBRL(value: number) {
+  try {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)
+  } catch {
+    return `R$ ${value.toFixed(2)}`
+  }
+}
+
+function readExtrasEndereco(extras: unknown) {
+  if (!extras || typeof extras !== 'object') return ''
+  const v = (extras as Record<string, unknown>).endereco
+  if (typeof v !== 'string') return ''
+  const t = v.trim()
+  return t ? t : ''
+}
+
+function interpolateTemplate(template: string, vars: Record<string, string>) {
+  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => vars[key] ?? `{${key}}`)
+}
+
 type TemplatePreset = {
   key: string
   title: string
@@ -78,6 +104,16 @@ const templatePresets: TemplatePreset[] = [
       `Olá {nome}!\n\n❌ Sua consulta foi cancelada:\n📅 {data} às {hora}\n🦷 {servico}\n\nSe quiser remarcar: {telefone_profissional}\n{nome_negocio}`,
   },
   {
+    key: 'advocacia',
+    title: 'Advocacia',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Sua consulta está confirmada:\n📅 {data} às {hora}\n⚖️ {servico}\n\nProfissional: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nEm caso de necessidade, fale com a gente: {telefone_profissional}\n{nome_negocio}`,
+    lembrete:
+      `Olá {nome}!\n\n⏰ Lembrete da sua consulta:\n📅 {data} às {hora}\n⚖️ {servico}\n\nSe precisar remarcar: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Sua consulta foi cancelada:\n📅 {data} às {hora}\n⚖️ {servico}\n\nSe quiser remarcar: {telefone_profissional}\n{nome_negocio}`,
+  },
+  {
     key: 'manicure',
     title: 'Manicure',
     confirmacao:
@@ -92,6 +128,16 @@ const templatePresets: TemplatePreset[] = [
     title: 'Pilates / Estúdio',
     confirmacao:
       `Olá {nome}!\n\n✅ Sua aula está confirmada:\n📅 {data} às {hora}\n🏋️ {servico}\n\nInstrutor: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nAté lá!\n{nome_negocio}`,
+    lembrete:
+      `Oi {nome}!\n\n⏰ Lembrete da sua aula:\n📅 {data} às {hora}\n🏋️ {servico}\n\nSe precisar remarcar: {telefone_profissional}`,
+    cancelamento:
+      `Olá {nome}!\n\n❌ Sua aula foi cancelada:\n📅 {data} às {hora}\n🏋️ {servico}\n\nSe quiser remarcar: {telefone_profissional}\n{nome_negocio}`,
+  },
+  {
+    key: 'academia',
+    title: 'Academia',
+    confirmacao:
+      `Olá {nome}!\n\n✅ Sua aula está confirmada:\n📅 {data} às {hora}\n🏋️ {servico}\n\nInstrutor: {profissional_nome}\nLocal: {unidade_nome}\n{unidade_endereco}\n\nQualquer ajuste: {telefone_profissional}\n{nome_negocio}`,
     lembrete:
       `Oi {nome}!\n\n⏰ Lembrete da sua aula:\n📅 {data} às {hora}\n🏋️ {servico}\n\nSe precisar remarcar: {telefone_profissional}`,
     cancelamento:
@@ -133,6 +179,24 @@ type AgendamentoConfirmadoRow = {
   cliente_telefone: string | null
   status?: string | null
   confirmacao_enviada?: boolean | null
+}
+
+type BusinessInfoRow = {
+  nome_negocio: string | null
+  telefone: string | null
+  endereco: string | null
+}
+
+type AgendamentoPreviewRow = {
+  id: string
+  data: string
+  hora_inicio: string | null
+  cliente_nome: string | null
+  cliente_telefone: string | null
+  extras?: unknown | null
+  servico?: { nome: string | null; preco: number | null } | null
+  funcionario?: { nome_completo: string | null; telefone: string | null } | null
+  unidade?: { nome: string | null; endereco: string | null; telefone: string | null } | null
 }
 
 async function sendConfirmacaoWhatsapp(agendamentoId: string) {
@@ -296,6 +360,11 @@ export function MensagensSettingsPage() {
   const [sendConfirmacaoResult, setSendConfirmacaoResult] = useState<string | null>(null)
   const [agError, setAgError] = useState<string | null>(null)
 
+  const [businessInfo, setBusinessInfo] = useState<BusinessInfoRow>({ nome_negocio: null, telefone: null, endereco: null })
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const [previewAgendamento, setPreviewAgendamento] = useState<AgendamentoPreviewRow | null>(null)
+
   const isMissingColumnError = (message: string) => message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
 
   useEffect(() => {
@@ -374,6 +443,13 @@ export function MensagensSettingsPage() {
       setEnviarLembrete(row?.enviar_lembrete ?? false)
       setEnviarCancelamento(row?.enviar_cancelamento ?? true)
       setLembreteHorasAntes(typeof row?.lembrete_horas_antes === 'number' ? row?.lembrete_horas_antes : 24)
+
+      const { data: bizData, error: bizErr } = await supabase.from('usuarios').select('nome_negocio,telefone,endereco').eq('id', usuarioId).maybeSingle()
+      if (!bizErr) {
+        const b = (bizData ?? null) as unknown as BusinessInfoRow | null
+        setBusinessInfo({ nome_negocio: b?.nome_negocio ?? null, telefone: b?.telefone ?? null, endereco: b?.endereco ?? null })
+      }
+
       setLoading(false)
     }
     run().catch((e: unknown) => {
@@ -447,6 +523,67 @@ export function MensagensSettingsPage() {
     if (!agendamentoSelecionadoId) return null
     return agendamentosConfirmados.find((a) => a.id === agendamentoSelecionadoId) ?? null
   }, [agendamentoSelecionadoId, agendamentosConfirmados])
+
+  useEffect(() => {
+    const run = async () => {
+      if (!usuarioId) return
+      if (!agendamentoSelecionadoId) {
+        setPreviewAgendamento(null)
+        setPreviewError(null)
+        return
+      }
+
+      setPreviewLoading(true)
+      setPreviewError(null)
+
+      const select =
+        'id,data,hora_inicio,cliente_nome,cliente_telefone,extras,servico:servico_id(nome,preco),funcionario:funcionario_id(nome_completo,telefone),unidade:unidade_id(nome,endereco,telefone)'
+      const { data, error } = await supabase.from('agendamentos').select(select).eq('id', agendamentoSelecionadoId).eq('usuario_id', usuarioId).maybeSingle()
+      if (error) {
+        setPreviewAgendamento(null)
+        setPreviewError(error.message)
+        setPreviewLoading(false)
+        return
+      }
+
+      setPreviewAgendamento((data ?? null) as unknown as AgendamentoPreviewRow | null)
+      setPreviewLoading(false)
+    }
+
+    run().catch((e: unknown) => {
+      setPreviewAgendamento(null)
+      setPreviewError(e instanceof Error ? e.message : 'Erro ao carregar prévia')
+      setPreviewLoading(false)
+    })
+  }, [agendamentoSelecionadoId, usuarioId])
+
+  const previewVars = useMemo(() => {
+    if (!previewAgendamento) return null
+    const clienteEndereco = readExtrasEndereco(previewAgendamento.extras)
+    const unidadeEndereco = (previewAgendamento.unidade?.endereco ?? '').trim()
+    const endereco = clienteEndereco || unidadeEndereco || (businessInfo.endereco ?? '')
+    const telefoneProfissional = (previewAgendamento.funcionario?.telefone ?? '').trim() || (businessInfo.telefone ?? '')
+
+    return {
+      nome: previewAgendamento.cliente_nome ?? '',
+      data: previewAgendamento.data ? formatBRDateFromISO(previewAgendamento.data) : '',
+      hora: previewAgendamento.hora_inicio ?? '',
+      servico: previewAgendamento.servico?.nome ?? '',
+      preco: typeof previewAgendamento.servico?.preco === 'number' ? formatBRL(previewAgendamento.servico.preco) : '',
+      cliente_endereco: clienteEndereco,
+      profissional_nome: previewAgendamento.funcionario?.nome_completo ?? '',
+      telefone_profissional: telefoneProfissional,
+      unidade_nome: previewAgendamento.unidade?.nome ?? '',
+      unidade_endereco: unidadeEndereco,
+      unidade_telefone: (previewAgendamento.unidade?.telefone ?? '').trim(),
+      endereco,
+      nome_negocio: businessInfo.nome_negocio ?? '',
+    } satisfies Record<string, string>
+  }, [businessInfo.endereco, businessInfo.nome_negocio, businessInfo.telefone, previewAgendamento])
+
+  const previewConfirmacao = useMemo(() => (previewVars ? interpolateTemplate(mensagemConfirmacao, previewVars) : ''), [mensagemConfirmacao, previewVars])
+  const previewLembrete = useMemo(() => (previewVars ? interpolateTemplate(mensagemLembrete, previewVars) : ''), [mensagemLembrete, previewVars])
+  const previewCancelamento = useMemo(() => (previewVars ? interpolateTemplate(mensagemCancelamento, previewVars) : ''), [mensagemCancelamento, previewVars])
 
   const save = async () => {
     if (!usuarioId) return
@@ -899,6 +1036,38 @@ export function MensagensSettingsPage() {
                         onFocus={() => setLastField('cancelamento')}
                       />
                     )}
+                  </div>
+                </Card>
+
+                <Card>
+                  <div className="space-y-4 p-4 sm:p-6">
+                    <div className="text-sm font-semibold text-slate-900">Prévia (dados reais)</div>
+                    <div className="text-sm text-slate-600">Usa o agendamento selecionado em “Validar confirmação automática”.</div>
+
+                    {previewLoading ? <div className="text-sm text-slate-600">Carregando prévia…</div> : null}
+                    {!previewLoading && previewError ? (
+                      <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{previewError}</div>
+                    ) : null}
+                    {!previewLoading && !previewError && !previewAgendamento ? (
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">Selecione um agendamento para ver a prévia.</div>
+                    ) : null}
+
+                    {!previewLoading && !previewError && previewAgendamento ? (
+                      <div className="space-y-3">
+                        <div>
+                          <div className="text-xs font-semibold text-slate-600 mb-1">Confirmação</div>
+                          <pre className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800 overflow-auto whitespace-pre-wrap">{previewConfirmacao}</pre>
+                        </div>
+                        <div>
+                          <div className="text-xs font-semibold text-slate-600 mb-1">Lembrete</div>
+                          <pre className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800 overflow-auto whitespace-pre-wrap">{previewLembrete}</pre>
+                        </div>
+                        <div>
+                          <div className="text-xs font-semibold text-slate-600 mb-1">Cancelamento</div>
+                          <pre className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800 overflow-auto whitespace-pre-wrap">{previewCancelamento}</pre>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </Card>
 

@@ -49,6 +49,7 @@ type Servico = {
   antecedencia_minutos?: number
   janela_max_dias?: number
   dia_inteiro?: boolean
+  capacidade_por_horario?: number
   preco: number
   taxa_agendamento: number
   cor: string | null
@@ -464,8 +465,10 @@ function resolvePublicLabels(tipoNegocio: string | null | undefined) {
   if (key === 'salao') return { servico: 'Serviço', servicos: 'Serviços', profissional: 'Profissional', profissionais: 'Profissionais' }
   if (key === 'estetica') return { servico: 'Procedimento', servicos: 'Procedimentos', profissional: 'Especialista', profissionais: 'Especialistas' }
   if (key === 'odontologia') return { servico: 'Procedimento', servicos: 'Procedimentos', profissional: 'Dentista', profissionais: 'Dentistas' }
+  if (key === 'advocacia') return { servico: 'Consulta', servicos: 'Consultas', profissional: 'Advogado', profissionais: 'Advogados' }
   if (key === 'manicure') return { servico: 'Serviço', servicos: 'Serviços', profissional: 'Manicure', profissionais: 'Manicures' }
   if (key === 'pilates') return { servico: 'Aula', servicos: 'Aulas', profissional: 'Instrutor', profissionais: 'Instrutores' }
+  if (key === 'academia') return { servico: 'Aula', servicos: 'Aulas', profissional: 'Instrutor', profissionais: 'Instrutores' }
   if (key === 'faxina') return { servico: 'Diária', servicos: 'Diárias', profissional: 'Profissional', profissionais: 'Profissionais' }
   return { servico: 'Serviço', servicos: 'Serviços', profissional: 'Profissional', profissionais: 'Profissionais' }
 }
@@ -631,6 +634,7 @@ async function callPublicRpcWithSignatureFallback<T>(
   const hasUnidadeKey = Object.prototype.hasOwnProperty.call(args, 'p_unidade_id')
   const hasFuncionarioKey = Object.prototype.hasOwnProperty.call(args, 'p_funcionario_id')
   const hasExtrasKey = Object.prototype.hasOwnProperty.call(args, 'p_extras')
+  const hasQtdVagasKey = Object.prototype.hasOwnProperty.call(args, 'p_qtd_vagas')
 
   const stableKey = (o: Record<string, unknown>) => {
     const keys = Object.keys(o).sort()
@@ -662,6 +666,10 @@ async function callPublicRpcWithSignatureFallback<T>(
 
   if (hasExtrasKey) {
     if (shouldRetryWithoutExtras({ message: first.errorText })) variants.push(withoutKey(args, 'p_extras'))
+  }
+
+  if (hasQtdVagasKey) {
+    variants.push(withoutKey(args, 'p_qtd_vagas'))
   }
 
   if (hasUnidadeKey && hasFuncionarioKey) {
@@ -864,7 +872,31 @@ export function PublicBookingPage() {
   }, [selectedServico?.antecedencia_minutos])
 
   const [availableSlots, setAvailableSlots] = useState<string[]>([])
+  const [vagasRestantesByHora, setVagasRestantesByHora] = useState<Record<string, number>>({})
   const [slotsLoading, setSlotsLoading] = useState(false)
+
+  const isAcademia = useMemo(() => String(usuario?.tipo_negocio ?? '').trim().toLowerCase() === 'academia', [usuario?.tipo_negocio])
+  const capacidadePorHorario = useMemo(() => {
+    const v = selectedServico?.capacidade_por_horario
+    return typeof v === 'number' && Number.isFinite(v) ? Math.max(1, Math.min(200, Math.floor(v))) : 1
+  }, [selectedServico?.capacidade_por_horario])
+  const showCapacidadePorHorario = Boolean(isAcademia && !isDiaInteiro && capacidadePorHorario > 1)
+
+  const [qtdVagas, setQtdVagas] = useState('1')
+
+  const vagasRestantesSelecionadas = useMemo(() => {
+    if (!showCapacidadePorHorario) return 1
+    if (!hora) return capacidadePorHorario
+    const raw = vagasRestantesByHora[hora]
+    return typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : capacidadePorHorario
+  }, [capacidadePorHorario, hora, showCapacidadePorHorario, vagasRestantesByHora])
+
+  const qtdVagasInt = useMemo(() => {
+    const raw = Number(qtdVagas)
+    const base = Number.isFinite(raw) ? Math.floor(raw) : 1
+    const max = showCapacidadePorHorario ? Math.max(1, vagasRestantesSelecionadas) : 1
+    return Math.max(1, Math.min(max, base))
+  }, [qtdVagas, showCapacidadePorHorario, vagasRestantesSelecionadas])
 
   const [debugSlotsText, setDebugSlotsText] = useState<string | null>(null)
 
@@ -1020,12 +1052,14 @@ export function PublicBookingPage() {
     const run = async () => {
       if (!usuarioId || !selectedServico || !data) {
         setAvailableSlots([])
+        setVagasRestantesByHora({})
         setSlotsLoading(false)
         if (debugEnabled) setDebugSlotsText(JSON.stringify({ ok: false, reason: 'missing_payload', usuarioId, servicoId: selectedServico?.id ?? null, data }, null, 2))
         return
       }
       if (hasStaff && !funcionarioId) {
         setAvailableSlots([])
+        setVagasRestantesByHora({})
         setSlotsLoading(false)
         if (debugEnabled) setDebugSlotsText(JSON.stringify({ ok: false, reason: 'missing_funcionario', usuarioId, data, servicoId: selectedServico.id }, null, 2))
         return
@@ -1121,19 +1155,24 @@ export function PublicBookingPage() {
       const raw = (slotsRes.data ?? []) as unknown
       const rows = Array.isArray(raw) ? raw : []
 
+      const nextVagas: Record<string, number> = {}
       const list = rows
         .map((r) => {
           if (typeof r === 'string') return r.trim()
           if (!r || typeof r !== 'object') return ''
           const obj = r as Record<string, unknown>
-          if (typeof obj.hora_inicio === 'string') return obj.hora_inicio.trim()
-          if (typeof obj.hora === 'string') return obj.hora.trim()
-          return ''
+          const horaInicio = typeof obj.hora_inicio === 'string' ? obj.hora_inicio.trim() : typeof obj.hora === 'string' ? obj.hora.trim() : ''
+          const vagasRaw = obj.vagas_restantes
+          if (horaInicio && typeof vagasRaw === 'number' && Number.isFinite(vagasRaw)) {
+            nextVagas[horaInicio] = Math.max(0, Math.floor(vagasRaw))
+          }
+          return horaInicio
         })
         .filter(Boolean)
 
       const uniqueSorted = Array.from(new Set(list)).sort((a, b) => a.localeCompare(b))
       setAvailableSlots(uniqueSorted)
+      setVagasRestantesByHora(nextVagas)
       setSlotsLoading(false)
 
       if (debugEnabled) {
@@ -1251,6 +1290,7 @@ export function PublicBookingPage() {
         slug: slug ?? null,
         unidade_slug: unidadeSlug ?? null,
       }
+      if (showCapacidadePorHorario) payload.qtd_vagas = qtdVagasInt
       if (extrasFinal) payload.extras = extrasFinal
       if (hasStaff) payload.funcionario_id = funcionarioId
       if (usuario?.unidade_id) payload.unidade_id = usuario.unidade_id
@@ -1263,7 +1303,12 @@ export function PublicBookingPage() {
           (typeof obj?.error === 'string' && obj.error.trim()) ||
           (typeof res.body === 'string' && res.body.trim()) ||
           `Erro ao iniciar pagamento (HTTP ${res.status}).`
-        setError(msg)
+        const lower = msg.toLowerCase()
+        if (lower.includes('capacidade_esgotada')) {
+          setError('Esse horário não tem vagas suficientes. Selecione outro horário.')
+        } else {
+          setError(msg)
+        }
         setSubmitting(false)
         return
       }
@@ -1299,6 +1344,7 @@ export function PublicBookingPage() {
       p_cliente_telefone: telefone,
       p_funcionario_id: hasStaff ? funcionarioId : null,
     }
+    if (showCapacidadePorHorario) createArgs.p_qtd_vagas = qtdVagasInt
     if (extrasFinal) createArgs.p_extras = extrasFinal
     if (usuario?.unidade_id) createArgs.p_unidade_id = usuario.unidade_id
 
@@ -1319,6 +1365,8 @@ export function PublicBookingPage() {
         setError('Selecione uma data dentro de 1 ano.')
       } else if (lower.includes('antecedencia_minima')) {
         setError(`Selecione um horário com no mínimo ${Math.round(minLeadMinutes / 60)}h de antecedência.`)
+        } else if (lower.includes('capacidade_esgotada')) {
+          setError('Esse horário não tem vagas suficientes. Selecione outro horário.')
       } else if (lower.includes('ocupado')) {
         setError('Esse horário acabou de ser ocupado. Selecione outro horário.')
       } else if (lower.includes('limite_mensal_atingido')) {
@@ -1815,15 +1863,22 @@ export function PublicBookingPage() {
                               <div className="grid grid-cols-3 gap-2">
                                 {slotGroups.manha.map((t) => {
                                   const selected = hora === t
+                                  const vagas = showCapacidadePorHorario ? vagasRestantesByHora[t] : undefined
                                   return (
                                     <button
                                       key={t}
                                       type="button"
-                                      onClick={() => setHora(t)}
+                                      onClick={() => {
+                                        setHora(t)
+                                        if (showCapacidadePorHorario) setQtdVagas('1')
+                                      }}
                                       className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
                                       style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
                                     >
-                                      {t}
+                                      <div className="flex flex-col items-center leading-tight">
+                                        <div>{t}</div>
+                                        {typeof vagas === 'number' ? <div className={selected ? 'text-[11px] opacity-90' : 'text-[11px] text-slate-500'}>{vagas} vagas</div> : null}
+                                      </div>
                                     </button>
                                   )
                                 })}
@@ -1837,15 +1892,22 @@ export function PublicBookingPage() {
                               <div className="grid grid-cols-3 gap-2">
                                 {slotGroups.tarde.map((t) => {
                                   const selected = hora === t
+                                  const vagas = showCapacidadePorHorario ? vagasRestantesByHora[t] : undefined
                                   return (
                                     <button
                                       key={t}
                                       type="button"
-                                      onClick={() => setHora(t)}
+                                      onClick={() => {
+                                        setHora(t)
+                                        if (showCapacidadePorHorario) setQtdVagas('1')
+                                      }}
                                       className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
                                       style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
                                     >
-                                      {t}
+                                      <div className="flex flex-col items-center leading-tight">
+                                        <div>{t}</div>
+                                        {typeof vagas === 'number' ? <div className={selected ? 'text-[11px] opacity-90' : 'text-[11px] text-slate-500'}>{vagas} vagas</div> : null}
+                                      </div>
                                     </button>
                                   )
                                 })}
@@ -1859,15 +1921,22 @@ export function PublicBookingPage() {
                               <div className="grid grid-cols-3 gap-2">
                                 {slotGroups.noite.map((t) => {
                                   const selected = hora === t
+                                  const vagas = showCapacidadePorHorario ? vagasRestantesByHora[t] : undefined
                                   return (
                                     <button
                                       key={t}
                                       type="button"
-                                      onClick={() => setHora(t)}
+                                      onClick={() => {
+                                        setHora(t)
+                                        if (showCapacidadePorHorario) setQtdVagas('1')
+                                      }}
                                       className={['rounded-xl px-3 py-2 text-sm font-semibold border', selected ? '' : 'bg-white text-slate-700 border-slate-200'].join(' ')}
                                       style={selected ? { backgroundColor: primaryColor, borderColor: primaryColor, color: '#fff' } : { backgroundColor: '#fff' }}
                                     >
-                                      {t}
+                                      <div className="flex flex-col items-center leading-tight">
+                                        <div>{t}</div>
+                                        {typeof vagas === 'number' ? <div className={selected ? 'text-[11px] opacity-90' : 'text-[11px] text-slate-500'}>{vagas} vagas</div> : null}
+                                      </div>
                                     </button>
                                   )
                                 })}
@@ -2001,6 +2070,22 @@ export function PublicBookingPage() {
                   </div>
 
                   <Input label="Nome" value={clienteNome} onChange={(e) => setClienteNome(e.target.value)} />
+                  {showCapacidadePorHorario ? (
+                    <Input
+                      label={`Quantidade (até ${Math.max(1, vagasRestantesSelecionadas)} vagas)`}
+                      type="number"
+                      min={1}
+                      max={Math.max(1, vagasRestantesSelecionadas)}
+                      value={String(qtdVagasInt)}
+                      onChange={(e) => {
+                        const raw = Number(e.target.value)
+                        const base = Number.isFinite(raw) ? Math.floor(raw) : 1
+                        const max = Math.max(1, vagasRestantesSelecionadas)
+                        const clamped = Math.max(1, Math.min(max, base))
+                        setQtdVagas(String(clamped))
+                      }}
+                    />
+                  ) : null}
                   <Input label="WhatsApp" value={clienteTelefone} onChange={(e) => setClienteTelefone(e.target.value)} />
                   <Input label="Email (opcional)" value={clienteEmail} onChange={(e) => setClienteEmail(e.target.value)} />
                   {needsPlaca ? <Input label="Placa do carro" value={clientePlaca} onChange={(e) => setClientePlaca(e.target.value)} /> : null}

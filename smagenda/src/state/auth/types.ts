@@ -23,6 +23,7 @@ export type UsuarioProfile = {
   data_pagamento_fatura: string | null
   free_trial_consumido: boolean
   tema_prospector_habilitado: boolean
+  tema_dark_habilitado: boolean
   ativo: boolean
 }
 

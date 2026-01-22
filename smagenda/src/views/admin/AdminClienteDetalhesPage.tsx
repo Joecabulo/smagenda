@@ -202,6 +202,20 @@ export function AdminClienteDetalhesPage() {
     if (!id) return
     setRefreshingPagamento(true)
     setError(null)
+
+    const syncRes = await callFn('payments', { action: 'admin_get_usuario_stripe_status', usuario_id: id })
+    if (!syncRes.ok) {
+      const msg =
+        syncRes.body && typeof syncRes.body === 'object' && typeof (syncRes.body as Record<string, unknown>).message === 'string'
+          ? String((syncRes.body as Record<string, unknown>).message)
+          : syncRes.body && typeof syncRes.body === 'object' && typeof (syncRes.body as Record<string, unknown>).error === 'string'
+            ? String((syncRes.body as Record<string, unknown>).error)
+            : typeof syncRes.body === 'string'
+              ? syncRes.body
+              : null
+      if (msg) setError(msg)
+    }
+
     const { data, error: err } = await supabase
       .from('usuarios')
       .select('id,plano,status_pagamento,ativo,limite_funcionarios,limite_agendamentos_mes')

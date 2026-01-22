@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppShell } from '../../components/layout/AppShell'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
@@ -9,17 +9,33 @@ import { formatBRMoney, minutesToTime, normalizeTimeHHMM, parseTimeToMinutes, to
 import { checkJwtProject, supabase, supabaseEnv } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
 
+function isMissingColumnErrorMessage(message: string, column: string) {
+  const lower = String(message ?? '').toLowerCase()
+  const col = String(column ?? '').toLowerCase()
+  if (!lower || !col) return false
+  if (!lower.includes('does not exist') && !lower.includes('schema cache') && !lower.includes('could not find')) return false
+  return lower.includes(col)
+}
+
 type Agendamento = {
   id: string
   cliente_nome: string
   cliente_telefone: string
+  qtd_vagas: number | null
   data: string
   hora_inicio: string
   hora_fim: string | null
   status: string
   funcionario_id: string | null
   extras: Record<string, unknown> | null
-  servico: { id: string; nome: string; preco: number; duracao_minutos: number; cor: string | null } | null
+  servico: {
+    id: string
+    nome: string
+    preco: number
+    duracao_minutos: number
+    cor: string | null
+    capacidade_por_horario?: number | null
+  } | null
 }
 
 function readExtrasEndereco(extras: unknown) {
@@ -417,6 +433,9 @@ export function FuncionarioAgendaPage() {
   } | null>(null)
 
   const [usuarioMasterPlano, setUsuarioMasterPlano] = useState<string | null>(null)
+  const [usuarioMasterTipoNegocio, setUsuarioMasterTipoNegocio] = useState<string | null>(null)
+
+  const isAcademia = useMemo(() => String(usuarioMasterTipoNegocio ?? '').trim().toLowerCase() === 'academia', [usuarioMasterTipoNegocio])
 
   const [date, setDate] = useState(() => {
     const now = new Date()
@@ -462,9 +481,19 @@ export function FuncionarioAgendaPage() {
 
   const [agendamentos, setAgendamentos] = useState<Agendamento[]>([])
   const [bloqueios, setBloqueios] = useState<Bloqueio[]>([])
+  const [qtdVagasColumnAvailable, setQtdVagasColumnAvailable] = useState(true)
+  const [capacidadePorHorarioColumnAvailable, setCapacidadePorHorarioColumnAvailable] = useState(true)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+
+  const [participantsOpen, setParticipantsOpen] = useState(false)
+  const [participantsCtx, setParticipantsCtx] = useState<{
+    data: string
+    hora_inicio: string
+    servico_id: string | null
+    funcionario_id: string | null
+  } | null>(null)
 
   const [browserNotifsPermission, setBrowserNotifsPermission] = useState<'default' | 'granted' | 'denied'>(() => {
     if (typeof window === 'undefined') return 'default'
@@ -598,7 +627,7 @@ export function FuncionarioAgendaPage() {
 
       const { data: masterHorarioData } = await supabase
         .from('usuarios')
-        .select('horario_inicio,horario_fim,intervalo_inicio,intervalo_fim,dias_trabalho,plano')
+        .select('horario_inicio,horario_fim,intervalo_inicio,intervalo_fim,dias_trabalho,plano,tipo_negocio')
         .eq('id', usuarioMasterId)
         .maybeSingle()
       if (masterHorarioData) {
@@ -611,9 +640,11 @@ export function FuncionarioAgendaPage() {
           dias_trabalho: Array.isArray(row.dias_trabalho) ? (row.dias_trabalho as number[]) : null,
         })
         setUsuarioMasterPlano(typeof row.plano === 'string' ? row.plano : null)
+        setUsuarioMasterTipoNegocio(typeof row.tipo_negocio === 'string' ? row.tipo_negocio : null)
       } else {
         setUsuarioMasterHorario(null)
         setUsuarioMasterPlano(null)
+        setUsuarioMasterTipoNegocio(null)
       }
 
       const { data: servicosData, error: servicosError } = await supabase
@@ -647,38 +678,77 @@ export function FuncionarioAgendaPage() {
         setFuncionarios([])
       }
 
-      const base = supabase
-        .from('agendamentos')
-        .select('id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(id,nome,preco,duracao_minutos,cor)')
-        .eq('usuario_id', usuarioMasterId)
-        .order('data', { ascending: true })
-        .order('hora_inicio', { ascending: true })
+      setQtdVagasColumnAvailable(true)
+      setCapacidadePorHorarioColumnAvailable(true)
 
-      const baseScoped = canVerAgendaTodos
-        ? filterFuncionarioId
-          ? base.eq('funcionario_id', filterFuncionarioId)
-          : base
-        : base.eq('funcionario_id', funcionarioId)
+      const servicoColsBase = 'id,nome,preco,duracao_minutos,cor'
+      const servicoColsWithCap = `${servicoColsBase},capacidade_por_horario`
 
-      const baseWithRange =
-        viewMode === 'dia'
-          ? baseScoped.eq('data', dayKey)
-          : baseScoped.gte('data', weekStartKey).lte('data', weekEndKey)
+      const agColsBase = `id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(${servicoColsBase})`
+      const agColsWithQtd = `id,cliente_nome,cliente_telefone,qtd_vagas,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(${servicoColsBase})`
+      const agColsWithCap = `id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(${servicoColsWithCap})`
+      const agColsWithQtdAndCap = `id,cliente_nome,cliente_telefone,qtd_vagas,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(${servicoColsWithCap})`
 
-      const { data: agData, error: agError } = await baseWithRange
-      if (agError) {
-        setError(formatQueryError(agError))
-        setLoading(false)
-        return
+      const agCols = isAcademia ? agColsWithQtdAndCap : agColsBase
+
+      const fetchAgs = async (cols: string) => {
+        const q = supabase
+          .from('agendamentos')
+          .select(cols)
+          .eq('usuario_id', usuarioMasterId)
+          .order('data', { ascending: true })
+          .order('hora_inicio', { ascending: true })
+
+        const scoped = canVerAgendaTodos
+          ? filterFuncionarioId
+            ? q.eq('funcionario_id', filterFuncionarioId)
+            : q
+          : q.eq('funcionario_id', funcionarioId)
+
+        return viewMode === 'dia' ? scoped.eq('data', dayKey) : scoped.gte('data', weekStartKey).lte('data', weekEndKey)
       }
-      const normalizedAgs = (agData ?? []).map((row) => {
-        const r = row as unknown as Record<string, unknown>
-        const horaInicio = normalizeTimeHHMM(String(r.hora_inicio ?? ''))
-        const horaFimRaw = r.hora_fim
-        const horaFim = horaFimRaw ? normalizeTimeHHMM(String(horaFimRaw)) : null
-        return { ...r, hora_inicio: horaInicio, hora_fim: horaFim } as unknown as Agendamento
-      })
-      setAgendamentos(normalizedAgs)
+
+      const normalizeAgs = (rows: unknown[]) =>
+        (rows ?? []).map((row) => {
+          const r = row as unknown as Record<string, unknown>
+          const horaInicio = normalizeTimeHHMM(String(r.hora_inicio ?? ''))
+          const horaFimRaw = r.hora_fim
+          const horaFim = horaFimRaw ? normalizeTimeHHMM(String(horaFimRaw)) : null
+          return { ...r, hora_inicio: horaInicio, hora_fim: horaFim } as unknown as Agendamento
+        })
+
+      const firstRes = await fetchAgs(agCols)
+      if (firstRes.error) {
+        const formatted = formatQueryError(firstRes.error)
+        if (isAcademia) {
+          const missingQtd = isMissingColumnErrorMessage(formatted, 'qtd_vagas')
+          const missingCap = isMissingColumnErrorMessage(formatted, 'capacidade_por_horario')
+
+          if (missingQtd) setQtdVagasColumnAvailable(false)
+          if (missingCap) setCapacidadePorHorarioColumnAvailable(false)
+
+          const fallbackCols = missingQtd && missingCap ? agColsBase : missingQtd ? agColsWithCap : missingCap ? agColsWithQtd : null
+          if (fallbackCols) {
+            const secondRes = await fetchAgs(fallbackCols)
+            if (secondRes.error) {
+              setError(formatQueryError(secondRes.error))
+              setLoading(false)
+              return
+            }
+            setAgendamentos(normalizeAgs(secondRes.data ?? []))
+          } else {
+            setError(formatted)
+            setLoading(false)
+            return
+          }
+        } else {
+          setError(formatted)
+          setLoading(false)
+          return
+        }
+      } else {
+        setAgendamentos(normalizeAgs(firstRes.data ?? []))
+      }
 
       let bloqueiosQuery = supabase
         .from('bloqueios')
@@ -717,7 +787,7 @@ export function FuncionarioAgendaPage() {
       setError(e instanceof Error ? e.message : 'Erro ao carregar')
       setLoading(false)
     })
-  }, [canVerAgendaTodos, dayKey, filterFuncionarioId, funcionarioId, usuarioMasterId, viewMode, weekEndKey, weekStartKey])
+  }, [canVerAgendaTodos, dayKey, filterFuncionarioId, funcionarioId, isAcademia, usuarioMasterId, viewMode, weekEndKey, weekStartKey])
 
   useEffect(() => {
     if (!funcionarioId || !usuarioMasterId) return
@@ -732,7 +802,17 @@ export function FuncionarioAgendaPage() {
 
       const { data: agRow, error: agErr } = await supabase
         .from('agendamentos')
-        .select('id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(id,nome,preco,duracao_minutos,cor)')
+        .select(
+          isAcademia
+            ? qtdVagasColumnAvailable && capacidadePorHorarioColumnAvailable
+              ? 'id,cliente_nome,cliente_telefone,qtd_vagas,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(id,nome,preco,duracao_minutos,cor,capacidade_por_horario)'
+              : qtdVagasColumnAvailable
+                ? 'id,cliente_nome,cliente_telefone,qtd_vagas,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(id,nome,preco,duracao_minutos,cor)'
+                : capacidadePorHorarioColumnAvailable
+                  ? 'id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(id,nome,preco,duracao_minutos,cor,capacidade_por_horario)'
+                  : 'id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(id,nome,preco,duracao_minutos,cor)'
+            : 'id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(id,nome,preco,duracao_minutos,cor)'
+        )
         .eq('id', id)
         .eq('usuario_id', usuarioMasterId)
         .maybeSingle()
@@ -808,7 +888,7 @@ export function FuncionarioAgendaPage() {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [funcionario?.permissao, funcionarioId, usuarioMasterId])
+  }, [capacidadePorHorarioColumnAvailable, funcionario?.permissao, funcionarioId, isAcademia, qtdVagasColumnAvailable, usuarioMasterId])
 
   const enableBrowserNotifications = async () => {
     if (typeof window === 'undefined' || !('Notification' in window)) {
@@ -895,6 +975,67 @@ export function FuncionarioAgendaPage() {
     const active = candidates.filter((a) => (a.status ?? '').trim().toLowerCase() !== 'cancelado')
     return active[0] ?? candidates[0] ?? null
   }
+
+  const getAgVagas = useCallback((a: Agendamento) => {
+    if (!qtdVagasColumnAvailable) return 1
+    const raw = a.qtd_vagas
+    const v = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 1
+    return v
+  }, [qtdVagasColumnAvailable])
+
+  const getGroupParticipants = (anchor: Agendamento) => {
+    const sId = anchor.servico?.id ?? null
+    const h = normalizeTimeHHMM(anchor.hora_inicio)
+    const fId = anchor.funcionario_id ?? null
+    return agendamentos.filter((a) => {
+      if (a.data !== anchor.data) return false
+      if ((a.funcionario_id ?? null) !== fId) return false
+      if ((a.servico?.id ?? null) !== sId) return false
+      return normalizeTimeHHMM(a.hora_inicio) === h
+    })
+  }
+
+  const resolveGroupStatusUi = (items: Agendamento[]) => {
+    if (items.length === 0) return resolveStatusUi('pendente')
+    const statuses = items.map((x) => String(x.status ?? '').trim().toLowerCase()).filter(Boolean)
+    if (statuses.length === 0) return resolveStatusUi('pendente')
+    const unique = new Set(statuses)
+    if (unique.size === 1) return resolveStatusUi(statuses[0])
+    if ([...unique].every((s) => s === 'cancelado')) return resolveStatusUi('cancelado')
+    if ([...unique].every((s) => s === 'confirmado')) return resolveStatusUi('confirmado')
+    if ([...unique].every((s) => s === 'pendente')) return resolveStatusUi('pendente')
+    return { label: 'Misto', tone: 'slate' as const }
+  }
+
+  const participants = useMemo(() => {
+    if (!participantsOpen || !participantsCtx) return []
+    const h = normalizeTimeHHMM(participantsCtx.hora_inicio)
+    return agendamentos
+      .filter((a) => {
+        if (a.data !== participantsCtx.data) return false
+        if ((a.funcionario_id ?? null) !== (participantsCtx.funcionario_id ?? null)) return false
+        if ((a.servico?.id ?? null) !== (participantsCtx.servico_id ?? null)) return false
+        return normalizeTimeHHMM(a.hora_inicio) === h
+      })
+      .slice()
+      .sort((x, y) => x.cliente_nome.localeCompare(y.cliente_nome))
+  }, [agendamentos, participantsCtx, participantsOpen])
+
+  const participantsCapacity = useMemo(() => {
+    if (!participantsOpen) return 1
+    if (!isAcademia) return 1
+    if (!capacidadePorHorarioColumnAvailable) return 1
+    const raw = participants[0]?.servico?.capacidade_por_horario
+    const v = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 1
+    return v
+  }, [capacidadePorHorarioColumnAvailable, isAcademia, participants, participantsOpen])
+
+  const participantsBooked = useMemo(() => {
+    if (!participantsOpen) return 0
+    return participants
+      .filter((p) => String(p.status ?? '').trim().toLowerCase() !== 'cancelado')
+      .reduce((sum, p) => sum + getAgVagas(p), 0)
+  }, [getAgVagas, participants, participantsOpen])
 
   const findBloqueioAt = (time: string) => {
     const t = parseTimeToMinutes(time)
@@ -1496,6 +1637,7 @@ export function FuncionarioAgendaPage() {
                       const ag = item.ag
                       const statusUi = resolveStatusUi(ag.status)
                       const endereco = readExtrasEndereco(ag.extras)
+                      const vagas = typeof ag.qtd_vagas === 'number' && Number.isFinite(ag.qtd_vagas) ? Math.max(1, Math.floor(ag.qtd_vagas)) : 1
                       const labelDate =
                         viewMode === 'semana'
                           ? parseDateKey(item.data).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })
@@ -1514,6 +1656,7 @@ export function FuncionarioAgendaPage() {
                             {profLabel ? <div className="text-xs text-slate-500">{profLabel}</div> : null}
                             <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
                             {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
+                            {isAcademia && qtdVagasColumnAvailable && vagas > 1 ? <div className="text-sm text-slate-600">Vagas: {vagas}</div> : null}
                             <div className="text-sm text-slate-700">
                               ✂️ {ag.servico?.nome}{' '}
                               {funcionario.pode_ver_financeiro && ag.servico?.preco ? `- ${formatBRMoney(Number(ag.servico.preco))}` : ''}
@@ -1543,6 +1686,7 @@ export function FuncionarioAgendaPage() {
                     {agendamentos.map((ag) => {
                       const statusUi = resolveStatusUi(ag.status)
                       const endereco = readExtrasEndereco(ag.extras)
+                      const vagas = typeof ag.qtd_vagas === 'number' && Number.isFinite(ag.qtd_vagas) ? Math.max(1, Math.floor(ag.qtd_vagas)) : 1
                       return (
                         <div key={ag.id} className="p-3 flex items-start justify-between gap-3">
                           <div className="min-w-0">
@@ -1551,6 +1695,7 @@ export function FuncionarioAgendaPage() {
                             </div>
                             <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
                             {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
+                            {isAcademia && qtdVagasColumnAvailable && vagas > 1 ? <div className="text-sm text-slate-600">Vagas: {vagas}</div> : null}
                             <div className="text-sm text-slate-700">
                               ✂️ {ag.servico?.nome}{' '}
                               {funcionario.pode_ver_financeiro && ag.servico?.preco ? `- ${formatBRMoney(Number(ag.servico.preco))}` : ''}
@@ -1596,10 +1741,21 @@ export function FuncionarioAgendaPage() {
                 if (agCover) {
                   const isStart = Boolean(agStart)
                   const visible = isStart && matchesFilters(agCover)
-                  const statusUi = resolveStatusUi(agCover.status)
+                  const groupParticipants = isAcademia ? getGroupParticipants(agCover) : null
+                  const statusUi = groupParticipants ? resolveGroupStatusUi(groupParticipants) : resolveStatusUi(agCover.status)
                   const startLabel = normalizeTimeHHMM(agCover.hora_inicio)
                   const timeLabel = isStart && startLabel ? startLabel : time
                   const endereco = visible ? readExtrasEndereco(agCover.extras) : null
+                  const vagas =
+                    visible && typeof agCover.qtd_vagas === 'number' && Number.isFinite(agCover.qtd_vagas)
+                      ? Math.max(1, Math.floor(agCover.qtd_vagas))
+                      : 1
+                  const capRaw = isAcademia && capacidadePorHorarioColumnAvailable ? agCover.servico?.capacidade_por_horario : null
+                  const capacidade = typeof capRaw === 'number' && Number.isFinite(capRaw) ? Math.max(1, Math.floor(capRaw)) : 1
+                  const groupBooked = groupParticipants
+                    ? groupParticipants.filter((p) => String(p.status ?? '').trim().toLowerCase() !== 'cancelado').reduce((sum, p) => sum + getAgVagas(p), 0)
+                    : 0
+                  const groupRemaining = groupParticipants ? Math.max(0, capacidade - groupBooked) : 0
                   return (
                     <div key={time} className="p-4 flex items-start justify-between gap-3">
                       <div>
@@ -1613,6 +1769,13 @@ export function FuncionarioAgendaPage() {
                         </div>
                         {visible ? <div className="text-sm text-slate-600">📱 {agCover.cliente_telefone}</div> : null}
                         {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
+                        {groupParticipants && (capacidade > 1 || groupBooked > 1) ? (
+                          <div className="text-sm text-slate-600">
+                            Agendados: {groupBooked}
+                            {capacidade > 1 ? ` • Restantes: ${groupRemaining}` : ''}
+                          </div>
+                        ) : null}
+                        {isAcademia && qtdVagasColumnAvailable && vagas > 1 ? <div className="text-sm text-slate-600">Vagas: {vagas}</div> : null}
                         {visible ? (
                           <div className="text-sm text-slate-700">
                             ✂️ {agCover.servico?.nome}{' '}
@@ -1622,41 +1785,168 @@ export function FuncionarioAgendaPage() {
                       </div>
                       <div className="flex flex-col items-end gap-2">
                         <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
-                        {agCover.status !== 'cancelado' && visible ? (
-                          <div className="flex gap-2">
-                            {funcionario.pode_criar_agendamentos && String(agCover.status ?? '').trim().toLowerCase() !== 'confirmado' ? (
-                              <Button
-                                variant="secondary"
-                                onClick={async () => {
-                                  setError(null)
-                                  const { error: updErr } = await supabase
-                                    .from('agendamentos')
-                                    .update({ status: 'confirmado' })
-                                    .eq('id', agCover.id)
-                                    .eq('funcionario_id', funcionario.id)
-                                  if (updErr) {
-                                    const formatted = formatSupabaseError(updErr)
-                                    const lower = formatted.toLowerCase()
-                                    if (lower.includes('internal server error') || lower.includes('500')) {
+                        {agCover.status !== 'cancelado' && (visible || isAcademia) ? (
+                          isAcademia && groupParticipants ? (
+                            <Button
+                              variant="secondary"
+                              onClick={() => {
+                                setParticipantsCtx({
+                                  data: agCover.data,
+                                  hora_inicio: agCover.hora_inicio,
+                                  servico_id: agCover.servico?.id ?? null,
+                                  funcionario_id: agCover.funcionario_id ?? null,
+                                })
+                                setParticipantsOpen(true)
+                              }}
+                            >
+                              Ver participantes
+                            </Button>
+                          ) : visible ? (
+                            <div className="flex gap-2">
+                              {funcionario.pode_criar_agendamentos && String(agCover.status ?? '').trim().toLowerCase() !== 'confirmado' ? (
+                                <Button
+                                  variant="secondary"
+                                  onClick={async () => {
+                                    setError(null)
+                                    const { error: updErr } = await supabase
+                                      .from('agendamentos')
+                                      .update({ status: 'confirmado' })
+                                      .eq('id', agCover.id)
+                                      .eq('funcionario_id', funcionario.id)
+                                    if (updErr) {
+                                      const formatted = formatSupabaseError(updErr)
+                                      const lower = formatted.toLowerCase()
+                                      if (lower.includes('internal server error') || lower.includes('500')) {
+                                        setError(
+                                          `${formatted} • Provável trigger/função no Postgres falhando. Reexecute no Supabase o “SQL do WhatsApp (trigger confirmação imediata)” e o “SQL de Logs de Auditoria”.`
+                                        )
+                                        return
+                                      }
+                                      setError(formatted)
+                                      return
+                                    }
+                                    setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'confirmado' } : x)))
+                                    const sendRes = await sendConfirmacaoWhatsapp(agCover.id)
+                                    if (!sendRes.ok) {
+                                      if (
+                                        typeof sendRes.body === 'object' &&
+                                        sendRes.body !== null &&
+                                        (sendRes.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
+                                      ) {
+                                        setError(
+                                          'JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).'
+                                        )
+                                        return
+                                      }
+                                      if (
+                                        typeof sendRes.body === 'object' &&
+                                        sendRes.body !== null &&
+                                        (sendRes.body as Record<string, unknown>).error === 'jwt_project_mismatch'
+                                      ) {
+                                        setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
+                                        return
+                                      }
+                                      if (
+                                        typeof sendRes.body === 'object' &&
+                                        sendRes.body !== null &&
+                                        (sendRes.body as Record<string, unknown>).error === 'invalid_jwt'
+                                      ) {
+                                        setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
+                                        return
+                                      }
+                                      if (typeof sendRes.body === 'object' && sendRes.body !== null) {
+                                        const hint = (sendRes.body as Record<string, unknown>).hint
+                                        if (typeof hint === 'string' && hint.trim()) {
+                                          setError(hint)
+                                          return
+                                        }
+                                        const code = (sendRes.body as Record<string, unknown>).error
+                                        if (code === 'instance_not_connected') {
+                                          setError('WhatsApp não conectado. Vá em Configurações > WhatsApp e conecte a instância (QR Code).')
+                                          return
+                                        }
+                                      }
+                                      const details = typeof sendRes.body === 'string' ? sendRes.body : JSON.stringify(sendRes.body)
+                                      setError(`Falha ao enviar confirmação (HTTP ${sendRes.status}): ${details}`)
+                                    }
+                                  }}
+                                >
+                                  ✓ Confirmar
+                                </Button>
+                              ) : null}
+                              {funcionario.pode_cancelar_agendamentos ? (
+                                <Button
+                                  variant="secondary"
+                                  onClick={async () => {
+                                    setError(null)
+                                    const ok = window.confirm('Marcar como no-show?')
+                                    if (!ok) return
+                                    const { error: updErr } = await supabase
+                                      .from('agendamentos')
+                                      .update({ status: 'nao_compareceu' })
+                                      .eq('id', agCover.id)
+                                      .eq('funcionario_id', funcionario.id)
+                                    if (updErr) {
+                                      setError(formatSupabaseError(updErr))
+                                      return
+                                    }
+                                    setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'nao_compareceu' } : x)))
+                                  }}
+                                >
+                                  No-show
+                                </Button>
+                              ) : null}
+                              {funcionario.pode_cancelar_agendamentos ? (
+                                <Button
+                                  variant="danger"
+                                  onClick={async () => {
+                                    setError(null)
+                                    setSuccess(null)
+                                    const { error: updErr } = await supabase
+                                      .from('agendamentos')
+                                      .update({ status: 'cancelado', cancelado_em: new Date().toISOString() })
+                                      .eq('id', agCover.id)
+                                      .eq('funcionario_id', funcionario.id)
+                                    if (updErr) {
+                                      setError(formatSupabaseError(updErr))
+                                      return
+                                    }
+                                    setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'cancelado' } : x)))
+                                    setSuccess('Agendamento cancelado.')
+                                    const sendRes = await sendCancelamentoWhatsapp(agCover.id)
+                                    if (sendRes.ok) {
+                                      if (typeof sendRes.body === 'object' && sendRes.body !== null) {
+                                        const skipped = (sendRes.body as Record<string, unknown>).skipped
+                                        if (skipped === 'not_configured') {
+                                          setSuccess('Agendamento cancelado. WhatsApp não configurado.')
+                                          return
+                                        }
+                                        if (skipped === 'disabled') {
+                                          setSuccess('Agendamento cancelado. Envio automático desabilitado.')
+                                          return
+                                        }
+                                      }
+                                      setSuccess('Agendamento cancelado e aviso enviado.')
+                                      return
+                                    }
+                                    if (
+                                      typeof sendRes.body === 'object' &&
+                                      sendRes.body !== null &&
+                                      (sendRes.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
+                                    ) {
                                       setError(
-                                        `${formatted} • Provável trigger/função no Postgres falhando. Reexecute no Supabase o “SQL do WhatsApp (trigger confirmação imediata)” e o “SQL de Logs de Auditoria”.`
+                                        'JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).'
                                       )
                                       return
                                     }
-                                    setError(formatted)
-                                    return
-                                  }
-                                  setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'confirmado' } : x)))
-                                  const sendRes = await sendConfirmacaoWhatsapp(agCover.id)
-                                  if (!sendRes.ok) {
-                                  if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt') {
-                                    setError('JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).')
-                                    return
-                                  }
-                                  if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'jwt_project_mismatch') {
-                                    setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
-                                    return
-                                  }
+                                    if (
+                                      typeof sendRes.body === 'object' &&
+                                      sendRes.body !== null &&
+                                      (sendRes.body as Record<string, unknown>).error === 'jwt_project_mismatch'
+                                    ) {
+                                      setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
+                                      return
+                                    }
                                     if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'invalid_jwt') {
                                       setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
                                       return
@@ -1674,100 +1964,14 @@ export function FuncionarioAgendaPage() {
                                       }
                                     }
                                     const details = typeof sendRes.body === 'string' ? sendRes.body : JSON.stringify(sendRes.body)
-                                    setError(`Falha ao enviar confirmação (HTTP ${sendRes.status}): ${details}`)
-                                  }
-                                }}
-                              >
-                                ✓ Confirmar
-                              </Button>
-                            ) : null}
-                            {funcionario.pode_cancelar_agendamentos ? (
-                              <Button
-                                variant="secondary"
-                                onClick={async () => {
-                                  setError(null)
-                                  const ok = window.confirm('Marcar como no-show?')
-                                  if (!ok) return
-                                  const { error: updErr } = await supabase
-                                    .from('agendamentos')
-                                    .update({ status: 'nao_compareceu' })
-                                    .eq('id', agCover.id)
-                                    .eq('funcionario_id', funcionario.id)
-                                  if (updErr) {
-                                    setError(formatSupabaseError(updErr))
-                                    return
-                                  }
-                                  setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'nao_compareceu' } : x)))
-                                }}
-                              >
-                                No-show
-                              </Button>
-                            ) : null}
-                            {funcionario.pode_cancelar_agendamentos ? (
-                              <Button
-                                variant="danger"
-                                onClick={async () => {
-                                  setError(null)
-                                  setSuccess(null)
-                                  const { error: updErr } = await supabase
-                                    .from('agendamentos')
-                                    .update({ status: 'cancelado', cancelado_em: new Date().toISOString() })
-                                    .eq('id', agCover.id)
-                                    .eq('funcionario_id', funcionario.id)
-                                  if (updErr) {
-                                    setError(formatSupabaseError(updErr))
-                                    return
-                                  }
-                                  setAgendamentos((prev) => prev.map((x) => (x.id === agCover.id ? { ...x, status: 'cancelado' } : x)))
-                                  setSuccess('Agendamento cancelado.')
-                                  const sendRes = await sendCancelamentoWhatsapp(agCover.id)
-                                  if (sendRes.ok) {
-                                    if (typeof sendRes.body === 'object' && sendRes.body !== null) {
-                                      const skipped = (sendRes.body as Record<string, unknown>).skipped
-                                      if (skipped === 'not_configured') {
-                                        setSuccess('Agendamento cancelado. WhatsApp não configurado.')
-                                        return
-                                      }
-                                      if (skipped === 'disabled') {
-                                        setSuccess('Agendamento cancelado. Envio automático desabilitado.')
-                                        return
-                                      }
-                                    }
-                                    setSuccess('Agendamento cancelado e aviso enviado.')
-                                    return
-                                  }
-                                  if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt') {
-                                    setError('JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).')
-                                    return
-                                  }
-                                  if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'jwt_project_mismatch') {
-                                    setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
-                                    return
-                                  }
-                                  if (typeof sendRes.body === 'object' && sendRes.body !== null && (sendRes.body as Record<string, unknown>).error === 'invalid_jwt') {
-                                    setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
-                                    return
-                                  }
-                                  if (typeof sendRes.body === 'object' && sendRes.body !== null) {
-                                    const hint = (sendRes.body as Record<string, unknown>).hint
-                                    if (typeof hint === 'string' && hint.trim()) {
-                                      setError(hint)
-                                      return
-                                    }
-                                    const code = (sendRes.body as Record<string, unknown>).error
-                                    if (code === 'instance_not_connected') {
-                                      setError('WhatsApp não conectado. Vá em Configurações > WhatsApp e conecte a instância (QR Code).')
-                                      return
-                                    }
-                                  }
-                                  const details = typeof sendRes.body === 'string' ? sendRes.body : JSON.stringify(sendRes.body)
-                                  setError(`Falha ao enviar cancelamento (HTTP ${sendRes.status}): ${details}`)
-                                }}
-                              >
-                                ✗ Cancelar
-                              </Button>
-                            ) : null}
-                          </div>
+                                    setError(`Falha ao enviar cancelamento (HTTP ${sendRes.status}): ${details}`)
+                                  }}
+                                >
+                                  ✗ Cancelar
+                                </Button>
+                              ) : null}
+                            </div>
+                          ) : null
                         ) : null}
                       </div>
                     </div>
@@ -1824,25 +2028,22 @@ export function FuncionarioAgendaPage() {
                     </div>
                   </div>
                 ) : null}
-                <div className="overflow-x-auto">
-                  <div className="grid grid-cols-7 gap-3 min-w-[980px]">
-                    {weekDays.map((d) => {
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {weekDays.map((d) => {
                       const ags = agendamentosByDay[d.key] ?? []
                       const bls = bloqueiosByDay[d.key] ?? []
                       const visibleAgs = ags.filter(matchesFilters)
                       const visibleAgCount = visibleAgs.length
                       const label = d.date.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })
                       return (
-                        <div key={d.key} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                          <div className="px-3 py-2 border-b border-slate-100 bg-slate-50">
-                            <div className="text-sm font-semibold text-slate-900 flex items-center justify-between gap-2">
-                              <span>{label}</span>
-                              <span className="text-xs text-slate-600">{visibleAgCount} ag.</span>
-                            </div>
+                        <div key={d.key} className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm flex flex-col">
+                          <div className="px-3 py-2 border-b border-slate-100 bg-slate-50 flex items-center justify-between gap-2">
+                            <div className="text-sm font-semibold text-slate-900">{label}</div>
+                            <div className="text-xs text-slate-600">{visibleAgCount} ag.</div>
                           </div>
-                          <div className="divide-y divide-slate-100">
+                          <div className="p-3 flex flex-col gap-2">
                             {visibleAgs.length === 0 && bls.length === 0 ? (
-                              <div className="px-3 py-3 space-y-2">
+                              <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-3">
                                 <div className="text-sm text-slate-600">Sem itens</div>
                                 <div>
                                   {hasAnyFilter ? (
@@ -1864,43 +2065,52 @@ export function FuncionarioAgendaPage() {
                                 </div>
                               </div>
                             ) : (
-                              [...visibleAgs.map((a) => ({ kind: 'ag' as const, time: a.hora_inicio, ag: a })), ...bls.map((b) => ({ kind: 'b' as const, time: b.hora_inicio, b }))]
+                              [
+                                ...visibleAgs
+                                  .slice()
+                                  .sort((x, y) => parseTimeToMinutes(x.hora_inicio) - parseTimeToMinutes(y.hora_inicio))
+                                  .map((a) => ({ kind: 'ag' as const, time: a.hora_inicio, ag: a })),
+                                ...bls.map((b) => ({ kind: 'b' as const, time: b.hora_inicio, b })),
+                              ]
                                 .sort((x, y) => parseTimeToMinutes(x.time) - parseTimeToMinutes(y.time))
                                 .map((item) => {
                                   if (item.kind === 'b') {
                                     return (
-                                      <div key={`b:${item.b.id}`} className="px-3 py-2 flex items-start justify-between gap-2">
-                                        <div className="text-sm text-slate-700">
-                                          <div className="font-semibold text-slate-900">
+                                      <div
+                                        key={`b:${item.b.id}`}
+                                        className="rounded-lg border border-slate-200 bg-slate-50 p-3 flex items-start justify-between gap-3"
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="text-sm font-semibold text-slate-900 whitespace-normal break-words">
                                             {item.b.hora_inicio}–{item.b.hora_fim}
                                           </div>
-                                          <div className="text-slate-600">🔒 Bloqueado {item.b.motivo ? `• ${item.b.motivo}` : ''}</div>
+                                          <div className="text-sm text-slate-600 whitespace-normal break-words">
+                                            🔒 Bloqueado {item.b.motivo ? `• ${item.b.motivo}` : ''}
+                                          </div>
                                         </div>
                                         <Badge tone="yellow">Bloqueado</Badge>
                                       </div>
                                     )
                                   }
                                   const a = item.ag
-                                  const visible = true
                                   const statusUi = resolveStatusUi(a.status)
+                                  const timeLabel = normalizeTimeHHMM(a.hora_inicio) || a.hora_inicio
                                   return (
-                                    <div key={`ag:${a.id}`} className="px-3 py-2 flex items-start justify-between gap-2">
-                                      <div className="text-sm text-slate-700">
-                                        <div className="font-semibold text-slate-900 flex items-center gap-2">
-                                          {a.servico?.cor ? (
-                                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: a.servico.cor }} />
-                                          ) : null}
-                                          <span>
-                                            {a.hora_inicio} • {visible ? a.cliente_nome : 'Ocupado'}
-                                          </span>
+                                    <div
+                                      key={`ag:${a.id}`}
+                                      className="relative rounded-lg border border-slate-200 bg-white p-3 hover:bg-slate-50 transition-colors"
+                                    >
+                                      {a.servico?.cor ? (
+                                        <div className="absolute left-0 top-0 bottom-0 w-1.5 rounded-l-lg" style={{ backgroundColor: a.servico.cor }} />
+                                      ) : null}
+                                      <div className="min-w-0 pl-2">
+                                        <div className="flex items-center justify-center">
+                                          <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
                                         </div>
-                                        {visible ? <div className="text-slate-600">{a.servico?.nome ?? 'Serviço'}</div> : null}
-                                        {visible ? (() => {
-                                          const endereco = readExtrasEndereco(a.extras)
-                                          return endereco ? <div className="text-slate-600">📍 {endereco}</div> : null
-                                        })() : null}
+                                        <div className="mt-2 text-sm font-semibold text-slate-900 truncate">{timeLabel}</div>
+                                        <div className="text-sm text-slate-900 truncate">{a.cliente_nome}</div>
+                                        <div className="text-sm text-slate-700 truncate">{a.servico?.nome ?? 'Serviço'}</div>
                                       </div>
-                                      <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
                                     </div>
                                   )
                                 })
@@ -1909,13 +2119,243 @@ export function FuncionarioAgendaPage() {
                         </div>
                       )
                     })}
-                  </div>
                 </div>
               </div>
             )}
                 </div>
               </Card>
             </div>
+
+            {participantsOpen && participantsCtx ? (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+                <div className="w-full max-w-2xl">
+                  <Card>
+                    <div className="p-6 space-y-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="text-sm font-semibold text-slate-900">Participantes</div>
+                          <div className="text-sm text-slate-600">
+                            {normalizeTimeHHMM(participantsCtx.hora_inicio)} • {participants[0]?.servico?.nome ?? 'Serviço'}
+                          </div>
+                          {participantsCapacity > 1 ? (
+                            <div className="text-xs text-slate-600">
+                              Agendados: {participantsBooked} • Restantes: {Math.max(0, participantsCapacity - participantsBooked)}
+                            </div>
+                          ) : null}
+                        </div>
+                        <Button
+                          variant="secondary"
+                          onClick={() => {
+                            setParticipantsOpen(false)
+                            setParticipantsCtx(null)
+                          }}
+                        >
+                          Fechar
+                        </Button>
+                      </div>
+
+                      {participants.length === 0 ? (
+                        <div className="text-sm text-slate-600">Nenhum participante encontrado.</div>
+                      ) : (
+                        <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
+                          {participants.map((p) => {
+                            const statusUi = resolveStatusUi(p.status)
+                            const vagas = getAgVagas(p)
+                            return (
+                              <div key={p.id} className="p-3 flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-sm font-semibold text-slate-900 truncate">{p.cliente_nome}</div>
+                                  <div className="text-sm text-slate-600">📱 {p.cliente_telefone}</div>
+                                  {qtdVagasColumnAvailable && vagas > 1 ? <div className="text-sm text-slate-600">Vagas: {vagas}</div> : null}
+                                </div>
+                                <div className="flex flex-col items-end gap-2">
+                                  <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
+                                  {String(p.status ?? '').trim().toLowerCase() !== 'cancelado' ? (
+                                    <div className="flex gap-2">
+                                      {funcionario.pode_criar_agendamentos && String(p.status ?? '').trim().toLowerCase() !== 'confirmado' ? (
+                                        <Button
+                                          variant="secondary"
+                                          onClick={async () => {
+                                            setError(null)
+                                            const { error: updErr } = await supabase
+                                              .from('agendamentos')
+                                              .update({ status: 'confirmado' })
+                                              .eq('id', p.id)
+                                              .eq('funcionario_id', funcionario.id)
+                                            if (updErr) {
+                                              const formatted = formatSupabaseError(updErr)
+                                              const lower = formatted.toLowerCase()
+                                              if (lower.includes('internal server error') || lower.includes('500')) {
+                                                setError(
+                                                  `${formatted} • Provável trigger/função no Postgres falhando. Reexecute no Supabase o “SQL do WhatsApp (trigger confirmação imediata)” e o “SQL de Logs de Auditoria”.`
+                                                )
+                                                return
+                                              }
+                                              setError(formatted)
+                                              return
+                                            }
+                                            setAgendamentos((prev) => prev.map((x) => (x.id === p.id ? { ...x, status: 'confirmado' } : x)))
+                                            const sendRes = await sendConfirmacaoWhatsapp(p.id)
+                                            if (!sendRes.ok) {
+                                              if (
+                                                typeof sendRes.body === 'object' &&
+                                                sendRes.body !== null &&
+                                                (sendRes.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
+                                              ) {
+                                                setError(
+                                                  'JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).'
+                                                )
+                                                return
+                                              }
+                                              if (
+                                                typeof sendRes.body === 'object' &&
+                                                sendRes.body !== null &&
+                                                (sendRes.body as Record<string, unknown>).error === 'jwt_project_mismatch'
+                                              ) {
+                                                setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
+                                                return
+                                              }
+                                              if (
+                                                typeof sendRes.body === 'object' &&
+                                                sendRes.body !== null &&
+                                                (sendRes.body as Record<string, unknown>).error === 'invalid_jwt'
+                                              ) {
+                                                setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
+                                                return
+                                              }
+                                              if (typeof sendRes.body === 'object' && sendRes.body !== null) {
+                                                const hint = (sendRes.body as Record<string, unknown>).hint
+                                                if (typeof hint === 'string' && hint.trim()) {
+                                                  setError(hint)
+                                                  return
+                                                }
+                                                const code = (sendRes.body as Record<string, unknown>).error
+                                                if (code === 'instance_not_connected') {
+                                                  setError('WhatsApp não conectado. Vá em Configurações > WhatsApp e conecte a instância (QR Code).')
+                                                  return
+                                                }
+                                              }
+                                              const details = typeof sendRes.body === 'string' ? sendRes.body : JSON.stringify(sendRes.body)
+                                              setError(`Falha ao enviar confirmação (HTTP ${sendRes.status}): ${details}`)
+                                            }
+                                          }}
+                                        >
+                                          ✓ Confirmar
+                                        </Button>
+                                      ) : null}
+                                      {funcionario.pode_cancelar_agendamentos ? (
+                                        <Button
+                                          variant="secondary"
+                                          onClick={async () => {
+                                            setError(null)
+                                            const ok = window.confirm('Marcar como no-show?')
+                                            if (!ok) return
+                                            const { error: updErr } = await supabase
+                                              .from('agendamentos')
+                                              .update({ status: 'nao_compareceu' })
+                                              .eq('id', p.id)
+                                              .eq('funcionario_id', funcionario.id)
+                                            if (updErr) {
+                                              setError(formatSupabaseError(updErr))
+                                              return
+                                            }
+                                            setAgendamentos((prev) => prev.map((x) => (x.id === p.id ? { ...x, status: 'nao_compareceu' } : x)))
+                                          }}
+                                        >
+                                          No-show
+                                        </Button>
+                                      ) : null}
+                                      {funcionario.pode_cancelar_agendamentos ? (
+                                        <Button
+                                          variant="danger"
+                                          onClick={async () => {
+                                            setError(null)
+                                            setSuccess(null)
+                                            const { error: updErr } = await supabase
+                                              .from('agendamentos')
+                                              .update({ status: 'cancelado', cancelado_em: new Date().toISOString() })
+                                              .eq('id', p.id)
+                                              .eq('funcionario_id', funcionario.id)
+                                            if (updErr) {
+                                              setError(formatSupabaseError(updErr))
+                                              return
+                                            }
+                                            setAgendamentos((prev) => prev.map((x) => (x.id === p.id ? { ...x, status: 'cancelado' } : x)))
+                                            setSuccess('Agendamento cancelado.')
+                                            const sendRes = await sendCancelamentoWhatsapp(p.id)
+                                            if (sendRes.ok) {
+                                              if (typeof sendRes.body === 'object' && sendRes.body !== null) {
+                                                const skipped = (sendRes.body as Record<string, unknown>).skipped
+                                                if (skipped === 'not_configured') {
+                                                  setSuccess('Agendamento cancelado. WhatsApp não configurado.')
+                                                  return
+                                                }
+                                                if (skipped === 'disabled') {
+                                                  setSuccess('Agendamento cancelado. Envio automático desabilitado.')
+                                                  return
+                                                }
+                                              }
+                                              setSuccess('Agendamento cancelado e aviso enviado.')
+                                              return
+                                            }
+                                            if (
+                                              typeof sendRes.body === 'object' &&
+                                              sendRes.body !== null &&
+                                              (sendRes.body as Record<string, unknown>).error === 'supabase_gateway_invalid_jwt'
+                                            ) {
+                                              setError(
+                                                'JWT inválido para chamar a Edge Function. Saia e entre novamente. Se persistir, reimplante a função com verify_jwt=false (--no-verify-jwt).'
+                                              )
+                                              return
+                                            }
+                                            if (
+                                              typeof sendRes.body === 'object' &&
+                                              sendRes.body !== null &&
+                                              (sendRes.body as Record<string, unknown>).error === 'jwt_project_mismatch'
+                                            ) {
+                                              setError('Sessão do Supabase pertence a outro projeto. Saia e entre novamente no sistema.')
+                                              return
+                                            }
+                                            if (
+                                              typeof sendRes.body === 'object' &&
+                                              sendRes.body !== null &&
+                                              (sendRes.body as Record<string, unknown>).error === 'invalid_jwt'
+                                            ) {
+                                              setError('Sessão inválida no Supabase. Saia e entre novamente no sistema.')
+                                              return
+                                            }
+                                            if (typeof sendRes.body === 'object' && sendRes.body !== null) {
+                                              const hint = (sendRes.body as Record<string, unknown>).hint
+                                              if (typeof hint === 'string' && hint.trim()) {
+                                                setError(hint)
+                                                return
+                                              }
+                                              const code = (sendRes.body as Record<string, unknown>).error
+                                              if (code === 'instance_not_connected') {
+                                                setError('WhatsApp não conectado. Vá em Configurações > WhatsApp e conecte a instância (QR Code).')
+                                                return
+                                              }
+                                            }
+                                            const details = typeof sendRes.body === 'string' ? sendRes.body : JSON.stringify(sendRes.body)
+                                            setError(`Falha ao enviar cancelamento (HTTP ${sendRes.status}): ${details}`)
+                                          }}
+                                        >
+                                          ✗ Cancelar
+                                        </Button>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </Card>
+                </div>
+              </div>
+            ) : null}
 
             {funcionario.permissao !== 'atendente' ? (
               <Card>

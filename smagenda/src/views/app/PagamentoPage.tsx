@@ -166,6 +166,11 @@ async function syncCheckoutSessionPagamento(sessionId: string, usuarioId: string
   return callPaymentsFn(payload)
 }
 
+async function getUsuarioStripeStatusPagamento(usuarioId: string): Promise<FnResult> {
+  const payload: Record<string, unknown> = { action: 'admin_get_usuario_stripe_status', usuario_id: usuarioId }
+  return callPaymentsFn(payload)
+}
+
 type PlanKey = 'free' | 'basic' | 'pro' | 'team' | 'enterprise'
 
 type PlanCard = {
@@ -358,6 +363,9 @@ export function PagamentoPage() {
         let tries = 0
         while (tries < 10) {
           await new Promise((r) => setTimeout(r, 2000))
+          if (effectiveUsuarioId) {
+            await getUsuarioStripeStatusPagamento(effectiveUsuarioId).catch(() => undefined)
+          }
           const next = await refresh()
           if (next?.kind === 'usuario' && next.profile.status_pagamento === 'ativo') break
           tries += 1
@@ -368,6 +376,16 @@ export function PagamentoPage() {
     }
     run().catch(() => undefined)
   }, [location.search, navigate, refresh])
+
+  useEffect(() => {
+    const run = async () => {
+      if (!usuarioId || !usuario) return
+      if (usuario.status_pagamento === 'ativo') return
+      await getUsuarioStripeStatusPagamento(usuarioId).catch(() => undefined)
+      await refresh()
+    }
+    run().catch(() => undefined)
+  }, [refresh, usuario, usuarioId])
 
   const startPlanCheckout = async (metodo: 'card' | 'pix') => {
     if (!usuarioId) return
@@ -640,7 +658,7 @@ export function PagamentoPage() {
                     </div>
                   </div>
 
-                  {usuario.stripe_customer_id ? (
+                  {(Boolean(usuario.stripe_customer_id) || (usuario.status_pagamento === 'ativo' && usuario.plano !== 'free')) ? (
                     <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                         <div>

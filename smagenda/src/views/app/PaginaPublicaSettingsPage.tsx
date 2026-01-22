@@ -532,8 +532,10 @@ export function PaginaPublicaSettingsPage() {
                       <option value="salao">Salão de beleza</option>
                       <option value="estetica">Estética</option>
                       <option value="odontologia">Odontologia</option>
+                      <option value="advocacia">Advocacia</option>
                       <option value="manicure">Manicure</option>
                       <option value="pilates">Pilates / Estúdio</option>
+                      <option value="academia">Academia</option>
                       <option value="faxina">Faxina / Diarista</option>
                     </select>
                     <div className="mt-1 text-xs text-slate-600">

@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
+import { slugify } from '../../lib/slug'
 import { supabase } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
+import type { UsuarioProfile } from '../../state/auth/types'
 
 type Step = 1 | 2 | 3 | 4
 
@@ -17,21 +19,58 @@ const weekdayOptions = [
   { value: 0, label: 'D' },
 ]
 
+const tipoNegocioOptions = [
+  { value: 'barbearia', label: 'Barbearia' },
+  { value: 'salao', label: 'Salão' },
+  { value: 'estetica', label: 'Estética' },
+  { value: 'odontologia', label: 'Odontologia' },
+  { value: 'advocacia', label: 'Advocacia' },
+  { value: 'manicure', label: 'Manicure' },
+  { value: 'pilates', label: 'Pilates' },
+  { value: 'academia', label: 'Academia' },
+  { value: 'lava_jatos', label: 'Lava-jato' },
+  { value: 'faxina', label: 'Faxina / Diarista' },
+]
+
 export function OnboardingPage() {
-  const { appPrincipal, masterUsuario, masterUsuarioLoading, refresh } = useAuth()
+  const { loading, appPrincipal, masterUsuario, masterUsuarioLoading, refresh } = useAuth()
   const isGerente = appPrincipal?.kind === 'funcionario' && appPrincipal.profile.permissao === 'admin'
-  const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isGerente ? masterUsuario : null
-  const usuarioId = usuario?.id ?? null
-  const slug = usuario?.slug ?? null
-  const initialLogoUrl = usuario?.logo_url ?? null
+
+  if (loading || (isGerente && masterUsuarioLoading)) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-slate-600">Carregando…</div>
+      </div>
+    )
+  }
+
+  if (!appPrincipal) {
+    return <div className="text-slate-700">Conta inválida para onboarding.</div>
+  }
+
+  const usuario = appPrincipal.kind === 'usuario' ? appPrincipal.profile : isGerente ? masterUsuario : null
+
+  if (!usuario) {
+    return <div className="text-slate-700">Conta inválida para onboarding.</div>
+  }
+
+  return <OnboardingInner key={usuario.id} usuario={usuario} refresh={refresh} />
+}
+
+function OnboardingInner({ usuario, refresh }: { usuario: UsuarioProfile; refresh: () => Promise<unknown> }) {
+  const usuarioId = usuario.id
+  const slug = usuario.slug
 
   const [step, setStep] = useState<Step>(1)
-  const [horarioInicio, setHorarioInicio] = useState('08:00')
-  const [horarioFim, setHorarioFim] = useState('18:00')
-  const [dias, setDias] = useState<number[]>([1, 2, 3, 4, 5, 6])
-  const [intervaloInicio, setIntervaloInicio] = useState('')
-  const [intervaloFim, setIntervaloFim] = useState('')
-  const [logoUrl, setLogoUrl] = useState(() => initialLogoUrl ?? '')
+  const [tipoNegocio, setTipoNegocio] = useState(() => String(usuario.tipo_negocio ?? ''))
+  const [unidadeNome, setUnidadeNome] = useState(() => String(usuario.nome_negocio ?? ''))
+  const [enderecoEstabelecimento, setEnderecoEstabelecimento] = useState(() => String(usuario.endereco ?? ''))
+  const [horarioInicio, setHorarioInicio] = useState(() => String(usuario.horario_inicio ?? '08:00'))
+  const [horarioFim, setHorarioFim] = useState(() => String(usuario.horario_fim ?? '18:00'))
+  const [dias, setDias] = useState<number[]>(() => (Array.isArray(usuario.dias_trabalho) && usuario.dias_trabalho.length ? usuario.dias_trabalho : [1, 2, 3, 4, 5, 6]))
+  const [intervaloInicio, setIntervaloInicio] = useState(() => String(usuario.intervalo_inicio ?? ''))
+  const [intervaloFim, setIntervaloFim] = useState(() => String(usuario.intervalo_fim ?? ''))
+  const [logoUrl, setLogoUrl] = useState(() => String(usuario.logo_url ?? ''))
   const [logoFile, setLogoFile] = useState<File | null>(null)
   const [logoFailed, setLogoFailed] = useState(false)
 
@@ -53,10 +92,6 @@ export function OnboardingPage() {
       URL.revokeObjectURL(logoObjectUrl)
     }
   }, [logoObjectUrl])
-
-  if (!usuarioId) {
-    return <div className="text-slate-700">{isGerente && masterUsuarioLoading ? 'Carregando…' : 'Conta inválida para onboarding.'}</div>
-  }
 
   const toggleDia = (day: number) => {
     setDias((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]))
@@ -87,6 +122,33 @@ export function OnboardingPage() {
     setSubmitting(true)
     setError(null)
 
+    const cleanTipo = tipoNegocio.trim()
+    if (!cleanTipo) {
+      setError('Selecione o tipo de negócio.')
+      setSubmitting(false)
+      return
+    }
+
+    const cleanUnidadeNome = unidadeNome.trim()
+    if (!cleanUnidadeNome) {
+      setError('Informe o nome da unidade.')
+      setSubmitting(false)
+      return
+    }
+
+    const cleanEndereco = enderecoEstabelecimento.trim()
+    if (!cleanEndereco) {
+      setError('Informe o endereço do estabelecimento.')
+      setSubmitting(false)
+      return
+    }
+
+    if (!dias.length) {
+      setError('Selecione ao menos um dia de funcionamento.')
+      setSubmitting(false)
+      return
+    }
+
     let nextLogoUrl: string | null = logoUrl.trim() ? logoUrl.trim() : null
     if (logoFile) {
       try {
@@ -114,6 +176,8 @@ export function OnboardingPage() {
     const { error: updateError } = await supabase
       .from('usuarios')
       .update({
+        tipo_negocio: cleanTipo,
+        endereco: cleanEndereco,
         horario_inicio: horarioInicio,
         horario_fim: horarioFim,
         dias_trabalho: dias,
@@ -130,6 +194,23 @@ export function OnboardingPage() {
       setSubmitting(false)
       return
     }
+    await supabase.auth.updateUser({ data: { unidade_nome: cleanUnidadeNome } })
+
+    const unidadeSlug = slugify(cleanUnidadeNome).slice(0, 60)
+    if (unidadeSlug) {
+      const { data: existing, error: unitErr } = await supabase.from('unidades').select('id,endereco').eq('usuario_id', usuarioId).limit(1)
+      if (!unitErr && (!existing || existing.length === 0)) {
+        await supabase.from('unidades').insert({ usuario_id: usuarioId, nome: cleanUnidadeNome, slug: unidadeSlug, endereco: cleanEndereco })
+      } else if (!unitErr && existing && existing.length > 0) {
+        const first = (existing[0] ?? null) as unknown as { id?: string; endereco?: string | null } | null
+        const id = typeof first?.id === 'string' ? first.id : null
+        const currEndereco = typeof first?.endereco === 'string' ? first.endereco.trim() : ''
+        if (id && !currEndereco) {
+          await supabase.from('unidades').update({ endereco: cleanEndereco }).eq('id', id).eq('usuario_id', usuarioId)
+        }
+      }
+    }
+
     await refresh()
     setSubmitting(false)
     setStep(2)
@@ -179,7 +260,24 @@ export function OnboardingPage() {
       {step === 1 ? (
         <Card>
           <div className="p-6 space-y-4">
-            <div className="text-sm font-semibold text-slate-900">Etapa 1: Horário de funcionamento</div>
+            <div className="text-sm font-semibold text-slate-900">Etapa 1: Configuração inicial</div>
+            <label className="block">
+              <div className="text-sm font-medium text-slate-700 mb-1">Tipo de negócio</div>
+              <select
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                value={tipoNegocio}
+                onChange={(e) => setTipoNegocio(e.target.value)}
+              >
+                <option value="">Selecione…</option>
+                {tipoNegocioOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Input label="Nome da unidade" value={unidadeNome} onChange={(e) => setUnidadeNome(e.target.value)} />
+            <Input label="Endereço do estabelecimento" value={enderecoEstabelecimento} onChange={(e) => setEnderecoEstabelecimento(e.target.value)} />
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Input label="Início" type="time" value={horarioInicio} onChange={(e) => setHorarioInicio(e.target.value)} />
               <Input label="Fim" type="time" value={horarioFim} onChange={(e) => setHorarioFim(e.target.value)} />
@@ -292,7 +390,7 @@ export function OnboardingPage() {
           <div className="p-6 space-y-4">
             <div className="text-sm font-semibold text-slate-900">Etapa 3: WhatsApp</div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-              A configuração da Evolution API é feita no painel do Super Admin.
+              A configuração do WhatsApp só é habilitada após adquirir um plano, ou contate o suporte para mais informações.
             </div>
 
             <div className="flex justify-end">

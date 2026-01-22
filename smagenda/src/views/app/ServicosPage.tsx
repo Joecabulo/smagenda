@@ -16,6 +16,7 @@ type Servico = {
   duracao_minutos: number
   preco: number
   taxa_agendamento: number
+  capacidade_por_horario?: number
   buffer_antes_min?: number
   buffer_depois_min?: number
   antecedencia_minutos?: number
@@ -34,6 +35,7 @@ type FormState = {
   duracao_minutos: string
   preco: string
   taxa_agendamento: string
+  capacidade_por_horario: string
   buffer_antes_min: string
   buffer_depois_min: string
   antecedencia_minutos: string
@@ -52,6 +54,7 @@ function toFormState(servico?: Servico | null): FormState {
     duracao_minutos: String(servico?.duracao_minutos ?? 45),
     preco: String(servico?.preco ?? 0),
     taxa_agendamento: String(servico?.taxa_agendamento ?? 0),
+    capacidade_por_horario: String(typeof servico?.capacidade_por_horario === 'number' ? servico.capacidade_por_horario : 1),
     buffer_antes_min: String(typeof servico?.buffer_antes_min === 'number' ? servico.buffer_antes_min : 0),
     buffer_depois_min: String(typeof servico?.buffer_depois_min === 'number' ? servico.buffer_depois_min : 0),
     antecedencia_minutos: String(typeof servico?.antecedencia_minutos === 'number' ? servico.antecedencia_minutos : 120),
@@ -105,8 +108,11 @@ export function ServicosPage() {
   const [saving, setSaving] = useState(false)
   const [uploadingFoto, setUploadingFoto] = useState(false)
   const [regrasPorServicoDisponivel, setRegrasPorServicoDisponivel] = useState(true)
+  const [capacidadePorHorarioDisponivel, setCapacidadePorHorarioDisponivel] = useState(true)
   const [formOpen, setFormOpen] = useState(false)
   const [form, setForm] = useState<FormState>(() => toFormState(null))
+
+  const isAcademia = useMemo(() => String(usuario?.tipo_negocio ?? '').trim().toLowerCase() === 'academia', [usuario?.tipo_negocio])
 
   const isPro = useMemo(() => {
     const p = String(usuario?.plano ?? '').trim().toLowerCase()
@@ -142,11 +148,14 @@ export function ServicosPage() {
     const baseCols = enableTaxaAgendamento
       ? 'id,usuario_id,nome,descricao,duracao_minutos,preco,taxa_agendamento,cor,foto_url,ativo,ordem'
       : 'id,usuario_id,nome,descricao,duracao_minutos,preco,cor,foto_url,ativo,ordem'
-    const colsWithRules = `${baseCols},buffer_antes_min,buffer_depois_min,antecedencia_minutos,janela_max_dias,dia_inteiro`
 
+    const colsWithRules = `${baseCols},buffer_antes_min,buffer_depois_min,antecedencia_minutos,janela_max_dias,dia_inteiro`
+    const colsWithRulesAndCap = isAcademia ? `${colsWithRules},capacidade_por_horario` : colsWithRules
+
+    setCapacidadePorHorarioDisponivel(true)
     const first = await supabase
       .from('servicos')
-      .select(colsWithRules)
+      .select(colsWithRulesAndCap)
       .eq('usuario_id', usuarioId)
       .order('ordem', { ascending: true })
       .order('criado_em', { ascending: true })
@@ -155,8 +164,31 @@ export function ServicosPage() {
       const msg = first.error.message
       const lower = msg.toLowerCase()
       const missingColumn = lower.includes('column') && lower.includes('does not exist')
+      const missingCapacidade = lower.includes('capacidade_por_horario') && lower.includes('does not exist')
       if (!missingColumn) {
         setError(msg)
+        setLoading(false)
+        return
+      }
+
+      if (missingCapacidade && isAcademia) {
+        setCapacidadePorHorarioDisponivel(false)
+        const second = await supabase
+          .from('servicos')
+          .select(colsWithRules)
+          .eq('usuario_id', usuarioId)
+          .order('ordem', { ascending: true })
+          .order('criado_em', { ascending: true })
+
+        if (second.error) {
+          setError(second.error.message)
+          setLoading(false)
+          return
+        }
+        setServicos((second.data ?? []) as unknown as Servico[])
+        setError(
+          'Configuração do Supabase incompleta: rode no SQL Editor: alter table public.servicos add column if not exists capacidade_por_horario int not null default 1;'
+        )
         setLoading(false)
         return
       }
@@ -182,7 +214,7 @@ export function ServicosPage() {
     setRegrasPorServicoDisponivel(true)
     setServicos((first.data ?? []) as unknown as Servico[])
     setLoading(false)
-  }, [enableTaxaAgendamento, usuarioId])
+  }, [enableTaxaAgendamento, isAcademia, usuarioId])
 
   useEffect(() => {
     void (async () => {
@@ -293,6 +325,12 @@ export function ServicosPage() {
       payload.antecedencia_minutos = Number.isFinite(antecedencia) ? Math.max(0, Math.floor(antecedencia)) : 120
       payload.janela_max_dias = Number.isFinite(janela) ? Math.max(1, Math.floor(janela)) : 15
       payload.dia_inteiro = Boolean(form.dia_inteiro)
+    }
+
+    if (isAcademia && capacidadePorHorarioDisponivel) {
+      const capRaw = Number(form.capacidade_por_horario)
+      const cap = Number.isFinite(capRaw) ? Math.max(1, Math.min(200, Math.floor(capRaw))) : 1
+      payload.capacidade_por_horario = cap
     }
 
     if (canUseFotos) {
@@ -485,6 +523,21 @@ export function ServicosPage() {
                   Regras por serviço (buffer/antecedência/janela) ainda não estão habilitadas no seu Supabase. Aplique o SQL do link público atualizado em /admin/configuracoes.
                 </div>
               )}
+
+              {isAcademia ? (
+                capacidadePorHorarioDisponivel ? (
+                  <Input
+                    label="Capacidade por horário (clientes)"
+                    type="number"
+                    value={form.capacidade_por_horario}
+                    onChange={(e) => setForm((p) => ({ ...p, capacidade_por_horario: e.target.value }))}
+                  />
+                ) : (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                    Capacidade por horário ainda não está habilitada no seu Supabase. Aplique o SQL do link público atualizado em /admin/configuracoes.
+                  </div>
+                )
+              ) : null}
               {enableTaxaAgendamento ? (
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Input
@@ -630,6 +683,9 @@ export function ServicosPage() {
                       <div className="text-sm text-slate-600">
                         {s.duracao_minutos} min • {formatBRMoney(Number(s.preco ?? 0))}
                       </div>
+                      {isAcademia && typeof s.capacidade_por_horario === 'number' ? (
+                        <div className="text-xs text-slate-600">Capacidade: {Math.max(1, Math.min(200, Math.floor(s.capacidade_por_horario)))} por horário</div>
+                      ) : null}
                       {enableTaxaAgendamento && typeof s.taxa_agendamento === 'number' && Number(s.taxa_agendamento) > 0 ? (
                         <div className="text-xs text-slate-600">Taxa: {formatBRMoney(Number(s.taxa_agendamento))}</div>
                       ) : null}

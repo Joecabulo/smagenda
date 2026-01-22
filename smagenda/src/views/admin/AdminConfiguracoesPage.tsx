@@ -467,6 +467,21 @@ alter table public.servicos add column if not exists buffer_depois_min int not n
 alter table public.servicos add column if not exists antecedencia_minutos int not null default 120;
 alter table public.servicos add column if not exists janela_max_dias int not null default 365;
 alter table public.servicos add column if not exists dia_inteiro boolean not null default false;
+alter table public.servicos add column if not exists capacidade_por_horario int not null default 1;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'servicos_capacidade_por_horario_chk'
+      and conrelid = 'public.servicos'::regclass
+  ) then
+    alter table public.servicos
+      add constraint servicos_capacidade_por_horario_chk check (capacidade_por_horario between 1 and 200);
+  end if;
+end;
+$$;
 
 alter table public.funcionarios add column if not exists capacidade_dia_inteiro int not null default 1;
 
@@ -480,6 +495,22 @@ begin
   ) then
     alter table public.funcionarios
       add constraint funcionarios_capacidade_dia_inteiro_chk check (capacidade_dia_inteiro between 1 and 2);
+  end if;
+end;
+$$;
+
+alter table public.agendamentos add column if not exists qtd_vagas int not null default 1;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'agendamentos_qtd_vagas_chk'
+      and conrelid = 'public.agendamentos'::regclass
+  ) then
+    alter table public.agendamentos
+      add constraint agendamentos_qtd_vagas_chk check (qtd_vagas between 1 and 200);
   end if;
 end;
 $$;
@@ -1368,6 +1399,7 @@ drop function if exists public.public_create_agendamento_publico(uuid, date, tex
 drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, text);
 drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb);
 drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text, int);
 
 alter table public.usuarios add column if not exists slug text;
 create unique index if not exists usuarios_slug_unique on public.usuarios (slug);
@@ -1396,6 +1428,21 @@ alter table public.servicos add column if not exists buffer_depois_min int not n
 alter table public.servicos add column if not exists antecedencia_minutos int not null default 120;
 alter table public.servicos add column if not exists janela_max_dias int not null default 365;
 alter table public.servicos add column if not exists dia_inteiro boolean not null default false;
+alter table public.servicos add column if not exists capacidade_por_horario int not null default 1;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'servicos_capacidade_por_horario_chk'
+      and conrelid = 'public.servicos'::regclass
+  ) then
+    alter table public.servicos
+      add constraint servicos_capacidade_por_horario_chk check (capacidade_por_horario between 1 and 200);
+  end if;
+end;
+$$;
 
 alter table public.funcionarios add column if not exists capacidade_dia_inteiro int not null default 1;
 
@@ -1414,6 +1461,21 @@ end;
 $$;
 
 alter table public.agendamentos add column if not exists extras jsonb;
+alter table public.agendamentos add column if not exists qtd_vagas int not null default 1;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'agendamentos_qtd_vagas_chk'
+      and conrelid = 'public.agendamentos'::regclass
+  ) then
+    alter table public.agendamentos
+      add constraint agendamentos_qtd_vagas_chk check (qtd_vagas between 1 and 200);
+  end if;
+end;
+$$;
 
 do $$
 begin
@@ -1662,6 +1724,7 @@ returns table (
   antecedencia_minutos int,
   janela_max_dias int,
   dia_inteiro boolean,
+  capacidade_por_horario int,
   preco numeric,
   taxa_agendamento numeric,
   cor text,
@@ -1683,6 +1746,7 @@ begin
     coalesce(s.antecedencia_minutos, 120)::int,
     365::int,
     coalesce(s.dia_inteiro, false)::boolean,
+    coalesce(s.capacidade_por_horario, 1)::int,
     s.preco::numeric,
     s.taxa_agendamento::numeric,
     s.cor::text,
@@ -1730,7 +1794,7 @@ create or replace function public.public_get_slots_publicos(
   p_funcionario_id uuid,
   p_unidade_id uuid default null
 )
-returns table (hora_inicio text)
+returns table (hora_inicio text, vagas_restantes int, capacidade int)
 language plpgsql
 security definer
 set search_path = public
@@ -1766,14 +1830,17 @@ declare
   v_tz text;
   v_today date;
   v_cap int;
+  v_cap_horario int;
   v_diaria_count int;
+  v_is_academia boolean;
+  v_has_unidades boolean;
 begin
   if p_usuario_id is null or p_data is null or p_servico_id is null then
     raise exception 'invalid_payload';
   end if;
 
   v_uid := p_usuario_id;
-  select u.horario_inicio, u.horario_fim, u.dias_trabalho, u.intervalo_inicio, u.intervalo_fim, u.timezone
+  select u.horario_inicio, u.horario_fim, u.dias_trabalho, u.intervalo_inicio, u.intervalo_fim, u.timezone, u.tipo_negocio
   into v_base
   from public.usuarios u
   where u.id = v_uid
@@ -1796,8 +1863,9 @@ begin
     coalesce(s.buffer_depois_min, 0),
     coalesce(s.antecedencia_minutos, 120),
     365,
-    coalesce(s.dia_inteiro, false)::boolean
-  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
+    coalesce(s.dia_inteiro, false)::boolean,
+    coalesce(s.capacidade_por_horario, 1)::int
+  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro, v_cap_horario
   from public.servicos s
   where s.id = p_servico_id
     and s.usuario_id = v_uid
@@ -1810,6 +1878,9 @@ begin
   if p_data > (v_today + v_max_days) then
     raise exception 'data_muito_futura';
   end if;
+
+  v_is_academia := lower(trim(coalesce(v_base.tipo_negocio::text, ''))) = 'academia';
+  v_has_unidades := to_regclass('public.unidades') is not null;
 
   if p_funcionario_id is not null then
     select true, f.horario_inicio, f.horario_fim, f.dias_trabalho, f.intervalo_inicio, f.intervalo_fim
@@ -1932,11 +2003,87 @@ begin
     end if;
 
     return query
-    select to_char(v_sched_inicio, 'HH24:MI') as hora_inicio;
+    select to_char(v_sched_inicio, 'HH24:MI') as hora_inicio, greatest(v_cap - coalesce(v_diaria_count, 0), 0)::int as vagas_restantes, v_cap::int as capacidade;
+
     return;
   end if;
 
   v_start_min := ((v_start_min + v_step_min - 1) / v_step_min) * v_step_min;
+
+  if v_is_academia and coalesce(v_cap_horario, 1) > 1 then
+    return query
+    with candidates as (
+      select gs as start_min
+      from generate_series(v_start_min, v_end_min, v_step_min) gs
+    ),
+    without_interval as (
+      select c.start_min
+      from candidates c
+      where not (
+        v_iv_inicio_min is not null
+        and v_iv_fim_min is not null
+        and (c.start_min - v_buffer_antes) < v_iv_fim_min
+        and v_iv_inicio_min < (c.start_min + v_duracao + v_buffer_depois)
+      )
+    ),
+    free as (
+      select w.start_min
+      from without_interval w
+      where not exists (
+        select 1
+        from public.bloqueios b
+        where b.usuario_id = v_uid
+          and b.data = p_data
+          and (p_funcionario_id is null or b.funcionario_id is null or b.funcionario_id = p_funcionario_id)
+          and (not v_has_unidades or p_unidade_id is null or b.unidade_id = p_unidade_id)
+          and floor(extract(epoch from b.hora_inicio::time) / 60)::int < (w.start_min + v_duracao + v_buffer_depois)
+          and (w.start_min - v_buffer_antes) < floor(extract(epoch from b.hora_fim::time) / 60)::int
+        limit 1
+      )
+    ),
+    buckets as (
+      select gs as bucket_start
+      from generate_series(v_sched_inicio_min, v_sched_fim_min - v_step_min, v_step_min) gs
+    ),
+    bucket_used as (
+      select
+        b.bucket_start,
+        coalesce(x.used_vagas, 0)::int as used_vagas
+      from buckets b
+      left join lateral (
+        select coalesce(sum(coalesce(a.qtd_vagas, 1)), 0)::int as used_vagas
+        from public.agendamentos a
+        join public.servicos s3 on s3.id = a.servico_id and s3.usuario_id = a.usuario_id
+        where a.usuario_id = v_uid
+          and a.data = p_data
+          and a.status <> 'cancelado'
+          and a.servico_id = p_servico_id
+          and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+          and (not v_has_unidades or p_unidade_id is null or a.unidade_id = p_unidade_id)
+          and (floor(extract(epoch from a.hora_inicio::time) / 60)::int - coalesce(s3.buffer_antes_min, 0)) < (b.bucket_start + v_step_min)
+          and b.bucket_start < (floor(extract(epoch from coalesce(a.hora_fim, (a.hora_inicio::time + (coalesce(s3.duracao_minutos, 0)::text || ' minutes')::interval))::time)) / 60)::int + coalesce(s3.buffer_depois_min, 0))
+      ) x on true
+    ),
+    with_remaining as (
+      select
+        f.start_min,
+        min(greatest(coalesce(v_cap_horario, 1) - coalesce(u.used_vagas, 0), 0))::int as vagas_restantes
+      from free f
+      join buckets b
+        on b.bucket_start < (f.start_min + v_duracao + v_buffer_depois)
+        and (f.start_min - v_buffer_antes) < (b.bucket_start + v_step_min)
+      left join bucket_used u on u.bucket_start = b.bucket_start
+      group by f.start_min
+    )
+    select
+      to_char((time '00:00' + (w.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio,
+      w.vagas_restantes,
+      coalesce(v_cap_horario, 1)::int as capacidade
+    from with_remaining w
+    where w.vagas_restantes > 0
+    order by w.start_min asc;
+    return;
+  end if;
 
   if p_unidade_id is not null and to_regprocedure('public.public_get_ocupacoes(uuid,date,uuid,uuid)') is not null then
     return query
@@ -1964,7 +2111,7 @@ begin
         limit 1
       )
     )
-    select to_char((time '00:00' + (free.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio
+    select to_char((time '00:00' + (free.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio, 1::int as vagas_restantes, 1::int as capacidade
     from free
     order by free.start_min asc;
   else
@@ -1993,7 +2140,7 @@ begin
         limit 1
       )
     )
-    select to_char((time '00:00' + (free.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio
+    select to_char((time '00:00' + (free.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio, 1::int as vagas_restantes, 1::int as capacidade
     from free
     order by free.start_min asc;
   end if;
@@ -2010,7 +2157,8 @@ create or replace function public.public_create_agendamento_publico(
   p_funcionario_id uuid,
   p_unidade_id uuid default null,
   p_extras jsonb default null,
-  p_status text default 'pendente'
+  p_status text default 'pendente',
+  p_qtd_vagas int default 1
 )
 returns uuid
 language plpgsql
@@ -2051,8 +2199,20 @@ declare
   v_status text;
   v_cap int;
   v_diaria_count int;
+  v_is_academia boolean;
+  v_cap_horario int;
+  v_qtd int;
+  v_used_horario int;
+  v_min_remaining int;
+  v_lock_key bigint;
+  v_has_unidades boolean;
 begin
   if p_usuario_id is null or p_data is null or nullif(p_hora_inicio, '') is null or p_servico_id is null then
+    raise exception 'invalid_payload';
+  end if;
+
+  v_qtd := coalesce(p_qtd_vagas, 1);
+  if v_qtd < 1 or v_qtd > 200 then
     raise exception 'invalid_payload';
   end if;
 
@@ -2063,7 +2223,7 @@ begin
 
   v_uid := p_usuario_id;
 
-  select u.horario_inicio, u.horario_fim, u.dias_trabalho, u.intervalo_inicio, u.intervalo_fim, u.timezone, u.limite_agendamentos_mes
+  select u.horario_inicio, u.horario_fim, u.dias_trabalho, u.intervalo_inicio, u.intervalo_fim, u.timezone, u.limite_agendamentos_mes, u.tipo_negocio
   into v_base
   from public.usuarios u
   where u.id = v_uid
@@ -2076,6 +2236,9 @@ begin
 
   v_tz := coalesce(nullif(v_base.timezone::text, ''), 'America/Sao_Paulo');
   v_today := (now() at time zone v_tz)::date;
+
+  v_is_academia := lower(trim(coalesce(v_base.tipo_negocio::text, ''))) = 'academia';
+  v_has_unidades := to_regclass('public.unidades') is not null;
 
   if p_data < v_today then
     raise exception 'data_passada';
@@ -2109,8 +2272,9 @@ begin
     coalesce(s.buffer_depois_min, 0),
     coalesce(s.antecedencia_minutos, 120),
     365,
-    coalesce(s.dia_inteiro, false)::boolean
-  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
+    coalesce(s.dia_inteiro, false)::boolean,
+    coalesce(s.capacidade_por_horario, 1)::int
+  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro, v_cap_horario
   from public.servicos s
   where s.id = p_servico_id
     and s.usuario_id = v_uid
@@ -2159,6 +2323,7 @@ begin
   end if;
 
   if v_dia_inteiro then
+    v_qtd := 1;
     v_start_min := floor(extract(epoch from v_sched_inicio) / 60)::int;
     v_end_min := floor(extract(epoch from v_sched_fim) / 60)::int;
     v_horario_fim := to_char(v_sched_fim, 'HH24:MI');
@@ -2252,13 +2417,72 @@ begin
       end if;
     end if;
 
-    if exists (
-      select 1
-      from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id) r
-      where (v_start_min - v_buffer_antes) < r.end_min and r.start_min < (v_end_min + v_buffer_depois)
-      limit 1
-    ) then
-      raise exception 'ocupado';
+    if v_is_academia and coalesce(v_cap_horario, 1) > 1 then
+      if exists (
+        select 1
+        from public.bloqueios b
+        where b.usuario_id = v_uid
+          and b.data = p_data
+          and (p_funcionario_id is null or b.funcionario_id is null or b.funcionario_id = p_funcionario_id)
+          and (not v_has_unidades or p_unidade_id is null or b.unidade_id = p_unidade_id)
+          and floor(extract(epoch from b.hora_inicio::time) / 60)::int < (v_end_min + v_buffer_depois)
+          and (v_start_min - v_buffer_antes) < floor(extract(epoch from b.hora_fim::time) / 60)::int
+        limit 1
+      ) then
+        raise exception 'ocupado';
+      end if;
+
+      if v_qtd > v_cap_horario then
+        raise exception 'capacidade_esgotada';
+      end if;
+
+      v_lock_key := hashtext(v_uid::text || '|' || p_data::text || '|' || p_servico_id::text || '|' || coalesce(p_funcionario_id::text, '') || '|' || coalesce(p_unidade_id::text, ''))::bigint;
+      perform pg_advisory_xact_lock(v_lock_key);
+
+      with buckets as (
+        select gs as bucket_start
+        from generate_series(
+          ((greatest(v_start_min - v_buffer_antes, 0) / v_step_min) * v_step_min),
+          (((v_end_min + v_buffer_depois - 1) / v_step_min) * v_step_min),
+          v_step_min
+        ) gs
+      ),
+      bucket_used as (
+        select
+          b.bucket_start,
+          coalesce(x.used_vagas, 0)::int as used_vagas
+        from buckets b
+        left join lateral (
+          select coalesce(sum(coalesce(a.qtd_vagas, 1)), 0)::int as used_vagas
+          from public.agendamentos a
+          join public.servicos s3 on s3.id = a.servico_id and s3.usuario_id = a.usuario_id
+          where a.usuario_id = v_uid
+            and a.data = p_data
+            and a.status <> 'cancelado'
+            and a.servico_id = p_servico_id
+            and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+            and (not v_has_unidades or p_unidade_id is null or a.unidade_id = p_unidade_id)
+            and (floor(extract(epoch from a.hora_inicio::time) / 60)::int - coalesce(s3.buffer_antes_min, 0)) < (b.bucket_start + v_step_min)
+            and b.bucket_start < (floor(extract(epoch from coalesce(a.hora_fim, (a.hora_inicio::time + (coalesce(s3.duracao_minutos, 0)::text || ' minutes')::interval))::time)) / 60)::int + coalesce(s3.buffer_depois_min, 0))
+        ) x on true
+      )
+      select min(greatest(coalesce(v_cap_horario, 1) - coalesce(u.used_vagas, 0), 0))::int
+      into v_min_remaining
+      from bucket_used u;
+
+      if coalesce(v_min_remaining, 0) < v_qtd then
+        raise exception 'capacidade_esgotada';
+      end if;
+    else
+      v_qtd := 1;
+      if exists (
+        select 1
+        from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id) r
+        where (v_start_min - v_buffer_antes) < r.end_min and r.start_min < (v_end_min + v_buffer_depois)
+        limit 1
+      ) then
+        raise exception 'ocupado';
+      end if;
     end if;
   end if;
 
@@ -2270,6 +2494,7 @@ begin
     cliente_nome,
     cliente_telefone,
     extras,
+    qtd_vagas,
     data,
     hora_inicio,
     hora_fim,
@@ -2283,6 +2508,7 @@ begin
     nullif(p_cliente_nome, ''),
     nullif(p_cliente_telefone, ''),
     p_extras,
+    v_qtd,
     p_data,
     case when v_dia_inteiro then v_sched_inicio else p_hora_inicio::time end,
     case when v_dia_inteiro then v_sched_fim else v_horario_fim::time end,
@@ -2298,19 +2524,19 @@ revoke all on function public.public_get_usuario_publico(text, text) from public
 revoke all on function public.public_get_servicos_publicos(uuid) from public;
 revoke all on function public.public_get_funcionarios_publicos(uuid, uuid) from public;
 revoke all on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) from public;
-revoke all on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) from public;
+revoke all on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text, int) from public;
 
 grant execute on function public.public_get_usuario_publico(text, text) to anon;
 grant execute on function public.public_get_servicos_publicos(uuid) to anon;
 grant execute on function public.public_get_funcionarios_publicos(uuid, uuid) to anon;
 grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) to anon;
-grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) to anon;
+grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text, int) to anon;
 
 grant execute on function public.public_get_usuario_publico(text, text) to authenticated;
 grant execute on function public.public_get_servicos_publicos(uuid) to authenticated;
 grant execute on function public.public_get_funcionarios_publicos(uuid, uuid) to authenticated;
 grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) to authenticated;
-grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) to authenticated;
+grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text, int) to authenticated;
 
 notify pgrst, 'reload schema';`
   }, [])
@@ -2458,6 +2684,37 @@ for each row execute function public.servicos_enforce_limite_by_plano();`
     return `alter table public.usuarios add column if not exists tipo_negocio text;
 
 alter table public.servicos add column if not exists taxa_agendamento numeric not null default 0;
+alter table public.servicos add column if not exists capacidade_por_horario int not null default 1;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'servicos_capacidade_por_horario_chk'
+      and conrelid = 'public.servicos'::regclass
+  ) then
+    alter table public.servicos
+      add constraint servicos_capacidade_por_horario_chk check (capacidade_por_horario between 1 and 200);
+  end if;
+end;
+$$;
+
+alter table public.agendamentos add column if not exists qtd_vagas int not null default 1;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'agendamentos_qtd_vagas_chk'
+      and conrelid = 'public.agendamentos'::regclass
+  ) then
+    alter table public.agendamentos
+      add constraint agendamentos_qtd_vagas_chk check (qtd_vagas between 1 and 200);
+  end if;
+end;
+$$;
 
 create table if not exists public.taxa_agendamento_pagamentos (
   id uuid primary key default gen_random_uuid(),
@@ -2802,7 +3059,17 @@ begin
   return query
   select
     (floor(extract(epoch from a.hora_inicio::time) / 60)::int - coalesce(s.buffer_antes_min, 0)::int) as start_min,
-    (floor(extract(epoch from coalesce(a.hora_fim, a.hora_inicio)::time) / 60)::int + coalesce(s.buffer_depois_min, 0)::int) as end_min
+    (
+      floor(
+        extract(
+          epoch from coalesce(
+            a.hora_fim,
+            ((a.hora_inicio::time + (coalesce(s.duracao_minutos, 0)::text || ' minutes')::interval))::time
+          )
+        ) / 60
+      )::int
+      + coalesce(s.buffer_depois_min, 0)::int
+    ) as end_min
   from public.agendamentos a
   left join public.servicos s on s.id = a.servico_id and s.usuario_id = a.usuario_id
   where a.usuario_id = p_usuario_id
@@ -2834,7 +3101,7 @@ create or replace function public.public_get_slots_publicos(
   p_funcionario_id uuid,
   p_unidade_id uuid default null
 )
-returns table (hora_inicio text)
+returns table (hora_inicio text, vagas_restantes int, capacidade int)
 language plpgsql
 security definer
 set search_path = public
@@ -2871,7 +3138,9 @@ declare
   v_today date;
   v_unidade_ok boolean;
   v_cap int;
+  v_cap_horario int;
   v_diaria_count int;
+  v_is_academia boolean;
 begin
   if p_usuario_id is null or p_data is null or p_servico_id is null then
     raise exception 'invalid_payload';
@@ -2896,7 +3165,8 @@ begin
     coalesce(un.dias_trabalho, u.dias_trabalho) as dias_trabalho,
     coalesce(un.intervalo_inicio::text, u.intervalo_inicio::text) as intervalo_inicio,
     coalesce(un.intervalo_fim::text, u.intervalo_fim::text) as intervalo_fim,
-    coalesce(un.timezone::text, u.timezone::text) as timezone
+    coalesce(un.timezone::text, u.timezone::text) as timezone,
+    u.tipo_negocio::text as tipo_negocio
   into v_base
   from public.usuarios u
   left join public.unidades un
@@ -2923,8 +3193,9 @@ begin
     coalesce(s.buffer_depois_min, 0)::int,
     coalesce(s.antecedencia_minutos, 120)::int,
     365::int,
-    coalesce(s.dia_inteiro, false)::boolean
-  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
+    coalesce(s.dia_inteiro, false)::boolean,
+    coalesce(s.capacidade_por_horario, 1)::int
+  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro, v_cap_horario
   from public.servicos s
   where s.id = p_servico_id
     and s.usuario_id = v_uid
@@ -2937,6 +3208,8 @@ begin
   if p_data > (v_today + v_max_days) then
     raise exception 'data_muito_futura';
   end if;
+
+  v_is_academia := lower(trim(coalesce(v_base.tipo_negocio::text, ''))) = 'academia';
 
   if p_funcionario_id is not null then
     select true, f.horario_inicio, f.horario_fim, f.dias_trabalho, f.intervalo_inicio, f.intervalo_fim
@@ -3058,7 +3331,7 @@ begin
     end if;
 
     return query
-    select to_char(v_sched_inicio, 'HH24:MI') as hora_inicio;
+    select to_char(v_sched_inicio, 'HH24:MI') as hora_inicio, greatest(v_cap - coalesce(v_diaria_count, 0), 0)::int as vagas_restantes, v_cap::int as capacidade;
     return;
   end if;
 
@@ -3068,6 +3341,91 @@ begin
   end if;
 
   v_start_min := ((v_start_min + v_step_min - 1) / v_step_min) * v_step_min;
+
+  if v_is_academia and coalesce(v_cap_horario, 1) > 1 then
+    return query
+    with candidates as (
+      select gs as start_min
+      from generate_series(v_start_min, v_end_min, v_step_min) gs
+    ),
+    without_interval as (
+      select c.start_min
+      from candidates c
+      where not (
+        v_iv_inicio_min is not null
+        and v_iv_fim_min is not null
+        and (c.start_min - v_buffer_antes) < v_iv_fim_min
+        and v_iv_inicio_min < (c.start_min + v_duracao + v_buffer_depois)
+      )
+    ),
+    free as (
+      select w.start_min
+      from without_interval w
+      where not exists (
+        select 1
+        from public.bloqueios b
+        where b.usuario_id = v_uid
+          and b.data = p_data
+          and (p_unidade_id is null and b.unidade_id is null or p_unidade_id is not null and b.unidade_id = p_unidade_id)
+          and (p_funcionario_id is null or b.funcionario_id is null or b.funcionario_id = p_funcionario_id)
+          and floor(extract(epoch from b.hora_inicio::time) / 60)::int < (w.start_min + v_duracao + v_buffer_depois)
+          and (w.start_min - v_buffer_antes) < floor(extract(epoch from b.hora_fim::time) / 60)::int
+        limit 1
+      )
+    ),
+    bucket_used as (
+      select
+        f.start_min,
+        b.bucket_start,
+        (
+          select coalesce(sum(coalesce(a.qtd_vagas, 1)), 0)::int
+          from public.agendamentos a
+          join public.servicos s3 on s3.id = a.servico_id and s3.usuario_id = a.usuario_id
+          where a.usuario_id = v_uid
+            and a.data = p_data
+            and a.status <> 'cancelado'
+            and a.servico_id = p_servico_id
+            and (p_unidade_id is null and a.unidade_id is null or p_unidade_id is not null and a.unidade_id = p_unidade_id)
+            and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+            and (floor(extract(epoch from a.hora_inicio::time) / 60)::int - coalesce(s3.buffer_antes_min, 0)) < (b.bucket_start + v_step_min)
+            and b.bucket_start < (
+              floor(
+                extract(
+                  epoch from coalesce(
+                    a.hora_fim,
+                    ((a.hora_inicio::time + (coalesce(s3.duracao_minutos, 0)::text || ' minutes')::interval))::time
+                  )
+                ) / 60
+              )::int
+              + coalesce(s3.buffer_depois_min, 0)
+            )
+        ) as used_vagas
+      from free f
+      join lateral (
+        select gs as bucket_start
+        from generate_series(
+          (((f.start_min - v_buffer_antes) / v_step_min) * v_step_min),
+          (((f.start_min + v_duracao + v_buffer_depois - 1) / v_step_min) * v_step_min),
+          v_step_min
+        ) gs
+      ) b on true
+    ),
+    min_remaining as (
+      select
+        start_min,
+        min(greatest(coalesce(v_cap_horario, 1) - coalesce(used_vagas, 0), 0))::int as vagas_restantes
+      from bucket_used
+      group by start_min
+    )
+    select
+      to_char((time '00:00' + (m.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio,
+      m.vagas_restantes,
+      coalesce(v_cap_horario, 1)::int as capacidade
+    from min_remaining m
+    where m.vagas_restantes > 0
+    order by m.start_min asc;
+    return;
+  end if;
 
   return query
   with candidates as (
@@ -3094,7 +3452,7 @@ begin
       limit 1
     )
   )
-  select to_char((time '00:00' + (free.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio
+  select to_char((time '00:00' + (free.start_min::text || ' minutes')::interval)::time, 'HH24:MI') as hora_inicio, 1::int as vagas_restantes, 1::int as capacidade
   from free
   order by free.start_min asc;
 end;
@@ -3102,6 +3460,11 @@ $$;
 
 drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid);
 drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, jsonb);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, jsonb, text);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text);
+drop function if exists public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text, int);
 
 create or replace function public.public_create_agendamento_publico(
   p_usuario_id uuid,
@@ -3113,7 +3476,8 @@ create or replace function public.public_create_agendamento_publico(
   p_funcionario_id uuid,
   p_unidade_id uuid default null,
   p_extras jsonb default null,
-  p_status text default 'pendente'
+  p_status text default 'pendente',
+  p_qtd_vagas int default 1
 )
 returns uuid
 language plpgsql
@@ -3155,8 +3519,22 @@ declare
   v_status text;
   v_cap int;
   v_diaria_count int;
+  v_is_academia boolean;
+  v_cap_horario int;
+  v_qtd int;
+  v_used_horario int;
+  v_lock_key bigint;
+  v_step_min int := 30;
+  v_bucket_start int;
+  v_bucket_end int;
+  v_min_remaining int;
 begin
   if p_usuario_id is null or p_data is null or nullif(p_hora_inicio, '') is null or p_servico_id is null then
+    raise exception 'invalid_payload';
+  end if;
+
+  v_qtd := coalesce(p_qtd_vagas, 1);
+  if v_qtd < 1 or v_qtd > 200 then
     raise exception 'invalid_payload';
   end if;
 
@@ -3174,7 +3552,8 @@ begin
     coalesce(un.intervalo_inicio::text, u.intervalo_inicio::text) as intervalo_inicio,
     coalesce(un.intervalo_fim::text, u.intervalo_fim::text) as intervalo_fim,
     coalesce(un.timezone::text, u.timezone::text) as timezone,
-    u.limite_agendamentos_mes as limite_agendamentos_mes
+    u.limite_agendamentos_mes as limite_agendamentos_mes,
+    u.tipo_negocio::text as tipo_negocio
   into v_base
   from public.usuarios u
   left join public.unidades un
@@ -3214,8 +3593,9 @@ begin
     coalesce(s.buffer_depois_min, 0)::int,
     coalesce(s.antecedencia_minutos, 120)::int,
     365::int,
-    coalesce(s.dia_inteiro, false)::boolean
-  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro
+    coalesce(s.dia_inteiro, false)::boolean,
+    coalesce(s.capacidade_por_horario, 1)::int
+  into v_duracao, v_buffer_antes, v_buffer_depois, v_min_lead_min, v_max_days, v_dia_inteiro, v_cap_horario
   from public.servicos s
   where s.id = p_servico_id
     and s.usuario_id = v_uid
@@ -3228,6 +3608,8 @@ begin
   if p_data > (v_today + v_max_days) then
     raise exception 'data_muito_futura';
   end if;
+
+  v_is_academia := lower(trim(coalesce(v_base.tipo_negocio::text, ''))) = 'academia';
 
   if p_funcionario_id is not null then
     select true, f.horario_inicio, f.horario_fim, f.dias_trabalho, f.intervalo_inicio, f.intervalo_fim
@@ -3342,6 +3724,10 @@ begin
     v_end_min := v_start_min + v_duracao;
     v_horario_fim := to_char((time '00:00' + (v_end_min::text || ' minutes')::interval)::time, 'HH24:MI');
 
+    if (v_start_min % v_step_min) <> 0 then
+      raise exception 'hora_invalida';
+    end if;
+
     if p_data = v_today then
       v_now_min := floor(extract(epoch from (now() at time zone v_tz)::time) / 60)::int;
       if v_start_min < (v_now_min + v_min_lead_min) then
@@ -3359,13 +3745,76 @@ begin
       end if;
     end if;
 
-    if exists (
-      select 1
-      from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id, p_unidade_id) r
-      where (v_start_min - v_buffer_antes) < r.end_min and r.start_min < (v_end_min + v_buffer_depois)
-      limit 1
-    ) then
-      raise exception 'ocupado';
+    if v_is_academia and coalesce(v_cap_horario, 1) > 1 then
+      if exists (
+        select 1
+        from public.bloqueios b
+        where b.usuario_id = v_uid
+          and b.data = p_data
+          and (p_unidade_id is null and b.unidade_id is null or p_unidade_id is not null and b.unidade_id = p_unidade_id)
+          and (p_funcionario_id is null or b.funcionario_id is null or b.funcionario_id = p_funcionario_id)
+          and floor(extract(epoch from b.hora_inicio::time) / 60)::int < (v_end_min + v_buffer_depois)
+          and (v_start_min - v_buffer_antes) < floor(extract(epoch from b.hora_fim::time) / 60)::int
+        limit 1
+      ) then
+        raise exception 'ocupado';
+      end if;
+
+      if v_qtd > v_cap_horario then
+        raise exception 'capacidade_esgotada';
+      end if;
+
+      v_lock_key := hashtext(v_uid::text || '|' || p_data::text || '|' || p_servico_id::text || '|' || coalesce(p_funcionario_id::text, '') || '|' || coalesce(p_unidade_id::text, ''))::bigint;
+      perform pg_advisory_xact_lock(v_lock_key);
+
+      v_bucket_start := (((v_start_min - v_buffer_antes) / v_step_min) * v_step_min);
+      v_bucket_end := (((v_end_min + v_buffer_depois - 1) / v_step_min) * v_step_min);
+
+      with bucket_used as (
+        select
+          b.bucket_start,
+          (
+            select coalesce(sum(coalesce(a.qtd_vagas, 1)), 0)::int
+            from public.agendamentos a
+            join public.servicos s3 on s3.id = a.servico_id and s3.usuario_id = a.usuario_id
+            where a.usuario_id = v_uid
+              and a.data = p_data
+              and a.status <> 'cancelado'
+              and a.servico_id = p_servico_id
+              and (p_unidade_id is null and a.unidade_id is null or p_unidade_id is not null and a.unidade_id = p_unidade_id)
+              and (p_funcionario_id is null or a.funcionario_id is null or a.funcionario_id = p_funcionario_id)
+              and (floor(extract(epoch from a.hora_inicio::time) / 60)::int - coalesce(s3.buffer_antes_min, 0)) < (b.bucket_start + v_step_min)
+              and b.bucket_start < (
+                floor(
+                  extract(
+                    epoch from coalesce(
+                      a.hora_fim,
+                      ((a.hora_inicio::time + (coalesce(s3.duracao_minutos, 0)::text || ' minutes')::interval))::time
+                    )
+                  ) / 60
+                )::int
+                + coalesce(s3.buffer_depois_min, 0)
+              )
+          ) as used_vagas
+        from generate_series(v_bucket_start, v_bucket_end, v_step_min) b(bucket_start)
+      )
+      select min(greatest(coalesce(v_cap_horario, 1) - coalesce(used_vagas, 0), 0))::int
+      into v_min_remaining
+      from bucket_used;
+
+      if coalesce(v_min_remaining, 0) < v_qtd then
+        raise exception 'capacidade_esgotada';
+      end if;
+    else
+      v_qtd := 1;
+      if exists (
+        select 1
+        from public.public_get_ocupacoes(v_uid, p_data, p_funcionario_id, p_unidade_id) r
+        where (v_start_min - v_buffer_antes) < r.end_min and r.start_min < (v_end_min + v_buffer_depois)
+        limit 1
+      ) then
+        raise exception 'ocupado';
+      end if;
     end if;
   end if;
 
@@ -3392,6 +3841,7 @@ begin
     cliente_nome,
     cliente_telefone,
     extras,
+    qtd_vagas,
     data,
     hora_inicio,
     hora_fim,
@@ -3405,6 +3855,7 @@ begin
     nullif(p_cliente_nome, ''),
     nullif(p_cliente_telefone, ''),
     p_extras,
+    v_qtd,
     p_data,
     case when v_dia_inteiro then v_sched_inicio else p_hora_inicio::time end,
     case when v_dia_inteiro then v_sched_fim else v_horario_fim::time end,
@@ -3420,19 +3871,19 @@ revoke all on function public.public_get_usuario_publico(text, text) from public
 revoke all on function public.public_get_funcionarios_publicos(uuid, uuid) from public;
 revoke all on function public.public_get_ocupacoes(uuid, date, uuid, uuid) from public;
 revoke all on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) from public;
-revoke all on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) from public;
+revoke all on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text, int) from public;
 
 grant execute on function public.public_get_usuario_publico(text, text) to anon;
 grant execute on function public.public_get_funcionarios_publicos(uuid, uuid) to anon;
 grant execute on function public.public_get_ocupacoes(uuid, date, uuid, uuid) to anon;
 grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) to anon;
-grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) to anon;
+grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text, int) to anon;
 
 grant execute on function public.public_get_usuario_publico(text, text) to authenticated;
 grant execute on function public.public_get_funcionarios_publicos(uuid, uuid) to authenticated;
 grant execute on function public.public_get_ocupacoes(uuid, date, uuid, uuid) to authenticated;
 grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uuid, uuid) to authenticated;
-grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text) to authenticated;`
+grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text, int) to authenticated;`
   }, [])
 
   const sqlWhatsappAutomacao = useMemo(() => {

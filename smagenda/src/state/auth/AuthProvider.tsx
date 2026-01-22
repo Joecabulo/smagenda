@@ -40,6 +40,16 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
   const freeTrialConsumido = row.free_trial_consumido === true
   const tipoNegocio = typeof row.tipo_negocio === 'string' ? row.tipo_negocio : null
   const temaProspectorHabilitado = row.tema_prospector_habilitado === true
+  const temaDarkHabilitado = (() => {
+    if (row.tema_dark_habilitado === true) return true
+    try {
+      const v = window.localStorage.getItem(`smagenda:theme:dark:${userId}`)
+      if (!v) return false
+      return v === '1' || v.toLowerCase() === 'true'
+    } catch {
+      return false
+    }
+  })()
 
   return {
     id: userId,
@@ -66,6 +76,7 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
     data_pagamento_fatura: typeof row.data_pagamento_fatura === 'string' ? row.data_pagamento_fatura : null,
     free_trial_consumido: freeTrialConsumido,
     tema_prospector_habilitado: temaProspectorHabilitado,
+    tema_dark_habilitado: temaDarkHabilitado,
     ativo: typeof row.ativo === 'boolean' ? row.ativo : true,
   }
 }

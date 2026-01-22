@@ -1,6 +1,8 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useMemo, useState } from 'react'
 import { useAuth } from '../../state/auth/useAuth'
 import { getOptionalEnv } from '../../lib/env'
+import { supabase } from '../../lib/supabase'
 import { Button } from '../ui/Button'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -12,6 +14,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isFuncionarioAdmin ? masterUsuario : null
   const temaProspector = usuario?.tema_prospector_habilitado === true
+  const [temaTick, setTemaTick] = useState(0)
+  const temaDark = useMemo(() => {
+    void temaTick
+    if (!usuario?.id) return false
+    const fromProfile = usuario.tema_dark_habilitado === true
+    let fromStorage = false
+    try {
+      const v = window.localStorage.getItem(`smagenda:theme:dark:${usuario.id}`)
+      fromStorage = Boolean(v && (v === '1' || v.toLowerCase() === 'true'))
+    } catch {
+      fromStorage = false
+    }
+    return fromProfile || fromStorage
+  }, [usuario?.id, usuario?.tema_dark_habilitado, temaTick])
 
   const plano = String(usuario?.plano ?? '').trim().toLowerCase()
   const isProPlus = plano === 'pro' || plano === 'team' || plano === 'enterprise'
@@ -47,7 +63,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         ]
 
   return (
-    <div className={['min-h-screen bg-slate-50', temaProspector ? 'theme-prospector' : ''].filter(Boolean).join(' ')}>
+    <div className={['min-h-screen bg-slate-50', temaProspector ? 'theme-prospector' : temaDark ? 'theme-dark' : ''].filter(Boolean).join(' ')}>
       <div className="mx-auto max-w-6xl px-4 py-6">
         <div className="mb-6 flex items-center justify-between">
           <div>
@@ -80,6 +96,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 }}
               >
                 Voltar ao admin
+              </Button>
+            ) : null}
+            {usuario ? (
+              <Button
+                variant="secondary"
+                onClick={async () => {
+                  const next = !temaDark
+                  setTemaTick((v) => v + 1)
+                  try {
+                    window.localStorage.setItem(`smagenda:theme:dark:${usuario.id}`, next ? '1' : '0')
+                  } catch {
+                    void 0
+                  }
+                  await supabase.from('usuarios').update({ tema_dark_habilitado: next }).eq('id', usuario.id)
+                }}
+              >
+                {temaDark ? 'Claro' : 'Dark'}
               </Button>
             ) : null}
             <Button variant="secondary" onClick={() => signOut()}>

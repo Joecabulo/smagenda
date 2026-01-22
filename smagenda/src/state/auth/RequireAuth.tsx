@@ -100,6 +100,7 @@ export function RequireAuth({ children, requiredKind, allowFuncionarioAdmin }: P
 
   const inAdmin = location.pathname.startsWith('/admin')
   const inPagamento = location.pathname === '/pagamento'
+  const inOnboarding = location.pathname.startsWith('/onboarding')
   const effective = inAdmin ? principal : (appPrincipal ?? principal)
 
   if (principal.kind === 'funcionario' && masterBlocked) {
@@ -181,6 +182,16 @@ export function RequireAuth({ children, requiredKind, allowFuncionarioAdmin }: P
           </div>
         </div>
       )
+    }
+
+    if (!inAdmin && !inPagamento && !inOnboarding) {
+      const needTipo = !String(principal.profile.tipo_negocio ?? '').trim()
+      const needHorario = !String(principal.profile.horario_inicio ?? '').trim() || !String(principal.profile.horario_fim ?? '').trim()
+      const dias = principal.profile.dias_trabalho
+      const needDias = !Array.isArray(dias) || dias.length === 0
+      if (needTipo || needHorario || needDias) {
+        return <Navigate to="/onboarding" replace />
+      }
     }
   }
 

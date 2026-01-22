@@ -18,6 +18,7 @@ export function CadastroPage() {
   const [nomeCompleto, setNomeCompleto] = useState('')
   const [nomeNegocio, setNomeNegocio] = useState('')
   const [telefone, setTelefone] = useState('')
+  const [cupomConvite, setCupomConvite] = useState('')
   const [email, setEmail] = useState('')
   const [senha, setSenha] = useState('')
   const [slug, setSlug] = useState('')
@@ -28,6 +29,10 @@ export function CadastroPage() {
   const [diagnostico, setDiagnostico] = useState<string | null>(null)
 
   const derivedSlug = useMemo(() => (slug ? slugify(slug) : slugify(nomeNegocio)), [slug, nomeNegocio])
+  const showDiagnostico = useMemo(() => {
+    if (!import.meta.env.DEV) return false
+    return new URLSearchParams(window.location.search).get('debug') === '1'
+  }, [])
   const canSubmit = useMemo(
     () =>
       nomeCompleto.trim() &&
@@ -57,6 +62,7 @@ export function CadastroPage() {
     const cleanNomeCompleto = nomeCompleto.trim()
     const cleanNomeNegocio = nomeNegocio.trim()
     const cleanTelefone = telefone.trim() || null
+    const cleanCupomConvite = cupomConvite.trim() || null
     const acceptedAt = new Date().toISOString()
     const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : ''
 
@@ -130,6 +136,7 @@ export function CadastroPage() {
             nome_completo: cleanNomeCompleto,
             nome_negocio: cleanNomeNegocio,
             telefone: cleanTelefone,
+            cupom_convite: cleanCupomConvite,
             slug: derivedSlug,
             termos_versao: TERMS_VERSION,
             privacidade_versao: PRIVACY_VERSION,
@@ -303,6 +310,7 @@ export function CadastroPage() {
             <Input label="Nome completo" value={nomeCompleto} onChange={(e) => setNomeCompleto(e.target.value)} />
             <Input label="Nome do negócio" value={nomeNegocio} onChange={(e) => setNomeNegocio(e.target.value)} />
             <Input label="Telefone (com WhatsApp)" value={telefone} onChange={(e) => setTelefone(e.target.value)} />
+            <Input label="Cupom de convite" value={cupomConvite} onChange={(e) => setCupomConvite(e.target.value)} />
             <Input label="Email" value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email" />
             <div className="space-y-1">
               <Input
@@ -339,7 +347,7 @@ export function CadastroPage() {
             </label>
 
             {info ? <div className="text-sm text-emerald-700">{info}</div> : null}
-            {diagnostico ? <div className="text-xs text-slate-600">{diagnostico}</div> : null}
+            {showDiagnostico && diagnostico ? <div className="text-xs text-slate-600">{diagnostico}</div> : null}
             {error ? <div className="text-sm text-rose-600">{error}</div> : null}
 
             <Button type="submit" fullWidth disabled={!canSubmit || submitting}>
