@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { supabase } from '../../lib/supabase'
+import { checkJwtProject, supabase, supabaseEnv, supabasePublicUrl } from '../../lib/supabase'
 import type { FuncionarioProfile, Principal, SuperAdminProfile, UsuarioProfile } from './types'
 import { AuthContext, type AuthState, type Impersonation } from './AuthContext'
 
@@ -16,6 +16,11 @@ function deriveSlug(base: string) {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-+)|(-+$)/g, '')
   return slug ? slug : null
+}
+
+function isInvalidRefreshTokenMessage(message: string) {
+  const m = message.toLowerCase()
+  return m.includes('invalid refresh token') || m.includes('refresh token not found')
 }
 
 function toUsuarioProfile(row: Record<string, unknown>, userId: string): UsuarioProfile {
@@ -58,6 +63,7 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
     limite_funcionarios: typeof row.limite_funcionarios === 'number' ? row.limite_funcionarios : null,
     status_pagamento: statusPagamento,
     data_vencimento: typeof row.data_vencimento === 'string' ? row.data_vencimento : null,
+    data_pagamento_fatura: typeof row.data_pagamento_fatura === 'string' ? row.data_pagamento_fatura : null,
     free_trial_consumido: freeTrialConsumido,
     tema_prospector_habilitado: temaProspectorHabilitado,
     ativo: typeof row.ativo === 'boolean' ? row.ativo : true,
@@ -156,10 +162,62 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [impersonatedUsuario, setImpersonatedUsuario] = useState<UsuarioProfile | null>(null)
 
   const refresh = useCallback(async () => {
-    const { data } = await supabase.auth.getSession()
-    setSession(data.session)
-    if (data.session?.user?.id) {
-      const next = await resolvePrincipal(data.session.user.id)
+    const { data, error } = await supabase.auth.getSession()
+    if (error && isInvalidRefreshTokenMessage(error.message)) {
+      await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined)
+      setSession(null)
+      setPrincipal(null)
+      setImpersonation(null)
+      setImpersonatedUsuario(null)
+      try {
+        window.localStorage.removeItem('smagenda:impersonation')
+      } catch {
+        return null
+      }
+      return null
+    }
+
+    let nextSession = data.session
+    const now = Math.floor(Date.now() / 1000)
+    const expiresAt = nextSession?.expires_at ?? null
+    if (nextSession && expiresAt && expiresAt <= now + 30) {
+      const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession()
+      if (refreshErr && isInvalidRefreshTokenMessage(refreshErr.message)) {
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined)
+        setSession(null)
+        setPrincipal(null)
+        setImpersonation(null)
+        setImpersonatedUsuario(null)
+        try {
+          window.localStorage.removeItem('smagenda:impersonation')
+        } catch {
+          return null
+        }
+        return null
+      }
+      if (refreshed.session) nextSession = refreshed.session
+    }
+
+    if (nextSession?.access_token && supabaseEnv.ok) {
+      const pj = checkJwtProject(nextSession.access_token, supabasePublicUrl)
+      if (!pj.ok) {
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined)
+        setSession(null)
+        setPrincipal(null)
+        setImpersonation(null)
+        setImpersonatedUsuario(null)
+        try {
+          window.localStorage.removeItem('smagenda:impersonation')
+        } catch {
+          return null
+        }
+        return null
+      }
+    }
+
+    setSession(nextSession)
+    if (nextSession?.user?.id) {
+      const next = await resolvePrincipal(nextSession.user.id)
       setPrincipal(next)
       return next
     } else {
@@ -247,6 +305,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .finally(() => setLoading(false))
 
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (nextSession?.access_token && supabaseEnv.ok) {
+        const pj = checkJwtProject(nextSession.access_token, supabasePublicUrl)
+        if (!pj.ok) {
+          void supabase.auth.signOut({ scope: 'local' }).catch(() => undefined)
+          setSession(null)
+          setPrincipal(null)
+          setImpersonation(null)
+          setImpersonatedUsuario(null)
+          try {
+            window.localStorage.removeItem('smagenda:impersonation')
+          } catch {
+            return
+          }
+          return
+        }
+      }
+
       setSession(nextSession)
       if (!nextSession?.user?.id) {
         setPrincipal(null)

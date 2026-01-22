@@ -9,18 +9,18 @@ function cleanEnvString(value: string) {
     .replace(/^['"`\s]+|['"`\s]+$/g, '')
 }
 
-const supabaseUrl = supabaseEnv.ok ? cleanEnvString(supabaseEnv.values.VITE_SUPABASE_URL).replace(/\/+$/g, '') : 'http://localhost'
-const supabaseAnonKey = supabaseEnv.ok ? cleanEnvString(supabaseEnv.values.VITE_SUPABASE_ANON_KEY) : 'missing'
+export const supabasePublicUrl = supabaseEnv.ok ? cleanEnvString(supabaseEnv.values.VITE_SUPABASE_URL).replace(/\/+$/g, '') : 'http://localhost'
+export const supabasePublicAnonKey = supabaseEnv.ok ? cleanEnvString(supabaseEnv.values.VITE_SUPABASE_ANON_KEY) : 'missing'
 
 const fetchWithApiKey: typeof fetch = (input, init) => {
   const headers = new Headers(input instanceof Request ? input.headers : undefined)
   const initHeaders = new Headers(init?.headers ?? undefined)
   initHeaders.forEach((value, key) => headers.set(key, value))
-  if (!headers.has('apikey')) headers.set('apikey', supabaseAnonKey)
+  if (!headers.has('apikey')) headers.set('apikey', supabasePublicAnonKey)
   return fetch(input, { ...(init ?? {}), headers })
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase = createClient(supabasePublicUrl, supabasePublicAnonKey, {
   global: {
     fetch: fetchWithApiKey,
   },
