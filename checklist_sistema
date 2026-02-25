@@ -1,8 +1,13 @@
-[DATA/HORA] - [TIPO: Backup/Versionamento]
-Descrição: Commit e push das alterações atuais para o repositório remoto (GitHub), conforme solicitado pelo usuário após falha persistente no teste.
-Arquivos Principais:
-- supabase/functions/whatsapp/index.ts (Lógica de Inbound/Agendar)
-- checklist_sistema (Histórico de alterações)
-- Vários componentes React (Ajustes de imports/tipos)
-Ação Requerida: Verificar se o push foi concluído com sucesso.
+
+[DATA/HORA] - [TIPO: Implementação/Correção]
+Descrição: Realizado deploy da Edge Function 'whatsapp' com sucesso.
+Impacto: Correção de erro 401 no Webhook e aplicação da lógica de processamento de mensagens 'Agendar'.
+Testes Realizados: Teste de chamada direta ao webhook via script retornou sucesso (200 OK) e payload processado corretamente.
+Dados Utilizados: Token de acesso Supabase fornecido pelo usuário.
 Responsável: Assistente.
+Próximos Passos: Validar funcionalidade completa do agendamento com dados reais.
+
+[DATA/HORA] - [TIPO: Diagnóstico]
+Descrição: Verificado erro 401 anterior causado por versão desatualizada da função no servidor.
+Ação: Deploy atualizou a função para versão compatível com autenticação via API Key.
+Resultado: Webhook agora aceita requisições autenticadas corretamente.
