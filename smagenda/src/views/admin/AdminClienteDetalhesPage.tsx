@@ -18,6 +18,7 @@ type Cliente = {
   plano: string
   status_pagamento: string
   ativo: boolean
+  bot_ativo?: boolean
   limite_funcionarios: number | null
   limite_agendamentos_mes?: number | null
 }
@@ -113,6 +114,7 @@ export function AdminClienteDetalhesPage() {
   const [plano, setPlano] = useState('')
   const [statusPagamento, setStatusPagamento] = useState('')
   const [ativo, setAtivo] = useState(true)
+  const [botAtivo, setBotAtivo] = useState(true)
   const [limiteFuncionarios, setLimiteFuncionarios] = useState('')
   const [limiteAgendamentosMes, setLimiteAgendamentosMes] = useState('')
   const [creatingFuncionario, setCreatingFuncionario] = useState(false)
@@ -154,7 +156,7 @@ export function AdminClienteDetalhesPage() {
 
       const { data, error: err } = await supabase
         .from('usuarios')
-        .select('id,nome_completo,nome_negocio,slug,email,telefone,plano,status_pagamento,ativo,limite_funcionarios,limite_agendamentos_mes')
+        .select('id,nome_completo,nome_negocio,slug,email,telefone,plano,status_pagamento,ativo,limite_funcionarios,limite_agendamentos_mes,bot_ativo')
         .eq('id', id)
         .maybeSingle()
       if (err) {
@@ -169,6 +171,7 @@ export function AdminClienteDetalhesPage() {
         setPlano(normalizedPlano)
         setStatusPagamento(next.status_pagamento)
         setAtivo(next.ativo)
+        setBotAtivo(next.bot_ativo !== false) // default true
         setLimiteFuncionarios(next.limite_funcionarios === null ? '' : String(next.limite_funcionarios))
         setLimiteAgendamentosMes(next.limite_agendamentos_mes === null || typeof next.limite_agendamentos_mes !== 'number' ? '' : String(next.limite_agendamentos_mes))
 
@@ -218,7 +221,7 @@ export function AdminClienteDetalhesPage() {
 
     const { data, error: err } = await supabase
       .from('usuarios')
-      .select('id,plano,status_pagamento,ativo,limite_funcionarios,limite_agendamentos_mes')
+      .select('id,plano,status_pagamento,ativo,limite_funcionarios,limite_agendamentos_mes,bot_ativo')
       .eq('id', id)
       .maybeSingle()
     if (err || !data) {
@@ -226,12 +229,13 @@ export function AdminClienteDetalhesPage() {
       setRefreshingPagamento(false)
       return
     }
-    const next = data as unknown as Pick<Cliente, 'id' | 'plano' | 'status_pagamento' | 'ativo' | 'limite_funcionarios' | 'limite_agendamentos_mes'>
+    const next = data as unknown as Pick<Cliente, 'id' | 'plano' | 'status_pagamento' | 'ativo' | 'limite_funcionarios' | 'limite_agendamentos_mes' | 'bot_ativo'>
     setCliente((prev) => (prev ? { ...prev, ...next } : (next as unknown as Cliente)))
     const normalizedPlano = normalizePlanoToTwoPlans(next.plano)
     setPlano(normalizedPlano)
     setStatusPagamento(next.status_pagamento)
     setAtivo(next.ativo)
+    setBotAtivo(next.bot_ativo !== false)
     setLimiteFuncionarios(next.limite_funcionarios === null ? '' : String(next.limite_funcionarios))
     setLimiteAgendamentosMes(next.limite_agendamentos_mes === null || typeof next.limite_agendamentos_mes !== 'number' ? '' : String(next.limite_agendamentos_mes))
     const n = typeof next.limite_funcionarios === 'number' && Number.isFinite(next.limite_funcionarios) && next.limite_funcionarios > 0 ? Math.floor(next.limite_funcionarios) : 1
@@ -260,7 +264,7 @@ export function AdminClienteDetalhesPage() {
     }
     const { error: err } = await supabase
       .from('usuarios')
-      .update({ plano, status_pagamento: statusPagamento, ativo, limite_funcionarios: limite, limite_agendamentos_mes: limiteAgMes })
+      .update({ plano, status_pagamento: statusPagamento, ativo, limite_funcionarios: limite, limite_agendamentos_mes: limiteAgMes, bot_ativo: botAtivo })
       .eq('id', id)
     if (err) {
       setError(err.message)
@@ -268,7 +272,7 @@ export function AdminClienteDetalhesPage() {
       return
     }
     setCliente((prev) =>
-      prev ? { ...prev, plano, status_pagamento: statusPagamento, ativo, limite_funcionarios: limite, limite_agendamentos_mes: limiteAgMes } : prev
+      prev ? { ...prev, plano, status_pagamento: statusPagamento, ativo, limite_funcionarios: limite, limite_agendamentos_mes: limiteAgMes, bot_ativo: botAtivo } : prev
     )
     setSaving(false)
   }
@@ -509,6 +513,20 @@ export function AdminClienteDetalhesPage() {
                       <option value="false">Inativa</option>
                     </select>
                   </label>
+                  <label className="block">
+                    <div className="text-sm font-medium text-slate-700 mb-1">Bot (Assistente) Ativo</div>
+                    <select
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                      value={botAtivo ? 'true' : 'false'}
+                      onChange={(e) => setBotAtivo(e.target.value === 'true')}
+                    >
+                      <option value="true">Ativo</option>
+                      <option value="false">Inativo</option>
+                    </select>
+                  </label>
+                </div>
+                
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Input
                     label="Limite de funcionários (vazio = sem limite)"
                     value={limiteFuncionarios}

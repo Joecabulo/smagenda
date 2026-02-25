@@ -215,7 +215,6 @@ export function WhatsappSettingsPage() {
   const [configurado, setConfigurado] = useState(false)
   const [whatsappHabilitado, setWhatsappHabilitado] = useState<boolean | null>(null)
   const [botAtivo, setBotAtivo] = useState(true)
-  const [updatingBot, setUpdatingBot] = useState(false)
   const [loading, setLoading] = useState(true)
   const [connecting, setConnecting] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
@@ -601,19 +600,6 @@ export function WhatsappSettingsPage() {
     setTimeout(() => setSaved(false), 2000)
   }
 
-  const toggleBot = async () => {
-    if (!usuarioId) return
-    setUpdatingBot(true)
-    const next = !botAtivo
-    const { error: updateErr } = await supabase.from('usuarios').update({ bot_ativo: next }).eq('id', usuarioId)
-    if (updateErr) {
-      setError(`Erro ao atualizar bot: ${updateErr.message}`)
-    } else {
-      setBotAtivo(next)
-    }
-    setUpdatingBot(false)
-  }
-
   const isConnected = instanceState?.toLowerCase() === 'open'
   const connectionLabel = (() => {
     if (!habilitado || !configurado) return '—'
@@ -652,17 +638,13 @@ export function WhatsappSettingsPage() {
                   <div className="text-sm font-semibold text-slate-900">Assistente Automático (Bot)</div>
                   <div className="text-sm text-slate-500 max-w-2xl">
                     Se ativado, o sistema responderá automaticamente mensagens como "Agendar" e perguntas sobre serviços.
-                    Se desativado, o sistema não responderá nada automaticamente.
+                    <div className="mt-1 font-medium text-slate-700">Este recurso é gerenciado pelo administrador.</div>
                   </div>
                 </div>
                 <div className="shrink-0">
-                  <Button
-                    variant={botAtivo ? 'primary' : 'secondary'}
-                    onClick={toggleBot}
-                    disabled={updatingBot || loading}
-                  >
-                    {updatingBot ? 'Atualizando...' : botAtivo ? 'Ativado' : 'Desativado'}
-                  </Button>
+                  <div className={`px-3 py-1.5 rounded text-sm font-medium ${botAtivo ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'}`}>
+                    {botAtivo ? 'Ativado' : 'Desativado'}
+                  </div>
                 </div>
               </div>
             </div>

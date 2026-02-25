@@ -12,3 +12,14 @@ Testes Realizados: Validação lógica do código.
 Dados Utilizados: Código fonte.
 Responsável: Agente IA
 Próximos Passos: Usuário testar recebimento de agendamento com o painel aberto.
+
+[2026-02-25 20:30] - Modificação: Transferência de Controle do Bot e Correção Admin
+Descrição: 
+- AdminDashboardPage.tsx: Corrigido ordenação da query de 'criado_em' para 'created_at' (padrão Supabase).
+- WhatsappSettingsPage.tsx: Removido controle de ativação do bot pelo usuário. Agora exibe apenas o status (Ativo/Inativo) com aviso de gerenciamento pelo Admin.
+- AdminClienteDetalhesPage.tsx: Controle do bot já implementado anteriormente.
+Impacto: Admin tem controle exclusivo sobre ativação do bot. Página do Admin deve carregar lista de usuários corretamente.
+Testes Realizados: Validação de código e lógica de permissão.
+Dados Utilizados: Dados reais de produção (query em usuarios).
+Responsável: Agente IA
+Próximos Passos: Verificar se a lista de usuários carrega no Admin Dashboard.
