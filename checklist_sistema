@@ -1,4 +1,3 @@
-
 [2025-02-25 15:55] - Simplificação: Mensagem de Confirmação
 Descrição: 
 - Simplificada a mensagem final de confirmação do agendamento para "Agendamento confirmado com sucesso!".
@@ -40,3 +39,23 @@ Testes Realizados: Deploy via CLI confirmado.
 Dados Utilizados: Produção.
 Responsável: Agente IA
 Próximos Passos: Solicitar validação do usuário.
+
+[2025-02-25 17:30] - Implementação: Soft Delete para Serviços
+Descrição: 
+- Implementado sistema de "soft delete" para a tabela `servicos` para resolver erro de chave estrangeira (`agendamentos_servico_id_fkey`) ao excluir serviços com histórico.
+- Criada função SQL `sqlSoftDeleteServicos` em `AdminConfiguracoesPage.tsx` que:
+  - Adiciona coluna `deleted_at` na tabela `servicos`.
+  - Atualiza função `public_get_servicos_publicos` para filtrar serviços deletados.
+- Atualizado frontend (`ServicosPage.tsx`) para realizar soft delete ao invés de delete físico.
+- Adicionado filtro `.is('deleted_at', null)` nas consultas de serviços em:
+  - `ServicosPage.tsx` (listagem admin)
+  - `DashboardPage.tsx` (listagem admin/app)
+  - `FuncionarioAgendaPage.tsx` (listagem app)
+  - `PaginaPublicaSettingsPage.tsx` (preview público)
+  - `AdminClienteDetalhesPage.tsx` (contagem admin)
+  - `supabase/functions/whatsapp/index.ts` (bot whatsapp)
+Impacto: Permite "excluir" serviços mantendo o histórico de agendamentos passados, evitando erros de integridade referencial.
+Testes Realizados: Validação estática do código e queries.
+Dados Utilizados: Código fonte.
+Responsável: Agente IA
+Próximos Passos: Usuário deve rodar o SQL "Soft Delete Serviços" na tela de Configurações > Avançado.

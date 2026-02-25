@@ -3873,6 +3873,54 @@ grant execute on function public.public_get_slots_publicos(uuid, date, uuid, uui
 grant execute on function public.public_create_agendamento_publico(uuid, date, text, uuid, text, text, uuid, uuid, jsonb, text, int) to authenticated;`
   }, [])
 
+  const sqlSoftDeleteServicos = useMemo(() => {
+    return `alter table public.servicos add column if not exists deleted_at timestamptz default null;
+
+create or replace function public.public_get_servicos_publicos(p_usuario_id uuid)
+returns table (
+  id uuid,
+  nome text,
+  descricao text,
+  duracao_minutos int,
+  buffer_antes_min int,
+  buffer_depois_min int,
+  antecedencia_minutos int,
+  janela_max_dias int,
+  dia_inteiro boolean,
+  preco numeric,
+  taxa_agendamento numeric,
+  cor text,
+  foto_url text
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return query
+  select
+    s.id::uuid,
+    s.nome::text,
+    s.descricao::text,
+    s.duracao_minutos::int,
+    coalesce(s.buffer_antes_min, 0)::int,
+    coalesce(s.buffer_depois_min, 0)::int,
+    coalesce(s.antecedencia_minutos, 120)::int,
+    365::int,
+    coalesce(s.dia_inteiro, false)::boolean,
+    s.preco::numeric,
+    s.taxa_agendamento::numeric,
+    s.cor::text,
+    s.foto_url::text
+  from public.servicos s
+  where s.usuario_id = p_usuario_id
+    and s.ativo = true
+    and s.deleted_at is null
+  order by s.ordem asc nulls last, s.criado_em asc;
+end;
+$$;`
+  }, [])
+
   const sqlWhatsappAutomacao = useMemo(() => {
     return `alter table public.usuarios add column if not exists whatsapp_instance_name text;
 alter table public.usuarios add column if not exists bot_ativo boolean not null default true;
@@ -4789,6 +4837,12 @@ $$;`
           title="SQL de limite de serviços (BASIC)"
           description="Use para limitar a criação de serviços a 3 no plano BASIC/FREE."
           sql={sqlServicosLimiteBasic}
+        />
+
+        <SqlCard
+          title="SQL de Soft Delete Serviços"
+          description="Use para adicionar a coluna deleted_at e atualizar a função pública para ignorar deletados."
+          sql={sqlSoftDeleteServicos}
         />
 
         <SqlCard title="SQL do WhatsApp (automação)" description="Use para habilitar QR Code, confirmação automática e lembretes." sql={sqlWhatsappAutomacao} />

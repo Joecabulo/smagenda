@@ -382,6 +382,7 @@ export function DashboardPage() {
         .select('id,nome,cor,preco,duracao_minutos,capacidade_por_horario')
         .eq('usuario_id', usuarioId)
         .eq('ativo', true)
+        .is('deleted_at', null)
         .order('ordem', { ascending: true })
         .order('criado_em', { ascending: true })
       if (!servicosError) {

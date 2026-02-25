@@ -223,6 +223,7 @@ export function PaginaPublicaSettingsPage() {
         .select(cols)
         .eq('usuario_id', usuarioId)
         .eq('ativo', true)
+        .is('deleted_at', null)
         .order('ordem', { ascending: true })
         .order('criado_em', { ascending: true })
         .limit(6)

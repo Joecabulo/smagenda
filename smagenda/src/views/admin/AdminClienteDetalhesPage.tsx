@@ -178,7 +178,7 @@ export function AdminClienteDetalhesPage() {
         setCheckoutFuncionariosTotal(Math.max(min, Math.min(max, n)))
       }
 
-      const { count: sCount } = await supabase.from('servicos').select('id', { count: 'exact', head: true }).eq('usuario_id', id)
+      const { count: sCount } = await supabase.from('servicos').select('id', { count: 'exact', head: true }).eq('usuario_id', id).is('deleted_at', null)
       const { count: fCount } = await supabase.from('funcionarios').select('id', { count: 'exact', head: true }).eq('usuario_master_id', id)
       setServicosCount(sCount ?? 0)
       setFuncionariosCount(fCount ?? 0)

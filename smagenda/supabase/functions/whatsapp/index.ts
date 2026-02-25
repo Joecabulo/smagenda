@@ -814,6 +814,7 @@ async function handleInboundRequest(args: {
       .select('id,nome,capacidade_por_horario,dia_inteiro,preco')
       .eq('usuario_id', user.id)
       .eq('ativo', true)
+      .is('deleted_at', null)
       .order('ordem', { ascending: true })
       .order('criado_em', { ascending: true })
     if (servErr) return jsonResponse(200, { ok: false, error: 'load_servicos_failed', message: servErr.message })

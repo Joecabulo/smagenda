@@ -157,6 +157,7 @@ export function ServicosPage() {
       .from('servicos')
       .select(colsWithRulesAndCap)
       .eq('usuario_id', usuarioId)
+      .is('deleted_at', null)
       .order('ordem', { ascending: true })
       .order('criado_em', { ascending: true })
 
@@ -165,25 +166,50 @@ export function ServicosPage() {
       const lower = msg.toLowerCase()
       const missingColumn = lower.includes('column') && lower.includes('does not exist')
       const missingCapacidade = lower.includes('capacidade_por_horario') && lower.includes('does not exist')
+      
+      // Se o erro for de coluna inexistente (pode ser deleted_at ou outras), tentamos fallback
       if (!missingColumn) {
         setError(msg)
         setLoading(false)
         return
       }
 
+      // Se for especificamente capacidade_por_horario
       if (missingCapacidade && isAcademia) {
         setCapacidadePorHorarioDisponivel(false)
+        // Tentamos buscar sem capacidade, mas COM deleted_at se possível. 
+        // Se deleted_at não existir, vai dar erro de novo e cair no catch geral ou proximo fallback
         const second = await supabase
           .from('servicos')
           .select(colsWithRules)
           .eq('usuario_id', usuarioId)
+          // Tenta filtrar deleted_at, se falhar, o usuário precisa rodar o SQL
+          .is('deleted_at', null) 
           .order('ordem', { ascending: true })
           .order('criado_em', { ascending: true })
 
         if (second.error) {
-          setError(second.error.message)
-          setLoading(false)
-          return
+           // Se der erro aqui, pode ser que deleted_at não exista.
+           // Vamos tentar uma ultima vez SEM deleted_at e avisar o usuario
+           const third = await supabase
+            .from('servicos')
+            .select(colsWithRules)
+            .eq('usuario_id', usuarioId)
+            .order('ordem', { ascending: true })
+            .order('criado_em', { ascending: true })
+            
+           if (third.error) {
+             setError(third.error.message)
+             setLoading(false)
+             return
+           }
+           
+           setServicos((third.data ?? []) as unknown as Servico[])
+           setError(
+             'Configuração incompleta: rode o SQL de Soft Delete em /admin/configuracoes e o SQL de Capacidade.'
+           )
+           setLoading(false)
+           return
         }
         setServicos((second.data ?? []) as unknown as Servico[])
         setError(
@@ -194,15 +220,32 @@ export function ServicosPage() {
       }
 
       setRegrasPorServicoDisponivel(false)
+      // Fallback básico
       const second = await supabase
         .from('servicos')
         .select(baseCols)
         .eq('usuario_id', usuarioId)
+        .is('deleted_at', null)
         .order('ordem', { ascending: true })
         .order('criado_em', { ascending: true })
 
       if (second.error) {
-        setError(second.error.message)
+         // Se falhar por causa do deleted_at
+         const third = await supabase
+          .from('servicos')
+          .select(baseCols)
+          .eq('usuario_id', usuarioId)
+          .order('ordem', { ascending: true })
+          .order('criado_em', { ascending: true })
+
+        if (third.error) {
+          setError(third.error.message)
+          setLoading(false)
+          return
+        }
+        setServicos((third.data ?? []) as unknown as Servico[])
+        // Avisar sobre deleted_at
+        setError('Aviso: Coluna deleted_at não encontrada. Exclusão funcionará como delete físico. Rode o SQL Soft Delete em Configurações.')
         setLoading(false)
         return
       }
@@ -370,10 +413,29 @@ export function ServicosPage() {
 
   const remove = async (id: string) => {
     setError(null)
-    const { error: err } = await supabase.from('servicos').delete().eq('id', id).eq('usuario_id', usuario.id)
+    // Tenta soft delete primeiro
+    const { error: err } = await supabase
+      .from('servicos')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('usuario_id', usuario.id)
+
     if (err) {
-      setError(err.message)
-      return
+      // Se der erro de coluna inexistente, tenta delete fisico (comportamento antigo)
+      const msg = err.message.toLowerCase()
+      if (msg.includes('column') && msg.includes('does not exist')) {
+        const { error: delErr } = await supabase.from('servicos').delete().eq('id', id).eq('usuario_id', usuario.id)
+        if (delErr) {
+          setError(delErr.message)
+          return
+        }
+        // Sucesso no delete fisico, mas avisa
+        // Não vamos bloquear, mas seria bom avisar. Como o load vai recarregar, 
+        // se o load detectar falta de coluna ele já avisa.
+      } else {
+        setError(err.message)
+        return
+      }
     }
     await load()
   }
