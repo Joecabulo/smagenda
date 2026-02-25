@@ -203,7 +203,7 @@ export function AdminClienteDetalhesPage() {
     setRefreshingPagamento(true)
     setError(null)
 
-    const syncRes = await callFn('payments', { action: 'admin_get_usuario_stripe_status', usuario_id: id })
+    const syncRes = await callFn('payments', { action: 'admin_get_usuario_status', usuario_id: id })
     if (!syncRes.ok) {
       const msg =
         syncRes.body && typeof syncRes.body === 'object' && typeof (syncRes.body as Record<string, unknown>).message === 'string'

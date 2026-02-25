@@ -15,19 +15,15 @@ type UsuarioPagamento = {
   status_pagamento: string
   data_vencimento: string | null
   data_pagamento_fatura: string | null
-  stripe_subscription_id: string | null
   ativo: boolean
 }
 
-type StripeStatus = {
+type UsuarioStatus = {
   usuario_id: string
   plano: string
   status_pagamento: string
   data_vencimento: string | null
   data_pagamento_fatura: string | null
-  stripe_subscription_id?: string | null
-  stripe_customer_id?: string | null
-  cancel_at_period_end?: boolean
   source: string
 }
 
@@ -179,14 +175,13 @@ export function AdminPagamentosPage() {
   const [usuarios, setUsuarios] = useState<UsuarioPagamento[]>([])
   const [cancelling, setCancelling] = useState<Record<string, boolean>>({})
   const [granting, setGranting] = useState<Record<string, boolean>>({})
-  const [stripeStatusByUsuario, setStripeStatusByUsuario] = useState<Record<string, StripeStatus>>({})
-  const [syncingStripe, setSyncingStripe] = useState(false)
+  const [statusByUsuario, setStatusByUsuario] = useState<Record<string, UsuarioStatus>>({})
+  const [syncingStatus, setSyncingStatus] = useState(false)
 
   const [modalOpen, setModalOpen] = useState(false)
   const [modalMode, setModalMode] = useState<'grant' | 'cancel'>('grant')
   const [modalUsuarioId, setModalUsuarioId] = useState<string | null>(null)
   const [modalUsuarioLabel, setModalUsuarioLabel] = useState<string>('')
-  const [modalHasSubscription, setModalHasSubscription] = useState<boolean>(false)
   const [modalValue, setModalValue] = useState<string>('')
   const [modalError, setModalError] = useState<string | null>(null)
 
@@ -197,7 +192,7 @@ export function AdminPagamentosPage() {
 
     const { data, error: err } = await supabase
       .from('usuarios')
-      .select('id,nome_negocio,email,plano,status_pagamento,data_vencimento,data_pagamento_fatura,stripe_subscription_id,ativo')
+      .select('id,nome_negocio,email,plano,status_pagamento,data_vencimento,data_pagamento_fatura,ativo')
       .order('criado_em', { ascending: false })
       .limit(500)
 
@@ -212,16 +207,16 @@ export function AdminPagamentosPage() {
     return rows
   }, [])
 
-  const fetchStripeBatch = useCallback(async (rows: UsuarioPagamento[]) => {
+  const fetchStatusBatch = useCallback(async (rows: UsuarioPagamento[]) => {
     if (rows.length === 0) {
-      setStripeStatusByUsuario({})
+      setStatusByUsuario({})
       return
     }
-    setSyncingStripe(true)
+    setSyncingStatus(true)
     setError(null)
     setSuccess(null)
 
-    const results: Record<string, StripeStatus> = {}
+    const results: Record<string, UsuarioStatus> = {}
     const maxConcurrency = 4
     let idx = 0
 
@@ -231,7 +226,7 @@ export function AdminPagamentosPage() {
         idx += 1
         if (!row) return
 
-        const res = await callFn('payments', { action: 'admin_get_usuario_stripe_status', usuario_id: row.id })
+        const res = await callFn('payments', { action: 'admin_get_usuario_status', usuario_id: row.id })
         if (res.ok && res.body && typeof res.body === 'object') {
           const obj = res.body as Record<string, unknown>
           if (obj.ok === true && typeof obj.usuario_id === 'string') {
@@ -241,9 +236,6 @@ export function AdminPagamentosPage() {
               status_pagamento: typeof obj.status_pagamento === 'string' ? obj.status_pagamento : row.status_pagamento,
               data_vencimento: typeof obj.data_vencimento === 'string' ? obj.data_vencimento : row.data_vencimento,
               data_pagamento_fatura: typeof obj.data_pagamento_fatura === 'string' ? obj.data_pagamento_fatura : row.data_pagamento_fatura,
-              stripe_subscription_id: typeof obj.stripe_subscription_id === 'string' ? obj.stripe_subscription_id : row.stripe_subscription_id,
-              stripe_customer_id: typeof obj.stripe_customer_id === 'string' ? obj.stripe_customer_id : null,
-              cancel_at_period_end: obj.cancel_at_period_end === true,
               source: typeof obj.source === 'string' ? obj.source : 'unknown',
             }
             continue
@@ -256,26 +248,23 @@ export function AdminPagamentosPage() {
           status_pagamento: row.status_pagamento,
           data_vencimento: row.data_vencimento,
           data_pagamento_fatura: row.data_pagamento_fatura,
-          stripe_subscription_id: row.stripe_subscription_id,
-          stripe_customer_id: null,
-          cancel_at_period_end: false,
           source: 'db',
         }
       }
     }
 
     await Promise.all(Array.from({ length: Math.min(maxConcurrency, rows.length) }, () => worker()))
-    setStripeStatusByUsuario(results)
-    setSyncingStripe(false)
+    setStatusByUsuario(results)
+    setSyncingStatus(false)
   }, [])
 
   const reloadAll = useCallback(async () => {
-    setStripeStatusByUsuario({})
-    setSyncingStripe(false)
+    setStatusByUsuario({})
+    setSyncingStatus(false)
     const rows = await fetchUsuarios()
     if (!rows) return
-    await fetchStripeBatch(rows)
-  }, [fetchStripeBatch, fetchUsuarios])
+    await fetchStatusBatch(rows)
+  }, [fetchStatusBatch, fetchUsuarios])
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -286,25 +275,23 @@ export function AdminPagamentosPage() {
 
   const rows = useMemo(() => {
     return usuarios.map((u) => {
-      const stripe = stripeStatusByUsuario[u.id] ?? null
-      const pagamentoFatura = stripe?.data_pagamento_fatura ?? u.data_pagamento_fatura
+      const statusFromDb = statusByUsuario[u.id] ?? null
+      const pagamentoFatura = statusFromDb?.data_pagamento_fatura ?? u.data_pagamento_fatura
       const dataVencFromCompra = toIsoDateFromIsoPlusDays(pagamentoFatura, 30)
-      const dataVenc = dataVencFromCompra ?? stripe?.data_vencimento ?? u.data_vencimento
-      const plano = stripe?.plano ? stripe.plano : u.plano
-      const statusPagamento = stripe?.status_pagamento ? stripe.status_pagamento : u.status_pagamento
+      const dataVenc = statusFromDb?.data_vencimento ?? u.data_vencimento ?? dataVencFromCompra
+      const plano = statusFromDb?.plano ? statusFromDb.plano : u.plano
+      const statusPagamento = statusFromDb?.status_pagamento ? statusFromDb.status_pagamento : u.status_pagamento
       const dias = resolveDiasRestantes(dataVenc)
       const status = mapStatusToLabel(statusPagamento)
-      const hasSubscription = Boolean(((stripe?.stripe_subscription_id ?? u.stripe_subscription_id) ?? '').trim() || ((stripe?.stripe_customer_id ?? '')).trim())
       const canCancel = true
-      return { u, stripe, dias, status, plano, statusPagamento, hasSubscription, canCancel }
+      return { u, statusFromDb, dias, status, plano, statusPagamento, canCancel }
     })
-  }, [stripeStatusByUsuario, usuarios])
+  }, [statusByUsuario, usuarios])
 
-  const openGrantModal = (usuarioId: string, usuarioLabel: string, hasSubscription: boolean) => {
+  const openGrantModal = (usuarioId: string, usuarioLabel: string) => {
     setModalMode('grant')
     setModalUsuarioId(usuarioId)
     setModalUsuarioLabel(usuarioLabel)
-    setModalHasSubscription(hasSubscription)
     setModalValue('')
     setModalError(null)
     setModalOpen(true)
@@ -323,7 +310,6 @@ export function AdminPagamentosPage() {
     setModalOpen(false)
     setModalUsuarioId(null)
     setModalUsuarioLabel('')
-    setModalHasSubscription(false)
     setModalValue('')
     setModalError(null)
   }
@@ -358,23 +344,22 @@ export function AdminPagamentosPage() {
       closeModal()
       await reloadAll().catch(() => undefined)
       setCancelling((prev) => ({ ...prev, [usuarioId]: false }))
-      setSuccess('Assinatura cancelada no Stripe.')
+      setSuccess('Assinatura cancelada.')
       return
     }
 
     if (granting[usuarioId] === true) return
     const trimmed = modalValue.trim()
     if (!trimmed) {
-      setModalError('Informe um número (1–24) ou um cupom/promoção válido.')
+      setModalError('Informe um número (1–24).')
       return
     }
 
     const n = Number(trimmed)
     const parsedMonths = Number.isFinite(n) ? Math.floor(n) : null
     const months = parsedMonths && parsedMonths >= 1 && parsedMonths <= 24 ? parsedMonths : null
-    const couponId = months ? null : trimmed
-    if (!months && (!couponId || couponId.length < 3)) {
-      setModalError('Valor inválido. Informe um número (1–24) ou um cupom/promoção válido.')
+    if (!months) {
+      setModalError('Valor inválido. Informe um número (1–24).')
       return
     }
 
@@ -383,9 +368,7 @@ export function AdminPagamentosPage() {
     setSuccess(null)
     setModalError(null)
 
-    const payload: Record<string, unknown> = { action: 'grant_free_months', usuario_id: usuarioId }
-    if (months) payload.months = months
-    if (couponId) payload.coupon_id = couponId
+    const payload: Record<string, unknown> = { action: 'grant_free_months', usuario_id: usuarioId, months }
 
     const res = await callFn('payments', payload)
     if (!res.ok) {
@@ -398,10 +381,28 @@ export function AdminPagamentosPage() {
             const extra = [fv ? `versão=${fv}` : null, actions.length ? `ações=${actions.join(', ')}` : null].filter(Boolean).join(' | ')
             return `Função de pagamentos desatualizada no Supabase (invalid_action). Faça deploy da Edge Function payments e tente novamente.${extra ? ` (${extra})` : ''}`
           }
-          if (typeof b.message === 'string' && b.message.trim()) return b.message
-          if (typeof b.error === 'string' && b.error.trim()) return b.error
+          if (typeof b.message === 'string' && b.message.trim()) {
+            const raw = b.message.trim()
+            if (/stripe|coupon|cupom/i.test(raw)) {
+              return 'Fluxo de meses grátis desatualizado no backend. Reimplante a Edge Function payments.'
+            }
+            return raw
+          }
+          if (typeof b.error === 'string' && b.error.trim()) {
+            const raw = b.error.trim()
+            if (/stripe|coupon|cupom/i.test(raw)) {
+              return 'Fluxo de meses grátis desatualizado no backend. Reimplante a Edge Function payments.'
+            }
+            return raw
+          }
         }
-        if (typeof res.body === 'string' && res.body.trim()) return res.body
+        if (typeof res.body === 'string' && res.body.trim()) {
+          const raw = res.body.trim()
+          if (/stripe|coupon|cupom/i.test(raw)) {
+            return 'Fluxo de meses grátis desatualizado no backend. Reimplante a Edge Function payments.'
+          }
+          return raw
+        }
         return 'Falha ao conceder meses grátis.'
       })()
       setModalError(msg)
@@ -412,7 +413,7 @@ export function AdminPagamentosPage() {
     closeModal()
     await reloadAll().catch(() => undefined)
     setGranting((prev) => ({ ...prev, [usuarioId]: false }))
-    setSuccess(months ? `Meses grátis aplicados: ${months}.` : `Cupom aplicado: ${couponId}.`)
+    setSuccess(`Meses grátis aplicados: ${months}.`)
   }
 
   return (
@@ -427,7 +428,7 @@ export function AdminPagamentosPage() {
               <div className="text-sm font-semibold text-slate-900">Pagamentos</div>
               <div className="text-sm text-slate-600">Lista de clientes com plano, vencimento e status.</div>
             </div>
-            <Button variant="secondary" onClick={() => void reloadAll()} disabled={loading || syncingStripe}>
+            <Button variant="secondary" onClick={() => void reloadAll()} disabled={loading || syncingStatus}>
               Recarregar
             </Button>
           </div>
@@ -463,7 +464,7 @@ export function AdminPagamentosPage() {
                       </td>
                     </tr>
                   ) : (
-                    rows.map(({ u, dias, status, hasSubscription, canCancel }) => (
+                    rows.map(({ u, dias, status, canCancel }) => (
                       <tr key={u.id} className={u.ativo ? '' : 'opacity-60'}>
                         <td className="py-3 pr-4">
                           <Link to={`/admin/clientes/${u.id}`} className="font-medium text-slate-900 hover:underline">
@@ -472,7 +473,7 @@ export function AdminPagamentosPage() {
                           <div className="text-xs text-slate-600">{u.email}</div>
                         </td>
                         <td className="py-3 pr-4">
-                          <Badge>{normalizePlanoLabel(stripeStatusByUsuario[u.id]?.plano ?? u.plano)}</Badge>
+                          <Badge>{normalizePlanoLabel(statusByUsuario[u.id]?.plano ?? u.plano)}</Badge>
                         </td>
                         <td className="py-3 pr-4">
                           {dias === null ? (
@@ -489,7 +490,7 @@ export function AdminPagamentosPage() {
                             <Button
                               variant="secondary"
                               disabled={granting[u.id] === true}
-                              onClick={() => openGrantModal(u.id, u.nome_negocio || u.email || u.id, hasSubscription)}
+                              onClick={() => openGrantModal(u.id, u.nome_negocio || u.email || u.id)}
                             >
                               {granting[u.id] === true ? 'Aplicando…' : 'Meses grátis'}
                             </Button>
@@ -525,14 +526,14 @@ export function AdminPagamentosPage() {
 
                   {modalMode === 'grant' ? (
                     <Input
-                      label="Meses (1–24) ou cupom/promoção"
+                      label="Meses (1–24)"
                       value={modalValue}
                       onChange={(e) => setModalValue(e.target.value)}
-                      placeholder={modalHasSubscription ? '1, SMAGENDA1, promo_... ou uvRxedCK' : '1–24 (extender teste)'}
+                      placeholder="1–24"
                       autoFocus
                     />
                   ) : (
-                    <div className="text-sm text-slate-700">Confirma o cancelamento imediato desta assinatura no Stripe?</div>
+                    <div className="text-sm text-slate-700">Confirma o cancelamento imediato desta assinatura?</div>
                   )}
 
                   {modalError ? <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{modalError}</div> : null}

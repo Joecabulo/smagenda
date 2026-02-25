@@ -5,10 +5,13 @@ type Payload =
   | { action: 'status' }
   | { action: 'disconnect' }
   | { action: 'send_test'; number: string; text: string }
+  | { action: 'manual_confirmacao'; agendamento_id: string }
   | { action: 'send_confirmacao'; agendamento_id: string }
+  | { action: 'manual_cancelamento'; agendamento_id: string }
   | { action: 'send_cancelamento'; agendamento_id: string }
   | { action: 'config_status' }
   | { action: 'admin_diagnostics' }
+  | { action: 'admin_config_status' }
   | { action: 'admin_status' }
   | { action: 'admin_connect'; number?: string | null }
   | { action: 'admin_disconnect' }
@@ -25,6 +28,8 @@ type SuperAdminConfigRow = {
   whatsapp_api_url: string | null
   whatsapp_api_key: string | null
   whatsapp_instance_name: string | null
+  whatsapp_meta_access_token?: string | null
+  whatsapp_meta_phone_number_id?: string | null
 }
 
 type ClienteAvisoRow = { id: string; telefone: string | null; nome_negocio: string | null }
@@ -97,6 +102,11 @@ const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n�
 const defaultCancelamento = `Olá {nome}!\n\nSeu agendamento foi cancelado:\n📅 {data} às {hora}\n✂️ {servico}\n\nSe precisar remarcar, é só me chamar.\n{nome_negocio}`
 
 const FN_VERSION = 'whatsapp@2026-01-14.1'
+
+const META_ENABLED = (() => {
+  const raw = (Deno.env.get('WHATSAPP_ENABLE_META') ?? '').trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'yes'
+})()
 
 function jsonResponse(status: number, body: unknown) {
   const withFn = (() => {
@@ -180,41 +190,210 @@ function isMissingRelationshipError(message: string) {
   return m.includes('could not find a relationship between')
 }
 
-async function loadGlobalWhatsappConfig(dbClient: ReturnType<typeof createClient>) {
+function isMissingFunctionError(message: string, fnName: string) {
+  const lower = String(message ?? '').toLowerCase()
+  const f = fnName.toLowerCase()
+  if (!lower.includes(f)) return false
+  if (lower.includes('does not exist') && lower.includes('function')) return true
+  if (lower.includes('could not find the function')) return true
+  return false
+}
+
+function metaExtractMessageId(body: unknown) {
+  if (!body || typeof body !== 'object') return null
+  const obj = body as Record<string, unknown>
+  const messages = obj.messages
+  if (!Array.isArray(messages) || messages.length === 0) return null
+  const first = messages[0]
+  if (!first || typeof first !== 'object') return null
+  const id = (first as Record<string, unknown>).id
+  return typeof id === 'string' && id.trim() ? id.trim() : null
+}
+
+function normalizeMetaRecipient(raw: string) {
+  const digits = sanitizePhone(raw)
+  if (!digits) return null
+  if (digits.startsWith('55')) return digits
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`
+  return digits
+}
+
+function normalizeWaMeRecipient(raw: string) {
+  const digits = sanitizePhone(raw)
+  if (!digits) return null
+  if (digits.startsWith('55')) return digits
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`
+  return digits
+}
+
+function buildWaMeUrl(rawPhone: string, text: string) {
+  const to = normalizeWaMeRecipient(rawPhone)
+  if (!to) return null
+  const cleanedText = String(text ?? '').trim()
+  if (!cleanedText) return null
+  return `https://wa.me/${to}?text=${encodeURIComponent(cleanedText)}`
+}
+
+async function tryRegisterOutboundMessage(dbClient: ReturnType<typeof createClient>, args: { usuarioId: string; messageId: string; kind: string; category: string; raw: unknown }) {
+  const { error } = await dbClient.rpc('whatsapp_register_outbound', {
+    p_usuario_id: args.usuarioId,
+    p_message_id: args.messageId,
+    p_kind: args.kind,
+    p_category: args.category,
+    p_status: 'sent',
+    p_raw: args.raw,
+  })
+  if (!error) return { ok: true as const }
+  if (isMissingFunctionError(error.message, 'whatsapp_register_outbound')) return { ok: false as const, skipped: 'missing_fn' as const }
+  if (isMissingTableError(error.message) || isMissingColumnError(error.message)) return { ok: false as const, skipped: 'missing_schema' as const }
+  return { ok: false as const, error: error.message }
+}
+
+async function tryResetWhatsappUsageIfNeeded(dbClient: ReturnType<typeof createClient>, usuarioId: string) {
+  const { error } = await dbClient.rpc('whatsapp_reset_usage_if_needed', { p_usuario_id: usuarioId })
+  if (!error) return { ok: true as const }
+  if (isMissingFunctionError(error.message, 'whatsapp_reset_usage_if_needed')) return { ok: false as const, skipped: 'missing_fn' as const }
+  if (isMissingTableError(error.message) || isMissingColumnError(error.message)) return { ok: false as const, skipped: 'missing_schema' as const }
+  return { ok: false as const, error: error.message }
+}
+
+async function loadWhatsappQuotaAndUsage(dbClient: ReturnType<typeof createClient>, usuarioId: string) {
   const { data, error } = await dbClient
-    .from('super_admin')
-    .select('id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name')
-    .not('whatsapp_api_url', 'is', null)
-    .not('whatsapp_api_key', 'is', null)
-    .limit(1)
+    .from('usuarios')
+    .select('whatsapp_quota_mensal,whatsapp_consumo_mes,whatsapp_consumo_mes_ref')
+    .eq('id', usuarioId)
     .maybeSingle()
 
   if (error) {
-    const msg = String(error.message ?? '')
+    if (isMissingColumnError(error.message) || isMissingTableError(error.message)) return { ok: false as const, skipped: 'missing_schema' as const }
+    return { ok: false as const, error: error.message }
+  }
+
+  const row = (data ?? null) as unknown as {
+    whatsapp_quota_mensal?: unknown
+    whatsapp_consumo_mes?: unknown
+    whatsapp_consumo_mes_ref?: unknown
+  } | null
+
+  const quotaRaw = row?.whatsapp_quota_mensal
+  const consumoRaw = row?.whatsapp_consumo_mes
+  const refRaw = row?.whatsapp_consumo_mes_ref
+
+  const quota = typeof quotaRaw === 'number' && Number.isFinite(quotaRaw) ? quotaRaw : null
+  const consumo = typeof consumoRaw === 'number' && Number.isFinite(consumoRaw) ? consumoRaw : null
+  const ref = typeof refRaw === 'string' && refRaw.trim() ? refRaw.trim() : null
+
+  return { ok: true as const, quota, consumo, ref }
+}
+
+function isWhatsappQuotaExceeded(args: { quota: number | null; consumo: number | null }) {
+  if (typeof args.quota !== 'number' || !Number.isFinite(args.quota) || args.quota < 0) return false
+  if (typeof args.consumo !== 'number' || !Number.isFinite(args.consumo) || args.consumo < 0) return false
+  return args.consumo >= args.quota
+}
+
+async function tryMarkWhatsappStatus(dbClient: ReturnType<typeof createClient>, args: { messageId: string; status: string; statusAt: string | null; error: string | null; raw: unknown }) {
+  const { error } = await dbClient.rpc('whatsapp_mark_status', {
+    p_message_id: args.messageId,
+    p_status: args.status,
+    p_status_at: args.statusAt,
+    p_error: args.error,
+    p_raw: args.raw,
+  })
+  if (!error) return { ok: true as const }
+  if (isMissingFunctionError(error.message, 'whatsapp_mark_status')) return { ok: false as const, skipped: 'missing_fn' as const }
+  if (isMissingTableError(error.message) || isMissingColumnError(error.message)) return { ok: false as const, skipped: 'missing_schema' as const }
+  return { ok: false as const, error: error.message }
+}
+
+async function verifyMetaWebhookSignature(req: Request, bodyText: string) {
+  const appSecret = (Deno.env.get('WHATSAPP_META_APP_SECRET') ?? Deno.env.get('META_APP_SECRET') ?? '').trim()
+  if (!appSecret) return { ok: true as const, skipped: 'missing_secret' as const }
+
+  const sigHeader = (req.headers.get('x-hub-signature-256') ?? '').trim()
+  const m = sigHeader.match(/^sha256=(.+)$/i)
+  if (!m?.[1]) return { ok: false as const, error: 'missing_signature' as const }
+
+  const expectedHex = m[1].trim().toLowerCase()
+  if (!expectedHex) return { ok: false as const, error: 'missing_signature' as const }
+
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(appSecret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  )
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(bodyText))
+  const actual = new Uint8Array(signature)
+  const expected = (() => {
+    const cleaned = expectedHex.toLowerCase()
+    if (!cleaned || cleaned.length % 2 !== 0) return null
+    const out = new Uint8Array(cleaned.length / 2)
+    for (let i = 0; i < cleaned.length; i += 2) {
+      const byte = Number.parseInt(cleaned.slice(i, i + 2), 16)
+      if (!Number.isFinite(byte)) return null
+      out[i / 2] = byte
+    }
+    return out
+  })()
+  if (!expected) return { ok: false as const, error: 'invalid_signature' as const }
+
+  const max = Math.max(actual.length, expected.length)
+  let diff = actual.length ^ expected.length
+  for (let i = 0; i < max; i += 1) {
+    const a = i < actual.length ? actual[i] : 0
+    const b = i < expected.length ? expected[i] : 0
+    diff |= a ^ b
+  }
+
+  if (diff !== 0) return { ok: false as const, error: 'invalid_signature' as const }
+  return { ok: true as const }
+}
+
+async function loadGlobalWhatsappConfig(dbClient: ReturnType<typeof createClient>) {
+  const selectFull = 'id,whatsapp_api_url,whatsapp_api_key,whatsapp_meta_access_token,whatsapp_meta_phone_number_id'
+  const selectLegacy = 'id,whatsapp_api_url,whatsapp_api_key'
+
+  const first = await dbClient.from('super_admin').select(selectFull).limit(1).maybeSingle()
+  const second =
+    first.error && isMissingColumnError(first.error.message)
+      ? await dbClient.from('super_admin').select(selectLegacy).limit(1).maybeSingle()
+      : null
+
+  const used = second ?? first
+
+  if (used.error) {
+    const msg = String(used.error.message ?? '')
     const lower = msg.toLowerCase()
     const rls = lower.includes('row level security') || lower.includes('permission denied')
     if (rls) {
       return { ok: false as const, error: 'permission_denied' as const, message: msg }
     }
-    if (isMissingTableError(error.message) || isMissingColumnError(error.message)) {
-      return { ok: false as const, error: 'schema_incomplete' as const, message: error.message }
+    if (isMissingTableError(used.error.message) || isMissingColumnError(used.error.message)) {
+      return { ok: false as const, error: 'schema_incomplete' as const, message: used.error.message }
     }
-    return { ok: false as const, error: 'load_failed' as const, message: error.message }
+    return { ok: false as const, error: 'load_failed' as const, message: used.error.message }
   }
 
-  const row = (data ?? null) as unknown as {
-    whatsapp_api_url?: string | null
-    whatsapp_api_key?: string | null
-    whatsapp_instance_name?: string | null
-  } | null
+  const row = (used.data ?? null) as unknown as SuperAdminConfigRow | null
+
   const apiUrl = typeof row?.whatsapp_api_url === 'string' ? row.whatsapp_api_url : null
   const apiKey = typeof row?.whatsapp_api_key === 'string' ? row.whatsapp_api_key : null
-  const instanceNameRaw = typeof row?.whatsapp_instance_name === 'string' ? row.whatsapp_instance_name : null
-  const instanceName = instanceNameRaw ? sanitizeInstanceName(instanceNameRaw) : null
-  const hasConfig = Boolean(apiUrl && apiKey)
 
-  if (!hasConfig) return { ok: true as const, configured: false as const, apiUrl: null, apiKey: null, instanceName: null }
-  return { ok: true as const, configured: true as const, apiUrl: apiUrl!, apiKey: apiKey!, instanceName }
+  const metaToken = typeof row?.whatsapp_meta_access_token === 'string' ? row.whatsapp_meta_access_token : null
+  const metaPhoneNumberId = typeof row?.whatsapp_meta_phone_number_id === 'string' ? row.whatsapp_meta_phone_number_id : null
+
+  const evolutionConfigured = Boolean(apiUrl && apiKey)
+  const metaConfigured = META_ENABLED && Boolean(metaToken && metaPhoneNumberId)
+  const configured = evolutionConfigured || metaConfigured
+
+  return {
+    ok: true as const,
+    configured,
+    evolution: evolutionConfigured ? { apiUrl: apiUrl!, apiKey: apiKey! } : null,
+    meta: metaConfigured ? { accessToken: metaToken!, phoneNumberId: metaPhoneNumberId! } : null,
+  }
 }
 
 function cleanUrl(input: string) {
@@ -343,41 +522,67 @@ function parseDateFromText(inputRaw: string, timeZone: string) {
     dezembro: 12,
     dez: 12,
   }
-
-  const byName = input.match(/\b(\d{1,2})\s*(de\s*)?(jan|janeiro|fev|fevereiro|mar|marco|abril|abr|maio|mai|jun|junho|jul|julho|ago|agosto|set|setembro|out|outubro|nov|novembro|dez|dezembro)\b/)
-  if (byName) {
-    const day = Number(byName[1])
-    const month = months[byName[3]]
-    return buildDateCandidate(todayYear, todayMonth, todayDay, day, month)
+  const mMonth = input.match(/\b(\d{1,2})(?:\s+de)?\s+([a-zç]+)\b/)
+  if (mMonth) {
+    const day = Number(mMonth[1])
+    const month = months[mMonth[2]]
+    if (month) return buildDateCandidate(todayYear, todayMonth, todayDay, day, month)
   }
 
-  const byNameReverse = input.match(/\b(jan|janeiro|fev|fevereiro|mar|marco|abril|abr|maio|mai|jun|junho|jul|julho|ago|agosto|set|setembro|out|outubro|nov|novembro|dez|dezembro)\s*(dia\s*)?(\d{1,2})\b/)
-  if (byNameReverse) {
-    const day = Number(byNameReverse[3])
-    const month = months[byNameReverse[1]]
-    return buildDateCandidate(todayYear, todayMonth, todayDay, day, month)
+  const mWeekday = input.match(/\b(segunda|terca|quarta|quinta|sexta|sabado|domingo)\b/)
+  if (mWeekday) {
+    const map: Record<string, number> = {
+      domingo: 0,
+      segunda: 1,
+      terca: 2,
+      quarta: 3,
+      quinta: 4,
+      sexta: 5,
+      sabado: 6,
+    }
+    const dow = map[mWeekday[1]]
+    if (typeof dow === 'number') {
+      const today = new Date(`${todayStr}T00:00:00`)
+      const currentDow = today.getDay()
+      let diff = dow - currentDow
+      if (diff <= 0) diff += 7
+      const next = new Date(today)
+      next.setDate(today.getDate() + diff)
+      const nextStr = formatIsoDate(next.getFullYear(), next.getMonth() + 1, next.getDate())
+      return { ok: true as const, date: nextStr }
+    }
   }
 
-  const weekdays: Record<string, number> = {
-    domingo: 0,
-    segunda: 1,
-    terca: 2,
-    quarta: 3,
-    quinta: 4,
-    sexta: 5,
-    sabado: 6,
-  }
-  for (const [name, dow] of Object.entries(weekdays)) {
-    if (!input.includes(name)) continue
-    const next = findNextWeekdayInMonth(todayYear, todayMonth, todayDay, dow)
-    if (!next) return { ok: false as const, reason: 'weekday_out_of_month' as const }
-    return { ok: true as const, date: formatIsoDate(todayYear, todayMonth, next) }
+  const mWeekdayNextMonth = input.match(/\b(pr[oó]xima|proximo|pr[oó]ximo)\s+(segunda|terca|quarta|quinta|sexta|sabado|domingo)\b/)
+  if (mWeekdayNextMonth) {
+    const map: Record<string, number> = {
+      domingo: 0,
+      segunda: 1,
+      terca: 2,
+      quarta: 3,
+      quinta: 4,
+      sexta: 5,
+      sabado: 6,
+    }
+    const dow = map[mWeekdayNextMonth[2]]
+    if (typeof dow === 'number') {
+      const nextMonth = todayMonth === 12 ? 1 : todayMonth + 1
+      const nextYear = todayMonth === 12 ? todayYear + 1 : todayYear
+      const next = findNextWeekdayInMonth(nextYear, nextMonth, 1, dow)
+      if (next) return { ok: true as const, date: formatIsoDate(nextYear, nextMonth, next) }
+    }
   }
 
-  const justDay = input.match(/\b(\d{1,2})\b/)
-  if (justDay) {
-    const day = Number(justDay[1])
-    return buildDateCandidate(todayYear, todayMonth, todayDay, day, todayMonth)
+  if (input === 'hoje') return buildDateCandidate(todayYear, todayMonth, todayDay, todayDay, todayMonth)
+  if (input === 'amanha' || input === 'amanhã') {
+    const tomorrow = new Date(`${todayStr}T00:00:00`)
+    tomorrow.setDate(tomorrow.getDate() + 1)
+    return { ok: true as const, date: formatIsoDate(tomorrow.getFullYear(), tomorrow.getMonth() + 1, tomorrow.getDate()) }
+  }
+  if (input === 'depois de amanha' || input === 'depois de amanhã') {
+    const tomorrow = new Date(`${todayStr}T00:00:00`)
+    tomorrow.setDate(tomorrow.getDate() + 2)
+    return { ok: true as const, date: formatIsoDate(tomorrow.getFullYear(), tomorrow.getMonth() + 1, tomorrow.getDate()) }
   }
 
   return { ok: false as const, reason: 'no_match' as const }
@@ -596,13 +801,7 @@ function formatAvailableTimes(list: string[]) {
   return parts.join('\n')
 }
 
-async function handleInboundRequest(args: {
-  payload: unknown
-  supabaseUrl: string
-  serviceRoleKey: string
-  apiUrlFallback?: string
-  apiKeyFallback?: string
-}) {
+async function handleInboundRequest(args: { payload: unknown; supabaseUrl: string; serviceRoleKey: string }) {
   const { payload, supabaseUrl, serviceRoleKey } = args
   if (!serviceRoleKey) return jsonResponse(400, { error: 'missing_service_role' })
   const dbClient = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } })
@@ -649,11 +848,7 @@ async function handleInboundRequest(args: {
   }
   let user = (userLookup.data ?? null) as UsuarioInboundRow | null
   if (!user?.id) {
-    const fallback = await dbClient
-      .from('usuarios')
-      .select('id,slug,nome_negocio,whatsapp_habilitado,whatsapp_instance_name,timezone')
-      .eq('whatsapp_habilitado', true)
-      .limit(2)
+    const fallback = await dbClient.from('usuarios').select('id,slug,nome_negocio,whatsapp_habilitado,whatsapp_instance_name,timezone').eq('whatsapp_habilitado', true).limit(2)
     if (fallback.error) {
       if (isMissingColumnError(fallback.error.message) || isMissingTableError(fallback.error.message)) {
         return jsonResponse(400, { error: 'schema_incomplete', message: fallback.error.message })
@@ -669,12 +864,11 @@ async function handleInboundRequest(args: {
   if (user.whatsapp_habilitado === false) return jsonResponse(200, { ok: true, skipped: true })
 
   const config = await loadGlobalWhatsappConfig(dbClient)
-  if (!config.ok || !config.configured) return jsonResponse(200, { ok: false, error: 'whatsapp_not_configured' })
-  const apiUrl = config.apiUrl
-  const apiKey = config.apiKey
-  const instanceFromGlobal = config.instanceName
+  if (!config.ok || !config.configured || !config.evolution) return jsonResponse(200, { ok: false, error: 'whatsapp_not_configured' })
+  const apiUrl = config.evolution.apiUrl
+  const apiKey = config.evolution.apiKey
 
-  const instanceName = sanitizeInstanceName(user.whatsapp_instance_name ?? instanceFromGlobal ?? user.slug ?? instanceNameRaw)
+  const instanceName = sanitizeInstanceName(user.whatsapp_instance_name ?? user.slug ?? instanceNameRaw)
 
   const nowIso = new Date().toISOString()
   const { data: convRaw, error: convErr } = await dbClient
@@ -705,10 +899,7 @@ async function handleInboundRequest(args: {
 
   if (isNo(text)) {
     if (conversa?.id) {
-      await dbClient
-        .from('whatsapp_conversas')
-        .update({ estado: 'idle', dados: {}, atualizado_em: nowIso, ultima_mensagem_id: inbound.messageId })
-        .eq('id', conversa.id)
+      await dbClient.from('whatsapp_conversas').update({ estado: 'idle', dados: {}, atualizado_em: nowIso, ultima_mensagem_id: inbound.messageId }).eq('id', conversa.id)
     }
     await evolutionSendTextWithFallback({
       apiUrl,
@@ -1731,60 +1922,60 @@ async function evolutionRequestAuto(opts: { baseUrl: string; apiKey: string; pat
   return last
 }
 
-async function ensureEvolutionWebhook(opts: { apiUrl: string; apiKey: string; instanceName: string; supabaseUrl: string }) {
-  const fnUrl = `${opts.supabaseUrl.replace(/\/$/, '')}/functions/v1/whatsapp`
-  const webhookUrl = `${fnUrl}?apikey=${encodeURIComponent(opts.apiKey)}`
-  const body = {
-    enabled: true,
-    url: webhookUrl,
-    webhookByEvents: false,
-    webhook_by_events: false,
-    webhookBase64: false,
-    webhook_base64: false,
-    events: ['MESSAGES_UPSERT'],
+async function metaGraphRequest(opts: { accessToken: string; path: string; method: 'GET' | 'POST'; body?: unknown; timeoutMs?: number }) {
+  const base = 'https://graph.facebook.com/v19.0'
+  const path = opts.path.startsWith('/') ? opts.path : `/${opts.path}`
+  const url = `${base}${path}`
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), Math.max(1000, opts.timeoutMs ?? 15000))
+
+  try {
+    const res = await fetch(url, {
+      method: opts.method,
+      headers: {
+        Authorization: `Bearer ${opts.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: opts.method === 'POST' ? JSON.stringify(opts.body ?? {}) : undefined,
+      signal: controller.signal,
+    })
+
+    const text = await res.text().catch(() => '')
+    let parsed: unknown = null
+    try {
+      parsed = text ? (JSON.parse(text) as unknown) : null
+    } catch {
+      parsed = text
+    }
+
+    return { ok: res.ok, status: res.status, body: parsed }
+  } catch (e: unknown) {
+    const errAny = e as { name?: unknown; message?: unknown }
+    const name = typeof errAny.name === 'string' ? errAny.name : ''
+    const msg = typeof errAny.message === 'string' ? errAny.message : 'Falha de rede'
+    const lower = msg.toLowerCase()
+    const isAbort = name === 'AbortError' || lower.includes('aborted') || lower.includes('abort')
+    if (isAbort) return { ok: false as const, status: 0, body: { error: 'timeout' } }
+    return { ok: false as const, status: 0, body: { error: 'network_error', message: msg } }
+  } finally {
+    clearTimeout(timeoutId)
   }
-  const encoded = encodeURIComponent(opts.instanceName)
-  const attempts: Awaited<ReturnType<typeof evolutionRequestAuto>>[] = []
-  const resSet = await evolutionRequestAuto({
-    baseUrl: opts.apiUrl,
-    apiKey: opts.apiKey,
-    path: `/webhook/set/${encoded}`,
-    method: 'POST',
-    body,
-  })
-  attempts.push(resSet)
-  const resInstance = await evolutionRequestAuto({
-    baseUrl: opts.apiUrl,
-    apiKey: opts.apiKey,
-    path: `/webhook/instance`,
-    method: 'POST',
-    body: { ...body, instanceName: opts.instanceName },
-  })
-  attempts.push(resInstance)
-  const resInstanceDirect = await evolutionRequestAuto({
-    baseUrl: opts.apiUrl,
-    apiKey: opts.apiKey,
-    path: `/webhook/instance/${encoded}`,
-    method: 'POST',
-    body,
-  })
-  attempts.push(resInstanceDirect)
-  const found = await findEvolutionWebhook({ apiUrl: opts.apiUrl, apiKey: opts.apiKey, instanceName: opts.instanceName })
-  if (found.ok) return found
-  return resSet.ok ? resSet : attempts.at(-1) ?? resSet
 }
 
-async function findEvolutionWebhook(opts: { apiUrl: string; apiKey: string; instanceName: string }) {
-  const encoded = encodeURIComponent(opts.instanceName)
-  const paths = [`/webhook/find/${encoded}`, `/webhook/instance/${encoded}`, `/webhook/find?instanceName=${encoded}`, `/webhook/instance?instanceName=${encoded}`]
-  let last: Awaited<ReturnType<typeof evolutionRequestAuto>> | null = null
-  for (const path of paths) {
-    const res = await evolutionRequestAuto({ baseUrl: opts.apiUrl, apiKey: opts.apiKey, path, method: 'GET' })
-    last = res
-    if (res.ok) return { ok: true as const, status: res.status, path, body: res.body }
-    if (res.status !== 404) return { ok: false as const, status: res.status, path, body: res.body }
-  }
-  return { ok: false as const, status: last?.status ?? 404, path: paths[0]!, body: last?.body ?? { error: 'not_found' } }
+async function metaSendText(opts: { accessToken: string; phoneNumberId: string; to: string; text: string }) {
+  return metaGraphRequest({
+    accessToken: opts.accessToken,
+    path: `/${encodeURIComponent(opts.phoneNumberId)}/messages`,
+    method: 'POST',
+    body: {
+      messaging_product: 'whatsapp',
+      to: opts.to,
+      type: 'text',
+      text: { body: opts.text },
+    },
+    timeoutMs: 20000,
+  })
 }
 
 function extractTextFragments(input: unknown): string[] {
@@ -2078,8 +2269,6 @@ async function getPrincipal(userClient: ReturnType<typeof createClient>, uid: st
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return jsonResponse(200, { ok: true })
-  if (req.method !== 'POST') return jsonResponse(405, { error: 'method_not_allowed' })
-
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
   const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
   if (!supabaseUrl || !anonKey) return jsonResponse(500, { error: 'missing_env' })
@@ -2089,14 +2278,124 @@ Deno.serve(async (req) => {
   const resendFromRaw = (Deno.env.get('RESEND_FROM') ?? '').trim()
   const resendFrom = resendFromRaw || 'SMagenda <onboarding@resend.dev>'
 
-  let rawPayload: unknown
+  if (req.method === 'GET') {
+    const url = new URL(req.url)
+    const mode = (url.searchParams.get('hub.mode') ?? '').trim()
+    const token = (url.searchParams.get('hub.verify_token') ?? '').trim()
+    const challenge = (url.searchParams.get('hub.challenge') ?? '').trim()
+
+    if (mode && challenge) {
+      const verifyToken = (Deno.env.get('WHATSAPP_META_VERIFY_TOKEN') ?? Deno.env.get('META_WHATSAPP_VERIFY_TOKEN') ?? Deno.env.get('META_VERIFY_TOKEN') ?? '').trim()
+      if (!verifyToken) return new Response('Missing verify token', { status: 500 })
+      if (mode !== 'subscribe') return new Response('Forbidden', { status: 403 })
+      if (!token || token !== verifyToken) return new Response('Forbidden', { status: 403 })
+      return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } })
+    }
+
+    return jsonResponse(405, { error: 'method_not_allowed' })
+  }
+
+  if (req.method !== 'POST') return jsonResponse(405, { error: 'method_not_allowed' })
+
+  let bodyText = ''
   try {
-    rawPayload = await req.json()
+    bodyText = await req.text()
+  } catch {
+    return jsonResponse(400, { error: 'invalid_body' })
+  }
+
+  let bodyJson: unknown = null
+  try {
+    bodyJson = bodyText ? (JSON.parse(bodyText) as unknown) : null
   } catch {
     return jsonResponse(400, { error: 'invalid_json' })
   }
 
-  const payloadRecord = rawPayload && typeof rawPayload === 'object' ? (rawPayload as Record<string, unknown>) : null
+  const isMetaWebhook = (() => {
+    if (!bodyJson || typeof bodyJson !== 'object') return false
+    if (Array.isArray(bodyJson)) return false
+    const obj = bodyJson as Record<string, unknown>
+    return obj.object === 'whatsapp_business_account'
+  })()
+
+  if (isMetaWebhook) {
+    if (!META_ENABLED) {
+      return new Response('Not Found', { status: 404 })
+    }
+    const sig = await verifyMetaWebhookSignature(req, bodyText)
+    if (!sig.ok) {
+      return new Response('Forbidden', { status: 403 })
+    }
+    if (!serviceRoleKey) {
+      return jsonResponse(500, {
+        error: 'missing_service_role_key',
+        message: 'A Edge Function precisa do SERVICE_ROLE_KEY para processar o webhook da Meta (atualizar status/consumo).',
+      })
+    }
+
+    const adminClient = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } })
+
+    const extract = () => {
+      const out: Array<{ messageId: string; status: string; statusAt: string | null; error: string | null; raw: unknown }> = []
+      if (!bodyJson || typeof bodyJson !== 'object') return out
+      const root = bodyJson as Record<string, unknown>
+      const entries = root.entry
+      if (!Array.isArray(entries)) return out
+
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object') continue
+        const changes = (entry as Record<string, unknown>).changes
+        if (!Array.isArray(changes)) continue
+        for (const change of changes) {
+          if (!change || typeof change !== 'object') continue
+          const value = (change as Record<string, unknown>).value
+          if (!value || typeof value !== 'object') continue
+          const statuses = (value as Record<string, unknown>).statuses
+          if (!Array.isArray(statuses)) continue
+          for (const st of statuses) {
+            if (!st || typeof st !== 'object') continue
+            const obj = st as Record<string, unknown>
+            const messageId = typeof obj.id === 'string' ? obj.id.trim() : ''
+            const status = typeof obj.status === 'string' ? obj.status.trim().toLowerCase() : ''
+            const ts = typeof obj.timestamp === 'string' ? obj.timestamp.trim() : ''
+            const statusAt = (() => {
+              if (!ts) return null
+              const n = Number(ts)
+              if (!Number.isFinite(n) || n <= 0) return null
+              return new Date(Math.floor(n) * 1000).toISOString()
+            })()
+            const err = (() => {
+              const errors = obj.errors
+              if (!Array.isArray(errors) || errors.length === 0) return null
+              const first = errors[0]
+              if (!first || typeof first !== 'object') return null
+              const msg = (first as Record<string, unknown>).title ?? (first as Record<string, unknown>).message
+              return typeof msg === 'string' && msg.trim() ? msg.trim() : null
+            })()
+            if (!messageId || !status) continue
+            out.push({ messageId, status, statusAt, error: err, raw: st })
+          }
+        }
+      }
+      return out
+    }
+
+    const events = extract()
+    let updated = 0
+    let skipped = 0
+    let failed = 0
+
+    for (const ev of events) {
+      const res = await tryMarkWhatsappStatus(adminClient, ev)
+      if (res.ok) updated += 1
+      else if ((res as unknown as { skipped?: unknown }).skipped) skipped += 1
+      else failed += 1
+    }
+
+    return jsonResponse(200, { ok: true, updated, skipped, failed })
+  }
+
+  const payloadRecord = bodyJson && typeof bodyJson === 'object' ? (bodyJson as Record<string, unknown>) : null
   const payloadAction = payloadRecord && typeof payloadRecord.action === 'string' ? payloadRecord.action.trim() : ''
   const isWebhookPayload = !payloadAction
 
@@ -2111,11 +2410,11 @@ Deno.serve(async (req) => {
           hint: 'No Supabase: Project Settings → Edge Functions → Secrets. Defina SERVICE_ROLE_KEY (ou SUPABASE_SERVICE_ROLE_KEY) e faça o deploy da função novamente.',
         })
       }
-      return await handleInboundRequest({ payload: rawPayload, supabaseUrl, serviceRoleKey })
+      return await handleInboundRequest({ payload: bodyJson, supabaseUrl, serviceRoleKey })
     }
     if (serviceRoleKey && isWebhookPayload) {
       const webhookClient = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } })
-      await logInboundAudit(webhookClient, 'webhook_secret_invalid', extractInboundMessage(rawPayload))
+      await logInboundAudit(webhookClient, 'webhook_secret_invalid', extractInboundMessage(bodyJson))
     }
   }
   const apikeyHeader = (req.headers.get('apikey') ?? req.headers.get('x-api-key') ?? '').trim()
@@ -2135,11 +2434,11 @@ Deno.serve(async (req) => {
     if (serviceRoleKey) {
       const webhookClient = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } })
       const cfg = await loadGlobalWhatsappConfig(webhookClient)
-      if (cfg.ok && cfg.configured && apiKeyCandidates.some((value) => value === cfg.apiKey)) {
-        return await handleInboundRequest({ payload: rawPayload, supabaseUrl, serviceRoleKey })
+      if (cfg.ok && cfg.configured && cfg.evolution && apiKeyCandidates.some((value) => value === cfg.evolution!.apiKey)) {
+        return await handleInboundRequest({ payload: bodyJson, supabaseUrl, serviceRoleKey })
       }
       if (cfg.ok && cfg.configured && isWebhookPayload) {
-        await logInboundAudit(webhookClient, 'webhook_invalid_key', extractInboundMessage(rawPayload))
+        await logInboundAudit(webhookClient, 'webhook_invalid_key', extractInboundMessage(bodyJson))
       }
     }
   }
@@ -2185,11 +2484,12 @@ Deno.serve(async (req) => {
   const principalClient = serviceClient ?? userClient
   const dbClient = serviceClient ?? userClient
 
-  const payload = rawPayload as Payload
+  const payload = bodyJson as Payload
 
   const uid = authData.user.id
   const isAdminAction =
     payload.action === 'admin_diagnostics' ||
+    payload.action === 'admin_config_status' ||
     payload.action === 'admin_status' ||
     payload.action === 'admin_connect' ||
     payload.action === 'admin_disconnect' ||
@@ -2255,6 +2555,7 @@ Deno.serve(async (req) => {
 
   if (
     payload.action === 'admin_diagnostics' ||
+    payload.action === 'admin_config_status' ||
     payload.action === 'admin_status' ||
     payload.action === 'admin_connect' ||
     payload.action === 'admin_disconnect' ||
@@ -2262,18 +2563,20 @@ Deno.serve(async (req) => {
   ) {
     if (principal.kind !== 'super_admin') return jsonResponse(403, { error: 'not_allowed' })
 
-    const { data: saRaw, error: saErr } = await dbClient
-      .from('super_admin')
-      .select('id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name')
-      .eq('id', principal.uid)
-      .maybeSingle()
+    const selectFull = 'id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name,whatsapp_meta_access_token,whatsapp_meta_phone_number_id'
+    const selectLegacy = 'id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name'
 
-    if (saErr) {
-      if (isMissingColumnError(saErr.message)) {
+    const first = await dbClient.from('super_admin').select(selectFull).eq('id', principal.uid).maybeSingle()
+    const second = first.error && isMissingColumnError(first.error.message) ? await dbClient.from('super_admin').select(selectLegacy).eq('id', principal.uid).maybeSingle() : null
+    const used = second ?? first
+
+    if (used.error) {
+      if (isMissingColumnError(used.error.message)) {
         return jsonResponse(400, { error: 'schema_incomplete', message: 'Execute o SQL do WhatsApp (Super Admin) em /admin/configuracoes.' })
       }
       return jsonResponse(403, { error: 'not_allowed' })
     }
+    const saRaw = used.data
     if (!saRaw) return jsonResponse(403, { error: 'not_allowed' })
 
     const sa = saRaw as unknown as SuperAdminConfigRow
@@ -2281,6 +2584,10 @@ Deno.serve(async (req) => {
     const apiKey = sa.whatsapp_api_key
     const instanceNameRaw = sa.whatsapp_instance_name ?? `admin-${principal.uid.slice(0, 8)}`
     const instanceName = sanitizeInstanceName(instanceNameRaw)
+
+    const metaAccessToken = (sa.whatsapp_meta_access_token ?? '').trim() || null
+    const metaPhoneNumberId = (sa.whatsapp_meta_phone_number_id ?? '').trim() || null
+    const provider = META_ENABLED && metaAccessToken && metaPhoneNumberId ? ('meta' as const) : apiUrl && apiKey ? ('evolution' as const) : (null as const)
 
     if (payload.action === 'admin_diagnostics') {
       const urlValidation = apiUrl ? validateEvolutionBaseUrl(apiUrl) : { ok: false as const, reason: 'missing_url' as const }
@@ -2294,10 +2601,6 @@ Deno.serve(async (req) => {
               return { ok: res.ok, status: res.status, state, body: res.body, hint }
             })()
           : null
-      const webhook =
-        apiUrl && apiKey && (urlValidation as unknown as { ok?: unknown }).ok === true
-          ? await findEvolutionWebhook({ apiUrl, apiKey, instanceName })
-          : null
 
       return jsonResponse(200, {
         ok: true,
@@ -2308,10 +2611,51 @@ Deno.serve(async (req) => {
           hasApiUrl: Boolean(apiUrl),
           hasApiKey: Boolean(apiKey),
           instanceName,
+          hasMetaAccessToken: Boolean(metaAccessToken),
+          hasMetaPhoneNumberId: Boolean(metaPhoneNumberId),
+          provider,
         },
         urlValidation,
         evolution,
-        webhook,
+      })
+    }
+
+    if (payload.action === 'admin_config_status') {
+      if (!provider) return jsonResponse(200, { ok: true, configured: false, provider: null })
+
+      if (provider === 'meta') {
+        const check = await metaGraphRequest({
+          accessToken: metaAccessToken!,
+          path: `/${encodeURIComponent(metaPhoneNumberId!)}?fields=display_phone_number,verified_name`,
+          method: 'GET',
+          timeoutMs: 10000,
+        })
+
+        const displayPhoneNumber = check.ok && check.body && typeof check.body === 'object' ? (((check.body as Record<string, unknown>).display_phone_number as unknown) ?? null) : null
+        const verifiedName = check.ok && check.body && typeof check.body === 'object' ? (((check.body as Record<string, unknown>).verified_name as unknown) ?? null) : null
+
+        return jsonResponse(200, {
+          ok: true,
+          configured: check.ok,
+          provider,
+          meta: {
+            ok: check.ok,
+            status: check.status,
+            display_phone_number: typeof displayPhoneNumber === 'string' ? displayPhoneNumber : null,
+            verified_name: typeof verifiedName === 'string' ? verifiedName : null,
+            details: check.ok ? null : check.body,
+          },
+          evolution: { configured: Boolean(apiUrl && apiKey) },
+        })
+      }
+
+      const v = validateEvolutionBaseUrl(apiUrl ?? '')
+      return jsonResponse(200, {
+        ok: true,
+        configured: v.ok,
+        provider,
+        evolution: { ok: v.ok, reason: v.ok ? null : v.reason },
+        meta: { configured: Boolean(metaAccessToken && metaPhoneNumberId) },
       })
     }
 
@@ -2353,9 +2697,7 @@ Deno.serve(async (req) => {
         return jsonResponse(stateRes.status, { error: 'evolution_error', details: stateRes.body, hint })
       }
       const state = extractInstanceState(stateRes.body)
-      const webhookRes = await ensureEvolutionWebhook({ apiUrl, apiKey, instanceName, supabaseUrl })
-      const webhook = { ok: webhookRes.ok, status: webhookRes.status, details: webhookRes.ok ? null : webhookRes.body }
-      return jsonResponse(200, { ok: true, instanceName, state, webhook })
+      return jsonResponse(200, { ok: true, instanceName, state })
     }
 
     if (payload.action === 'admin_connect') {
@@ -2371,9 +2713,7 @@ Deno.serve(async (req) => {
           const { error: updErr } = await dbClient.from('super_admin').update({ whatsapp_instance_name: instanceName }).eq('id', principal.uid)
           if (updErr && !isMissingColumnError(updErr.message)) return jsonResponse(400, { error: 'save_instance_name_failed', message: updErr.message })
         }
-        const webhookRes = await ensureEvolutionWebhook({ apiUrl, apiKey, instanceName, supabaseUrl })
-        const webhook = { ok: webhookRes.ok, status: webhookRes.status, details: webhookRes.ok ? null : webhookRes.body }
-        return jsonResponse(200, { ok: true, instanceName, state, webhook })
+        return jsonResponse(200, { ok: true, instanceName, state })
       }
 
       if (!stateRes.ok && stateRes.status === 404 && isEvolutionInstanceNotFound(stateRes.body, instanceName)) {
@@ -2491,9 +2831,7 @@ Deno.serve(async (req) => {
       }
 
       const qrSafe = pairingNumber ? null : qrBase64
-      const webhookRes = await ensureEvolutionWebhook({ apiUrl, apiKey, instanceName, supabaseUrl })
-      const webhook = { ok: webhookRes.ok, status: webhookRes.status, details: webhookRes.ok ? null : webhookRes.body }
-      return jsonResponse(200, { ok: true, instanceName, state: connectState ?? state, qrBase64: qrSafe, pairingCode, hint, webhook })
+      return jsonResponse(200, { ok: true, instanceName, state: connectState ?? state, qrBase64: qrSafe, pairingCode, hint })
     }
 
     if (payload.action === 'admin_disconnect') {
@@ -2608,11 +2946,11 @@ Deno.serve(async (req) => {
 
   const masterId = principal.masterId
 
-  const { data: userBase, error: userBaseErr } = await dbClient
-    .from('usuarios')
-    .select('id,slug,nome_negocio,telefone,endereco,whatsapp_habilitado')
-    .eq('id', masterId)
-    .maybeSingle()
+  const selectUserBase = 'id,slug,nome_negocio,telefone,endereco,whatsapp_habilitado'
+
+  const userBaseRes = await dbClient.from('usuarios').select(selectUserBase).eq('id', masterId).maybeSingle()
+  const userBase = userBaseRes.data
+  const userBaseErr = userBaseRes.error
 
   if (userBaseErr || !userBase) {
     return jsonResponse(403, { error: 'not_allowed' })
@@ -2660,19 +2998,49 @@ Deno.serve(async (req) => {
     return jsonResponse(502, { error: 'load_whatsapp_config_failed', message: globalCfg.message })
   }
 
-  const apiUrl = globalCfg.apiUrl
-  const apiKey = globalCfg.apiKey
+  const evolutionCfg = globalCfg.evolution
+  const metaCfg = META_ENABLED ? globalCfg.meta : null
+  const apiUrl = evolutionCfg?.apiUrl ?? null
+  const apiKey = evolutionCfg?.apiKey ?? null
   const enabled = userBaseRow.whatsapp_habilitado
   const whatsappEnabled = enabled === undefined || enabled === null ? true : Boolean(enabled)
   const slug = userBaseRow.slug ?? ''
-  const instanceNameRaw = userExtra?.whatsapp_instance_name ?? globalCfg.instanceName ?? slug
+  const instanceNameRaw = userExtra?.whatsapp_instance_name ?? slug
   const instanceName = sanitizeInstanceName(instanceNameRaw)
 
+  const provider = metaCfg ? ('meta' as const) : evolutionCfg ? ('evolution' as const) : (null as const)
+
   if (payload.action === 'config_status') {
-    const configured = Boolean(apiUrl && apiKey)
-    if (!configured) return jsonResponse(200, { ok: true, configured: false })
-    const v = validateEvolutionBaseUrl(apiUrl)
-    return jsonResponse(200, { ok: true, configured: v.ok })
+    if (!provider) return jsonResponse(200, { ok: true, configured: false, provider: null })
+
+    if (provider === 'meta') {
+      const check = await metaGraphRequest({
+        accessToken: metaCfg!.accessToken,
+        path: `/${encodeURIComponent(metaCfg!.phoneNumberId)}?fields=display_phone_number,verified_name`,
+        method: 'GET',
+        timeoutMs: 10000,
+      })
+
+      const displayPhoneNumber =
+        check.ok && check.body && typeof check.body === 'object' ? (((check.body as Record<string, unknown>).display_phone_number as unknown) ?? null) : null
+      const verifiedName = check.ok && check.body && typeof check.body === 'object' ? (((check.body as Record<string, unknown>).verified_name as unknown) ?? null) : null
+      return jsonResponse(200, {
+        ok: true,
+        configured: check.ok,
+        provider,
+        meta: {
+          ok: check.ok,
+          status: check.status,
+          display_phone_number: typeof displayPhoneNumber === 'string' ? displayPhoneNumber : null,
+          verified_name: typeof verifiedName === 'string' ? verifiedName : null,
+          details: check.ok ? null : check.body,
+        },
+        evolution: { configured: Boolean(evolutionCfg) },
+      })
+    }
+
+    const v = validateEvolutionBaseUrl(evolutionCfg!.apiUrl)
+    return jsonResponse(200, { ok: true, configured: v.ok, provider, evolution: { ok: v.ok, reason: v.ok ? null : v.reason }, meta: { configured: Boolean(metaCfg) } })
   }
 
   if (!whatsappEnabled) {
@@ -2685,12 +3053,12 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (payload.action !== 'send_confirmacao' && payload.action !== 'send_cancelamento' && (!apiUrl || !apiKey)) {
+  if (!provider) {
     return jsonResponse(400, { error: 'whatsapp_not_configured' })
   }
 
-  if (payload.action !== 'send_confirmacao' && payload.action !== 'send_cancelamento') {
-    const v = validateEvolutionBaseUrl(apiUrl ?? '')
+  if (provider === 'evolution' && payload.action !== 'send_confirmacao' && payload.action !== 'send_cancelamento') {
+    const v = validateEvolutionBaseUrl(evolutionCfg!.apiUrl)
     if (!v.ok) {
       const cleaned = (v as unknown as { cleaned?: string }).cleaned ?? null
       const hostname = (() => {
@@ -2712,24 +3080,38 @@ Deno.serve(async (req) => {
   }
 
   if (payload.action === 'status') {
+    if (provider !== 'evolution') {
+      return jsonResponse(400, {
+        error: 'provider_not_supported',
+        provider,
+        message: 'No modo Meta Cloud API, o status de conexão não usa QR Code/instância. Use config_status para validar token/phone_number_id.',
+      })
+    }
+
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
     let stateRes = await evolutionRequestAuto({
-      baseUrl: apiUrl!,
-      apiKey: apiKey!,
+      baseUrl: evolutionCfg!.apiUrl,
+      apiKey: evolutionCfg!.apiKey,
       path: `/instance/connectionState/${instanceName}`,
       method: 'GET',
       stopOn404,
     })
 
       if (!stateRes.ok && stateRes.status === 404 && isEvolutionInstanceNotFound(stateRes.body, instanceName)) {
-        const createRes = await createEvolutionInstance({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName, qrcode: pairingNumber ? false : true, number: pairingNumber || null })
+        const createRes = await createEvolutionInstance({
+          apiUrl: evolutionCfg!.apiUrl,
+          apiKey: evolutionCfg!.apiKey,
+          instanceName,
+          qrcode: pairingNumber ? false : true,
+          number: pairingNumber || null,
+        })
         if (!createRes.ok && createRes.status !== 409) {
           const hint = evolutionHint(createRes.body)
           return jsonResponse(createRes.status, { error: 'evolution_error', details: createRes.body, hint })
         }
       stateRes = await evolutionRequestAuto({
-        baseUrl: apiUrl!,
-        apiKey: apiKey!,
+        baseUrl: evolutionCfg!.apiUrl,
+        apiKey: evolutionCfg!.apiKey,
         path: `/instance/connectionState/${instanceName}`,
         method: 'GET',
         stopOn404,
@@ -2741,12 +3123,17 @@ Deno.serve(async (req) => {
       return jsonResponse(stateRes.status, { error: 'evolution_error', details: stateRes.body, hint })
     }
     const state = extractInstanceState(stateRes.body)
-    const webhookRes = await ensureEvolutionWebhook({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName, supabaseUrl })
-    const webhook = { ok: webhookRes.ok, status: webhookRes.status, details: webhookRes.ok ? null : webhookRes.body }
-    return jsonResponse(200, { ok: true, instanceName, state, webhook })
+    return jsonResponse(200, { ok: true, instanceName, state })
   }
 
   if (payload.action === 'connect') {
+    if (provider !== 'evolution') {
+      return jsonResponse(400, {
+        error: 'provider_not_supported',
+        provider,
+        message: 'No modo Meta Cloud API, não existe conexão via QR Code/instância. Use config_status para validar a configuração.',
+      })
+    }
     const pairingNumber = typeof payload.number === 'string' ? sanitizePhone(payload.number) : ''
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
     const stateRes = await evolutionRequestAuto({
@@ -2767,9 +3154,7 @@ Deno.serve(async (req) => {
           return jsonResponse(400, { error: 'save_instance_name_failed', message: updErr.message })
         }
       }
-      const webhookRes = await ensureEvolutionWebhook({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName, supabaseUrl })
-      const webhook = { ok: webhookRes.ok, status: webhookRes.status, details: webhookRes.ok ? null : webhookRes.body }
-      return jsonResponse(200, { ok: true, instanceName, state, webhook })
+      return jsonResponse(200, { ok: true, instanceName, state })
     }
 
     if (!stateRes.ok && stateRes.status === 404 && isEvolutionInstanceNotFound(stateRes.body, instanceName)) {
@@ -2879,12 +3264,17 @@ Deno.serve(async (req) => {
       }
     }
     const qrSafe = pairingNumber ? null : qrBase64
-    const webhookRes = await ensureEvolutionWebhook({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName, supabaseUrl })
-    const webhook = { ok: webhookRes.ok, status: webhookRes.status, details: webhookRes.ok ? null : webhookRes.body }
-    return jsonResponse(200, { ok: true, instanceName, state: connectState ?? state, qrBase64: qrSafe, pairingCode, hint, webhook })
+    return jsonResponse(200, { ok: true, instanceName, state: connectState ?? state, qrBase64: qrSafe, pairingCode, hint })
   }
 
   if (payload.action === 'disconnect') {
+    if (provider !== 'evolution') {
+      return jsonResponse(400, {
+        error: 'provider_not_supported',
+        provider,
+        message: 'No modo Meta Cloud API, não existe conexão via QR Code/instância. Use config_status para validar a configuração.',
+      })
+    }
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
 
     let logoutRes = await evolutionRequestAuto({ baseUrl: apiUrl!, apiKey: apiKey!, path: `/instance/logout/${instanceName}`, method: 'DELETE', stopOn404 })
@@ -2910,6 +3300,34 @@ Deno.serve(async (req) => {
     const text = String(payload.text ?? '').trim()
     if (!sanitizePhone(phoneRaw) || !text) return jsonResponse(400, { error: 'invalid_payload' })
 
+    if (provider === 'meta') {
+      const to = normalizeMetaRecipient(phoneRaw)
+      if (!to) return jsonResponse(400, { error: 'invalid_payload' })
+
+      await tryResetWhatsappUsageIfNeeded(dbClient, masterId)
+      const quotaRes = await loadWhatsappQuotaAndUsage(dbClient, masterId)
+      if (quotaRes.ok && isWhatsappQuotaExceeded({ quota: quotaRes.quota, consumo: quotaRes.consumo })) {
+        return jsonResponse(402, {
+          error: 'whatsapp_quota_exceeded',
+          quota_mensal: quotaRes.quota,
+          consumo_mes: quotaRes.consumo,
+          consumo_mes_ref: quotaRes.ref,
+        })
+      }
+
+      const sendRes = await metaSendText({ accessToken: metaCfg!.accessToken, phoneNumberId: metaCfg!.phoneNumberId, to, text })
+      if (!sendRes.ok) {
+        return jsonResponse(sendRes.status || 502, { error: 'meta_error', details: sendRes.body })
+      }
+
+      const messageId = metaExtractMessageId(sendRes.body)
+      if (messageId) {
+        await tryRegisterOutboundMessage(dbClient, { usuarioId: masterId, messageId, kind: 'test', category: 'utility', raw: sendRes.body })
+      }
+
+      return jsonResponse(200, { ok: true, provider: 'meta', messageId })
+    }
+
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
     let sendRes = await evolutionSendTextWithFallback({ apiUrl: apiUrl!, apiKey: apiKey!, instanceName, phoneRaw, text, stopOn404 })
 
@@ -2934,7 +3352,7 @@ Deno.serve(async (req) => {
     return jsonResponse(200, { ok: true })
   }
 
-  if (payload.action === 'send_confirmacao') {
+  if (payload.action === 'send_confirmacao' || payload.action === 'manual_confirmacao') {
     const agendamentoId = String(payload.agendamento_id ?? '').trim()
     if (!agendamentoId) return jsonResponse(400, { error: 'invalid_payload' })
 
@@ -2976,10 +3394,12 @@ Deno.serve(async (req) => {
 
     const agExtra = (agExtraSafe ?? null) as unknown as AgendamentoConfirmacaoRow | null
 
-    if (agExtra?.confirmacao_enviada === true) return jsonResponse(200, { ok: true, alreadySent: true })
+    if (payload.action === 'send_confirmacao') {
+      if (agExtra?.confirmacao_enviada === true) return jsonResponse(200, { ok: true, alreadySent: true })
 
-    const shouldSend = userExtra?.enviar_confirmacao !== false
-    if (!shouldSend) return jsonResponse(200, { ok: true, skipped: 'disabled' })
+      const shouldSend = userExtra?.enviar_confirmacao !== false
+      if (!shouldSend) return jsonResponse(200, { ok: true, skipped: 'disabled' })
+    }
 
     const tmplCandidate = (userExtra?.mensagem_confirmacao ?? '').trim()
     const tmpl = tmplCandidate ? (userExtra?.mensagem_confirmacao ?? '') : defaultConfirmacao
@@ -3008,6 +3428,7 @@ Deno.serve(async (req) => {
     const phoneRaw = String(agRow.cliente_telefone ?? '')
     const phoneOk = Boolean(sanitizePhone(phoneRaw))
     const msgOk = Boolean(message)
+    const waUrl = buildWaMeUrl(phoneRaw, message)
 
     const clienteEmail = readExtrasEmail(agRow.extras)
     const canEmail = Boolean(resendApiKey && clienteEmail)
@@ -3029,7 +3450,7 @@ Deno.serve(async (req) => {
       return { ok: res.ok, status: res.status, reason, to: clienteEmail, body: res.body }
     }
 
-    const canWhatsapp = Boolean(apiUrl && apiKey)
+    const canWhatsapp = provider === 'meta' ? Boolean(metaCfg?.accessToken && metaCfg?.phoneNumberId) : Boolean(apiUrl && apiKey)
     if (!msgOk) {
       return jsonResponse(400, {
         error: 'missing_message_data',
@@ -3037,6 +3458,25 @@ Deno.serve(async (req) => {
         message_ok: msgOk,
         phone_masked: phoneRaw ? maskRecipient(phoneRaw) : null,
         hint: 'A mensagem de confirmação ficou vazia. Verifique o modelo de mensagem em Configurações > Mensagens automáticas.',
+      })
+    }
+
+    if (payload.action === 'manual_confirmacao') {
+      if (!waUrl) {
+        return jsonResponse(400, {
+          error: 'missing_message_data',
+          phone_ok: phoneOk,
+          message_ok: msgOk,
+          phone_masked: phoneRaw ? maskRecipient(phoneRaw) : null,
+          hint: 'Não foi possível gerar o link wa.me. Verifique se o telefone do cliente está correto (DDD + número).',
+        })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        action: 'manual_confirmacao',
+        wa_url: waUrl,
+        to: normalizeWaMeRecipient(phoneRaw),
+        text: message,
       })
     }
 
@@ -3056,6 +3496,54 @@ Deno.serve(async (req) => {
       const emailFallback = await tryEmail('whatsapp_not_configured')
       if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, skipped: 'not_configured', fallback: { email: emailFallback } })
       return jsonResponse(200, { ok: true, skipped: 'not_configured' })
+    }
+
+    if (provider === 'meta') {
+      const to = normalizeMetaRecipient(phoneRaw)
+      if (!to) {
+        const emailFallback = await tryEmail('invalid_phone')
+        if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, fallback: { email: emailFallback } })
+        return jsonResponse(400, { error: 'invalid_payload' })
+      }
+
+      await tryResetWhatsappUsageIfNeeded(dbClient, masterId)
+      const quotaRes = await loadWhatsappQuotaAndUsage(dbClient, masterId)
+      if (quotaRes.ok && isWhatsappQuotaExceeded({ quota: quotaRes.quota, consumo: quotaRes.consumo })) {
+        const emailFallback = await tryEmail('whatsapp_quota_exceeded')
+        if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, fallback: { email: emailFallback } })
+        return jsonResponse(402, {
+          error: 'whatsapp_quota_exceeded',
+          quota_mensal: quotaRes.quota,
+          consumo_mes: quotaRes.consumo,
+          consumo_mes_ref: quotaRes.ref,
+        })
+      }
+
+      const sendRes = await metaSendText({ accessToken: metaCfg!.accessToken, phoneNumberId: metaCfg!.phoneNumberId, to, text: message })
+      if (!sendRes.ok) {
+        const emailFallback = await tryEmail('meta_error')
+        if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, fallback: { email: emailFallback } })
+        return jsonResponse(sendRes.status || 502, { error: 'meta_error', details: sendRes.body })
+      }
+
+      const messageId = metaExtractMessageId(sendRes.body)
+      if (messageId) {
+        await tryRegisterOutboundMessage(dbClient, { usuarioId: masterId, messageId, kind: 'confirmacao', category: 'utility', raw: sendRes.body })
+      }
+
+      if (agExtraOk) {
+        const { error: updErr } = await userClient
+          .from('agendamentos')
+          .update({ confirmacao_enviada: true, confirmacao_enviada_em: new Date().toISOString() })
+          .eq('id', agendamentoId)
+          .eq('usuario_id', masterId)
+          .eq('confirmacao_enviada', false)
+        if (updErr && !isMissingColumnError(updErr.message)) {
+          return jsonResponse(400, { error: 'save_confirmacao_flag_failed', message: updErr.message })
+        }
+      }
+
+      return jsonResponse(200, { ok: true, provider: 'meta', messageId })
     }
 
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)
@@ -3130,7 +3618,7 @@ Deno.serve(async (req) => {
     return jsonResponse(200, { ok: true, state })
   }
 
-  if (payload.action === 'send_cancelamento') {
+  if (payload.action === 'send_cancelamento' || payload.action === 'manual_cancelamento') {
     const agendamentoId = String(payload.agendamento_id ?? '').trim()
     if (!agendamentoId) return jsonResponse(400, { error: 'invalid_payload' })
 
@@ -3154,16 +3642,18 @@ Deno.serve(async (req) => {
     const statusNormalized = String(agRow.status ?? '')
       .trim()
       .toLowerCase()
-    if (statusNormalized !== 'cancelado') {
+    if (statusNormalized !== 'cancelado' && statusNormalized !== 'nao_compareceu') {
       return jsonResponse(400, {
         error: 'agendamento_not_cancelled',
         status: agRow.status,
-        hint: 'O aviso de cancelamento só envia quando o status do agendamento está como “cancelado”.',
+        hint: 'O aviso de cancelamento só envia quando o status do agendamento está como “cancelado” ou “nao_compareceu”.',
       })
     }
 
-    const shouldSend = (userExtra?.enviar_cancelamento ?? true) !== false
-    if (!shouldSend) return jsonResponse(200, { ok: true, skipped: 'disabled' })
+    if (payload.action === 'send_cancelamento') {
+      const shouldSend = (userExtra?.enviar_cancelamento ?? true) !== false
+      if (!shouldSend) return jsonResponse(200, { ok: true, skipped: 'disabled' })
+    }
 
     const tmplCandidate = (userExtra?.mensagem_cancelamento ?? '').trim()
     const tmpl = tmplCandidate ? (userExtra?.mensagem_cancelamento ?? '') : defaultCancelamento
@@ -3192,6 +3682,7 @@ Deno.serve(async (req) => {
     const phoneRaw = String(agRow.cliente_telefone ?? '')
     const phoneOk = Boolean(sanitizePhone(phoneRaw))
     const msgOk = Boolean(message)
+    const waUrl = buildWaMeUrl(phoneRaw, message)
 
     const clienteEmail = readExtrasEmail(agRow.extras)
     const canEmail = Boolean(resendApiKey && clienteEmail)
@@ -3205,7 +3696,7 @@ Deno.serve(async (req) => {
       return { ok: res.ok, status: res.status, reason, to: clienteEmail, body: res.body }
     }
 
-    const canWhatsapp = Boolean(apiUrl && apiKey)
+    const canWhatsapp = provider === 'meta' ? Boolean(metaCfg?.accessToken && metaCfg?.phoneNumberId) : Boolean(apiUrl && apiKey)
     if (!msgOk) {
       return jsonResponse(400, {
         error: 'missing_message_data',
@@ -3213,6 +3704,25 @@ Deno.serve(async (req) => {
         message_ok: msgOk,
         phone_masked: phoneRaw ? maskRecipient(phoneRaw) : null,
         hint: 'A mensagem de cancelamento ficou vazia.',
+      })
+    }
+
+    if (payload.action === 'manual_cancelamento') {
+      if (!waUrl) {
+        return jsonResponse(400, {
+          error: 'missing_message_data',
+          phone_ok: phoneOk,
+          message_ok: msgOk,
+          phone_masked: phoneRaw ? maskRecipient(phoneRaw) : null,
+          hint: 'Não foi possível gerar o link wa.me. Verifique se o telefone do cliente está correto (DDD + número).',
+        })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        action: 'manual_cancelamento',
+        wa_url: waUrl,
+        to: normalizeWaMeRecipient(phoneRaw),
+        text: message,
       })
     }
 
@@ -3232,6 +3742,42 @@ Deno.serve(async (req) => {
       const emailFallback = await tryEmail('whatsapp_not_configured')
       if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, skipped: 'not_configured', fallback: { email: emailFallback } })
       return jsonResponse(200, { ok: true, skipped: 'not_configured' })
+    }
+
+    if (provider === 'meta') {
+      const to = normalizeMetaRecipient(phoneRaw)
+      if (!to) {
+        const emailFallback = await tryEmail('invalid_phone')
+        if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, fallback: { email: emailFallback } })
+        return jsonResponse(400, { error: 'invalid_payload' })
+      }
+
+      await tryResetWhatsappUsageIfNeeded(dbClient, masterId)
+      const quotaRes = await loadWhatsappQuotaAndUsage(dbClient, masterId)
+      if (quotaRes.ok && isWhatsappQuotaExceeded({ quota: quotaRes.quota, consumo: quotaRes.consumo })) {
+        const emailFallback = await tryEmail('whatsapp_quota_exceeded')
+        if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, fallback: { email: emailFallback } })
+        return jsonResponse(402, {
+          error: 'whatsapp_quota_exceeded',
+          quota_mensal: quotaRes.quota,
+          consumo_mes: quotaRes.consumo,
+          consumo_mes_ref: quotaRes.ref,
+        })
+      }
+
+      const sendRes = await metaSendText({ accessToken: metaCfg!.accessToken, phoneNumberId: metaCfg!.phoneNumberId, to, text: message })
+      if (!sendRes.ok) {
+        const emailFallback = await tryEmail('meta_error')
+        if (emailFallback) return jsonResponse(emailFallback.ok ? 200 : 502, { ok: emailFallback.ok, fallback: { email: emailFallback } })
+        return jsonResponse(sendRes.status || 502, { error: 'meta_error', details: sendRes.body })
+      }
+
+      const messageId = metaExtractMessageId(sendRes.body)
+      if (messageId) {
+        await tryRegisterOutboundMessage(dbClient, { usuarioId: masterId, messageId, kind: 'cancelamento', category: 'utility', raw: sendRes.body })
+      }
+
+      return jsonResponse(200, { ok: true, provider: 'meta', messageId })
     }
 
     const stopOn404 = ({ body }: { body: unknown }) => isEvolutionInstanceNotFound(body, instanceName)

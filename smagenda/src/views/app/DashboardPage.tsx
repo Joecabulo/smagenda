@@ -41,7 +41,14 @@ type Agendamento = {
 
 type Funcionario = { id: string; nome_completo: string; ativo: boolean }
 
-type ServicoOption = { id: string; nome: string; cor: string | null }
+type ServicoOption = {
+  id: string
+  nome: string
+  cor: string | null
+  preco: number | null
+  duracao_minutos: number | null
+  capacidade_por_horario?: number | null
+}
 
 type Bloqueio = { id: string; data: string; hora_inicio: string; hora_fim: string; motivo: string | null; funcionario_id: string | null }
 
@@ -75,6 +82,14 @@ function buildSlots(
 function readExtrasEndereco(extras: unknown) {
   if (!extras || typeof extras !== 'object') return null
   const v = (extras as Record<string, unknown>).endereco
+  if (typeof v !== 'string') return null
+  const t = v.trim()
+  return t ? t : null
+}
+
+function readExtrasDetalhe(extras: unknown) {
+  if (!extras || typeof extras !== 'object') return null
+  const v = (extras as Record<string, unknown>).detalhe
   if (typeof v !== 'string') return null
   const t = v.trim()
   return t ? t : null
@@ -518,6 +533,18 @@ export function DashboardPage() {
   const [blockRepeatUntil, setBlockRepeatUntil] = useState('')
   const [savingBlock, setSavingBlock] = useState(false)
 
+  const [createOpen, setCreateOpen] = useState(false)
+  const [createDate, setCreateDate] = useState('')
+  const [createHora, setCreateHora] = useState('')
+  const [createServicoId, setCreateServicoId] = useState('')
+  const [createFuncionarioId, setCreateFuncionarioId] = useState('')
+  const [createClienteNome, setCreateClienteNome] = useState('')
+  const [createClienteTelefone, setCreateClienteTelefone] = useState('')
+  const [createQtdVagas, setCreateQtdVagas] = useState('1')
+  const [createDetalhe, setCreateDetalhe] = useState('')
+  const [createSaving, setCreateSaving] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
+
   const weekStartDate = useMemo(() => startOfWeek(date), [date])
   const weekEndDate = useMemo(() => addDays(weekStartDate, 6), [weekStartDate])
   const dayKey = useMemo(() => toISODate(date), [date])
@@ -563,7 +590,7 @@ export function DashboardPage() {
 
   const hasAnyFilter = useMemo(() => Boolean(statusFilter.trim() || servicoFilterId.trim() || searchNorm.trim()), [searchNorm, servicoFilterId, statusFilter])
 
-  const slotStepMinutes = 30
+  const slotStepMinutes = 10
 
   const slots = useMemo(() => {
     if (!usuario?.horario_inicio || !usuario?.horario_fim) return []
@@ -582,7 +609,7 @@ export function DashboardPage() {
       if (!usuarioId) return
       const { data: servicosData, error: servicosError } = await supabase
         .from('servicos')
-        .select('id,nome,cor')
+        .select('id,nome,cor,preco,duracao_minutos,capacidade_por_horario')
         .eq('usuario_id', usuarioId)
         .eq('ativo', true)
         .order('ordem', { ascending: true })
@@ -706,6 +733,178 @@ export function DashboardPage() {
       setLoading(false)
     })
   }, [isAcademia, usuarioId, dayKey, filterFuncionarioId, viewMode, weekEndKey, weekStartKey])
+
+  const selectedCreateServico = useMemo(() => servicos.find((s) => s.id === createServicoId) ?? null, [servicos, createServicoId])
+  const createCapacidade = useMemo(() => {
+    if (!isAcademia || !qtdVagasColumnAvailable) return 1
+    const raw = selectedCreateServico?.capacidade_por_horario
+    return typeof raw === 'number' && Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 1
+  }, [isAcademia, qtdVagasColumnAvailable, selectedCreateServico])
+
+  const openCreateModal = () => {
+    if (!canConfirmarAgendamento) return
+    const activeFuncionarios = funcionarios.filter((f) => f.ativo)
+    const defaultFuncionarioId =
+      filterFuncionarioId ||
+      (activeFuncionarios.length === 1 ? activeFuncionarios[0]?.id ?? '' : '')
+    const defaultServicoId = servicos[0]?.id ?? ''
+    setCreateDate(dayKey)
+    setCreateHora('')
+    setCreateServicoId(defaultServicoId)
+    setCreateFuncionarioId(defaultFuncionarioId)
+    setCreateClienteNome('')
+    setCreateClienteTelefone('')
+    setCreateQtdVagas('1')
+    setCreateDetalhe('')
+    setCreateError(null)
+    setCreateOpen(true)
+  }
+
+  const closeCreateModal = () => {
+    setCreateOpen(false)
+    setCreateError(null)
+  }
+
+  const resolveServicoDuracaoMin = (servico: ServicoOption | null) => {
+    if (typeof servico?.duracao_minutos === 'number' && Number.isFinite(servico.duracao_minutos)) {
+      return Math.max(1, Math.floor(servico.duracao_minutos))
+    }
+    return slotStepMinutes
+  }
+
+  const getAgendamentoEndMin = (ag: Agendamento) => {
+    const startMin = parseTimeToMinutes(ag.hora_inicio)
+    if (ag.hora_fim) {
+      return parseTimeToMinutes(ag.hora_fim)
+    }
+    const dur = ag.servico?.duracao_minutos
+    if (typeof dur === 'number' && Number.isFinite(dur)) {
+      return startMin + Math.max(1, Math.floor(dur))
+    }
+    return startMin + slotStepMinutes
+  }
+
+  const createAgendamento = async () => {
+    if (!usuarioId || !canConfirmarAgendamento) return
+    if (!createDate.trim() || !createHora.trim() || !createServicoId.trim()) return
+    if (!createClienteNome.trim() || !createClienteTelefone.trim()) return
+    if (!selectedCreateServico) return
+    setCreateSaving(true)
+    setCreateError(null)
+    setError(null)
+    setSuccess(null)
+
+    const startMin = parseTimeToMinutes(createHora)
+    const endMin = startMin + resolveServicoDuracaoMin(selectedCreateServico)
+    if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) {
+      setCreateError('Horário inválido.')
+      setCreateSaving(false)
+      return
+    }
+
+    const horaFim = minutesToTime(endMin)
+    const funcionarioId = createFuncionarioId.trim() ? createFuncionarioId.trim() : null
+    const dataKey = createDate.trim()
+
+    const hasConflict = agendamentos.some((ag) => {
+      if (ag.data !== dataKey) return false
+      const statusLower = String(ag.status ?? '').trim().toLowerCase()
+      if (statusLower === 'cancelado') return false
+      if (funcionarioId) {
+        if (ag.funcionario_id && ag.funcionario_id !== funcionarioId) return false
+      } else {
+        if (ag.funcionario_id) return false
+      }
+      const agStart = parseTimeToMinutes(ag.hora_inicio)
+      const agEnd = getAgendamentoEndMin(ag)
+      return overlaps(startMin, endMin, agStart, agEnd)
+    })
+
+    if (hasConflict) {
+      setCreateError('Horário já ocupado por outro agendamento.')
+      setCreateSaving(false)
+      return
+    }
+
+    const blockConflict = bloqueios.some((b) => {
+      if (b.data !== dataKey) return false
+      if (funcionarioId) {
+        if (b.funcionario_id && b.funcionario_id !== funcionarioId) return false
+      } else {
+        if (b.funcionario_id) return false
+      }
+      const blockStart = parseTimeToMinutes(b.hora_inicio)
+      const blockEnd = parseTimeToMinutes(b.hora_fim)
+      return overlaps(startMin, endMin, blockStart, blockEnd)
+    })
+
+    if (blockConflict) {
+      setCreateError('Horário bloqueado.')
+      setCreateSaving(false)
+      return
+    }
+
+    const extras: Record<string, unknown> = {}
+    if (createDetalhe.trim()) extras.detalhe = createDetalhe.trim()
+    const extrasFinal = Object.keys(extras).length > 0 ? extras : null
+
+    const qtdVagasInt = Math.max(1, Math.floor(Number(createQtdVagas)))
+    const insertPayload: Record<string, unknown> = {
+      usuario_id: usuarioId,
+      funcionario_id: funcionarioId,
+      servico_id: selectedCreateServico.id,
+      cliente_nome: createClienteNome.trim(),
+      cliente_telefone: createClienteTelefone.trim(),
+      data: dataKey,
+      hora_inicio: createHora,
+      hora_fim: horaFim,
+      status: 'pendente',
+      extras: extrasFinal,
+    }
+    if (isAcademia && qtdVagasColumnAvailable) insertPayload.qtd_vagas = qtdVagasInt
+
+    const { data, error: insertError } = await supabase.from('agendamentos').insert(insertPayload).select('id')
+    if (insertError) {
+      setCreateError(formatSupabaseError(insertError))
+      setCreateSaving(false)
+      return
+    }
+
+    const createdId = data?.[0] ? String((data[0] as Record<string, unknown>).id ?? '') : ''
+    const newRow: Agendamento = {
+      id: createdId || `tmp-${Date.now()}`,
+      cliente_nome: createClienteNome.trim(),
+      cliente_telefone: createClienteTelefone.trim(),
+      qtd_vagas: isAcademia && qtdVagasColumnAvailable ? qtdVagasInt : null,
+      data: dataKey,
+      hora_inicio: normalizeTimeHHMM(createHora) || createHora,
+      hora_fim: normalizeTimeHHMM(horaFim) || horaFim,
+      status: 'pendente',
+      funcionario_id: funcionarioId,
+      extras: extrasFinal,
+      servico: {
+        id: selectedCreateServico.id,
+        nome: selectedCreateServico.nome,
+        preco: selectedCreateServico.preco ?? 0,
+        duracao_minutos: selectedCreateServico.duracao_minutos ?? slotStepMinutes,
+        cor: selectedCreateServico.cor,
+        capacidade_por_horario: selectedCreateServico.capacidade_por_horario ?? null,
+      },
+    }
+
+    setAgendamentos((prev) => [...prev, newRow])
+    setSuccess('Agendamento criado.')
+    setCreateSaving(false)
+    closeCreateModal()
+  }
+
+  const canCreateAgendamento = Boolean(
+    createDate.trim() &&
+      createHora.trim() &&
+      createServicoId.trim() &&
+      createClienteNome.trim() &&
+      createClienteTelefone.trim()
+  )
 
   const getAgVagas = useCallback((a: Agendamento) => {
     if (!qtdVagasColumnAvailable) return 1
@@ -1170,6 +1369,9 @@ export function DashboardPage() {
                         Ativar notificações
                       </Button>
                     ) : null}
+                    {canConfirmarAgendamento ? (
+                      <Button onClick={openCreateModal}>Novo agendamento</Button>
+                    ) : null}
                   </div>
 
                   <div
@@ -1288,8 +1490,8 @@ export function DashboardPage() {
             </div>
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-              <Input label="Início" type="time" value={blockStart} onChange={(e) => setBlockStart(e.target.value)} step={900} />
-              <Input label="Fim" type="time" value={blockEnd} onChange={(e) => setBlockEnd(e.target.value)} step={900} />
+              <Input label="Início" type="time" value={blockStart} onChange={(e) => setBlockStart(e.target.value)} step={600} />
+              <Input label="Fim" type="time" value={blockEnd} onChange={(e) => setBlockEnd(e.target.value)} step={600} />
               <label className="block">
                 <div className="text-sm font-medium text-slate-700 mb-1">Profissional</div>
                 <select
@@ -1412,18 +1614,22 @@ export function DashboardPage() {
                     {agendamentos.map((ag) => {
                       const statusUi = resolveStatusUi(ag.status)
                       const endereco = readExtrasEndereco(ag.extras)
+                      const detalhe = readExtrasDetalhe(ag.extras)
                       const vagas = typeof ag.qtd_vagas === 'number' && Number.isFinite(ag.qtd_vagas) ? Math.max(1, Math.floor(ag.qtd_vagas)) : 1
                       return (
                         <div key={ag.id} className="p-3 flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="text-sm font-semibold text-slate-900 truncate">
+                            <div className="text-sm font-semibold text-slate-900 truncate">
                               {(normalizeTimeHHMM(ag.hora_inicio) || '—')} — {ag.cliente_nome}
                             </div>
                             <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
                             {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
+                            {detalhe ? <div className="text-sm text-slate-600">📝 {detalhe}</div> : null}
                             {isAcademia && qtdVagasColumnAvailable && vagas > 1 ? <div className="text-sm text-slate-600">Vagas: {vagas}</div> : null}
                             <div className="text-sm text-slate-700">
                               ✂️ {ag.servico?.nome} {canVerFinanceiro && ag.servico?.preco ? `- ${formatBRMoney(Number(ag.servico.preco))}` : ''}
+                            </div>
                             </div>
                           </div>
                           <Badge tone={statusUi.tone}>{statusUi.label}</Badge>
@@ -1448,6 +1654,7 @@ export function DashboardPage() {
                   const startLabel = normalizeTimeHHMM(agCover.hora_inicio)
                   const timeLabel = isStart && startLabel ? startLabel : time
                   const endereco = visible ? readExtrasEndereco(agCover.extras) : null
+                  const detalhe = visible ? readExtrasDetalhe(agCover.extras) : null
                   const vagas =
                     visible && typeof agCover.qtd_vagas === 'number' && Number.isFinite(agCover.qtd_vagas)
                       ? Math.max(1, Math.floor(agCover.qtd_vagas))
@@ -1469,6 +1676,7 @@ export function DashboardPage() {
                         </div>
                         {visible ? <div className="text-sm text-slate-600">📱 {agCover.cliente_telefone}</div> : null}
                         {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
+                        {detalhe ? <div className="text-sm text-slate-600">📝 {detalhe}</div> : null}
                         {groupParticipants && (capacidade > 1 || groupBooked > 1) ? (
                           <div className="text-sm text-slate-600">
                             Agendados: {groupBooked}
@@ -1803,6 +2011,99 @@ export function DashboardPage() {
           </Card>
         </div>
       </div>
+
+          {createOpen ? (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+              <div className="w-full max-w-2xl">
+                <Card>
+                  <div className="p-6 space-y-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">Novo agendamento</div>
+                        <div className="text-xs text-slate-600">{usuario.nome_negocio}</div>
+                      </div>
+                      <Button variant="secondary" onClick={closeCreateModal}>
+                        Fechar
+                      </Button>
+                    </div>
+
+                    {createError ? (
+                      <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{createError}</div>
+                    ) : null}
+
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      <Input label="Data" type="date" value={createDate} onChange={(e) => setCreateDate(e.target.value)} />
+                      <Input label="Hora" type="time" value={createHora} onChange={(e) => setCreateHora(e.target.value)} step={600} />
+                      <label className="block sm:col-span-2">
+                        <div className="text-sm font-medium text-slate-700 mb-1">Serviço</div>
+                        <select
+                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                          value={createServicoId}
+                          onChange={(e) => setCreateServicoId(e.target.value)}
+                        >
+                          <option value="">Selecione</option>
+                          {servicos.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.nome}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block sm:col-span-2">
+                        <div className="text-sm font-medium text-slate-700 mb-1">Profissional</div>
+                        <select
+                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                          value={createFuncionarioId}
+                          onChange={(e) => setCreateFuncionarioId(e.target.value)}
+                        >
+                          <option value="">Geral</option>
+                          {funcionarios
+                            .filter((f) => f.ativo)
+                            .map((f) => (
+                              <option key={f.id} value={f.id}>
+                                {f.nome_completo}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <Input label="Nome do cliente" value={createClienteNome} onChange={(e) => setCreateClienteNome(e.target.value)} />
+                      <Input label="Telefone/WhatsApp" value={createClienteTelefone} onChange={(e) => setCreateClienteTelefone(e.target.value)} />
+                      {isAcademia && qtdVagasColumnAvailable ? (
+                        <Input
+                          label={`Quantidade (até ${createCapacidade} vagas)`}
+                          type="number"
+                          min={1}
+                          max={createCapacidade}
+                          value={createQtdVagas}
+                          onChange={(e) => {
+                            const raw = Number(e.target.value)
+                            const base = Number.isFinite(raw) ? Math.floor(raw) : 1
+                            const max = Math.max(1, createCapacidade)
+                            const clamped = Math.max(1, Math.min(max, base))
+                            setCreateQtdVagas(String(clamped))
+                          }}
+                        />
+                      ) : null}
+                      <Input
+                        label="Detalhe (opcional)"
+                        value={createDetalhe}
+                        onChange={(e) => setCreateDetalhe(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="flex justify-end gap-2">
+                      <Button variant="secondary" onClick={closeCreateModal} disabled={createSaving}>
+                        Cancelar
+                      </Button>
+                      <Button onClick={createAgendamento} disabled={!canCreateAgendamento || createSaving}>
+                        {createSaving ? 'Salvando…' : 'Criar agendamento'}
+                      </Button>
+                    </div>
+                  </div>
+                </Card>
+              </div>
+            </div>
+          ) : null}
 
           {participantsOpen && participantsCtx ? (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">

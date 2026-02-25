@@ -46,6 +46,14 @@ function readExtrasEndereco(extras: unknown) {
   return t ? t : null
 }
 
+function readExtrasDetalhe(extras: unknown) {
+  if (!extras || typeof extras !== 'object') return null
+  const v = (extras as Record<string, unknown>).detalhe
+  if (typeof v !== 'string') return null
+  const t = v.trim()
+  return t ? t : null
+}
+
 type ServicoOption = { id: string; nome: string; cor: string | null }
 
 type Bloqueio = { id: string; data: string; hora_inicio: string; hora_fim: string; motivo: string | null; funcionario_id: string | null }
@@ -568,7 +576,7 @@ export function FuncionarioAgendaPage() {
 
   const hasAnyFilter = useMemo(() => Boolean(statusFilter.trim() || servicoFilterId.trim() || searchNorm.trim()), [searchNorm, servicoFilterId, statusFilter])
 
-  const slotStepMinutes = 30
+  const slotStepMinutes = 10
 
   const selectedFuncionario = useMemo(() => {
     if (!canVerAgendaTodos) return null
@@ -1476,8 +1484,8 @@ export function FuncionarioAgendaPage() {
               </div>
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                <Input label="Início" type="time" value={blockStart} onChange={(e) => setBlockStart(e.target.value)} step={900} />
-                <Input label="Fim" type="time" value={blockEnd} onChange={(e) => setBlockEnd(e.target.value)} step={900} />
+                <Input label="Início" type="time" value={blockStart} onChange={(e) => setBlockStart(e.target.value)} step={600} />
+                <Input label="Fim" type="time" value={blockEnd} onChange={(e) => setBlockEnd(e.target.value)} step={600} />
                 <Input label="Motivo (opcional)" value={blockMotivo} onChange={(e) => setBlockMotivo(e.target.value)} />
               </div>
 
@@ -1663,6 +1671,7 @@ export function FuncionarioAgendaPage() {
                       const ag = item.ag
                       const statusUi = resolveStatusUi(ag.status)
                       const endereco = readExtrasEndereco(ag.extras)
+                      const detalhe = readExtrasDetalhe(ag.extras)
                       const vagas = typeof ag.qtd_vagas === 'number' && Number.isFinite(ag.qtd_vagas) ? Math.max(1, Math.floor(ag.qtd_vagas)) : 1
                       const labelDate =
                         viewMode === 'semana'
@@ -1682,6 +1691,7 @@ export function FuncionarioAgendaPage() {
                             {profLabel ? <div className="text-xs text-slate-500">{profLabel}</div> : null}
                             <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
                             {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
+                            {detalhe ? <div className="text-sm text-slate-600">📝 {detalhe}</div> : null}
                             {isAcademia && qtdVagasColumnAvailable && vagas > 1 ? <div className="text-sm text-slate-600">Vagas: {vagas}</div> : null}
                             <div className="text-sm text-slate-700">
                               ✂️ {ag.servico?.nome}{' '}
@@ -1712,6 +1722,7 @@ export function FuncionarioAgendaPage() {
                     {agendamentos.map((ag) => {
                       const statusUi = resolveStatusUi(ag.status)
                       const endereco = readExtrasEndereco(ag.extras)
+                      const detalhe = readExtrasDetalhe(ag.extras)
                       const vagas = typeof ag.qtd_vagas === 'number' && Number.isFinite(ag.qtd_vagas) ? Math.max(1, Math.floor(ag.qtd_vagas)) : 1
                       return (
                         <div key={ag.id} className="p-3 flex items-start justify-between gap-3">
@@ -1721,6 +1732,7 @@ export function FuncionarioAgendaPage() {
                             </div>
                             <div className="text-sm text-slate-600">📱 {ag.cliente_telefone}</div>
                             {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
+                            {detalhe ? <div className="text-sm text-slate-600">📝 {detalhe}</div> : null}
                             {isAcademia && qtdVagasColumnAvailable && vagas > 1 ? <div className="text-sm text-slate-600">Vagas: {vagas}</div> : null}
                             <div className="text-sm text-slate-700">
                               ✂️ {ag.servico?.nome}{' '}
@@ -1772,6 +1784,7 @@ export function FuncionarioAgendaPage() {
                   const startLabel = normalizeTimeHHMM(agCover.hora_inicio)
                   const timeLabel = isStart && startLabel ? startLabel : time
                   const endereco = visible ? readExtrasEndereco(agCover.extras) : null
+                  const detalhe = visible ? readExtrasDetalhe(agCover.extras) : null
                   const vagas =
                     visible && typeof agCover.qtd_vagas === 'number' && Number.isFinite(agCover.qtd_vagas)
                       ? Math.max(1, Math.floor(agCover.qtd_vagas))
@@ -1795,6 +1808,7 @@ export function FuncionarioAgendaPage() {
                         </div>
                         {visible ? <div className="text-sm text-slate-600">📱 {agCover.cliente_telefone}</div> : null}
                         {endereco ? <div className="text-sm text-slate-600">📍 {endereco}</div> : null}
+                        {detalhe ? <div className="text-sm text-slate-600">📝 {detalhe}</div> : null}
                         {groupParticipants && (capacidade > 1 || groupBooked > 1) ? (
                           <div className="text-sm text-slate-600">
                             Agendados: {groupBooked}

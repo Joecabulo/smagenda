@@ -1,0 +1,4 @@
+{
+  "extends": "../../tsconfig.supabase.json",
+  "include": ["**/*.ts", "**/*.d.ts"]
+}

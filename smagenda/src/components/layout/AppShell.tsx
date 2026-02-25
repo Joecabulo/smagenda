@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '../../state/auth/useAuth'
 import { getOptionalEnv } from '../../lib/env'
 import { supabase } from '../../lib/supabase'
@@ -14,6 +14,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const funcionario = appPrincipal?.kind === 'funcionario' ? appPrincipal.profile : null
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : isFuncionarioAdmin ? masterUsuario : null
   const temaProspector = usuario?.tema_prospector_habilitado === true
+  const isAgendaPage = location.pathname === '/dashboard' || location.pathname === '/funcionario/agenda'
   const [temaTick, setTemaTick] = useState(0)
   const temaDark = useMemo(() => {
     void temaTick
@@ -34,6 +35,165 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const supportNumber = getOptionalEnv('VITE_SUPPORT_WHATSAPP_NUMBER')
   const canUseWhatsappSupport = Boolean(supportNumber && usuario && isProPlus)
+
+  const [notifMessage, setNotifMessage] = useState<string | null>(null)
+  const [notifCount, setNotifCount] = useState(0)
+  const notifiedIdsRef = useRef<Set<string>>(new Set())
+
+  const browserNotifsKey = useMemo(() => {
+    if (!appPrincipal) return 'smagenda:notifs:usuario'
+    const kind = appPrincipal.kind
+    if (kind === 'usuario') {
+      const id = appPrincipal.profile.id
+      return id ? `smagenda:notifs:usuario:${id}` : 'smagenda:notifs:usuario'
+    }
+    if (kind === 'funcionario') {
+      const id = appPrincipal.profile.id
+      return id ? `smagenda:notifs:funcionario:${id}` : 'smagenda:notifs:funcionario'
+    }
+    return 'smagenda:notifs:usuario'
+  }, [appPrincipal])
+
+  const [browserNotifsPermission, setBrowserNotifsPermission] = useState<'default' | 'granted' | 'denied'>(() => {
+    if (typeof window === 'undefined') return 'default'
+    if (!('Notification' in window)) return 'denied'
+    return Notification.permission
+  })
+  const [browserNotifsEnabled, setBrowserNotifsEnabled] = useState(false)
+
+  useEffect(() => {
+    try {
+      setBrowserNotifsEnabled(window.localStorage.getItem(browserNotifsKey) === '1')
+    } catch {
+      setBrowserNotifsEnabled(false)
+    }
+  }, [browserNotifsKey])
+
+  const enableBrowserNotifications = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setBrowserNotifsPermission('denied')
+      return
+    }
+    try {
+      const perm = await Notification.requestPermission()
+      setBrowserNotifsPermission(perm)
+      if (perm === 'granted') {
+        try {
+          window.localStorage.setItem(browserNotifsKey, '1')
+        } catch {
+          return
+        }
+        setBrowserNotifsEnabled(true)
+      }
+    } catch {
+      setBrowserNotifsPermission('denied')
+    }
+  }
+
+  useEffect(() => {
+    if (!appPrincipal) return
+    if (isAgendaPage) return
+
+    const kind = appPrincipal.kind
+    const isFuncionarioLocal = kind === 'funcionario'
+    const isFuncionarioAdminLocal = isFuncionarioLocal && appPrincipal.profile.permissao === 'admin'
+    const usuarioId =
+      kind === 'usuario'
+        ? appPrincipal.profile.id
+        : isFuncionarioAdminLocal
+          ? masterUsuario?.id ?? ''
+          : isFuncionarioLocal
+            ? appPrincipal.profile.usuario_master_id
+            : ''
+    const funcionarioId = isFuncionarioLocal && !isFuncionarioAdminLocal ? appPrincipal.profile.id : null
+    if (!usuarioId) return
+
+    const channel = supabase.channel(`agendamentos-appshell:${usuarioId}:${funcionarioId ?? 'all'}`)
+    const handleIncoming = async (idRaw: unknown) => {
+      const id = typeof idRaw === 'string' ? idRaw.trim() : ''
+      if (!id) return
+      if (notifiedIdsRef.current.has(id)) return
+      notifiedIdsRef.current.add(id)
+
+      const { data: agRow, error: agErr } = await supabase
+        .from('agendamentos')
+        .select('id,cliente_nome,data,hora_inicio,status,funcionario_id')
+        .eq('id', id)
+        .eq('usuario_id', usuarioId)
+        .maybeSingle()
+
+      if (agErr || !agRow) return
+      const r = agRow as unknown as Record<string, unknown>
+      if (String(r.status ?? '').trim().toLowerCase() === 'cancelado') return
+      if (funcionarioId && String(r.funcionario_id ?? '') !== funcionarioId) return
+
+      const data = String(r.data ?? '')
+      const hora = String(r.hora_inicio ?? '').trim().slice(0, 5)
+      const nome = String(r.cliente_nome ?? '').trim()
+      const dateLabel = (() => {
+        const parts = data.split('-')
+        if (parts.length !== 3) return data
+        return `${parts[2]}/${parts[1]}/${parts[0]}`
+      })()
+
+      const msg = `Novo agendamento: ${dateLabel} ${hora}${nome ? ` • ${nome}` : ''}`
+      setNotifMessage(msg)
+      setNotifCount((prev) => prev + 1)
+
+      if (
+        browserNotifsEnabled &&
+        typeof window !== 'undefined' &&
+        'Notification' in window &&
+        Notification.permission === 'granted' &&
+        document.visibilityState !== 'visible'
+      ) {
+        try {
+          new Notification('Novo agendamento', { body: `${dateLabel} ${hora}${nome ? ` • ${nome}` : ''}` })
+        } catch {
+          return
+        }
+      }
+    }
+
+    channel
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'agendamentos',
+          filter: `usuario_id=eq.${usuarioId}`,
+        },
+        (payload) => {
+          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'agendamentos',
+          filter: `usuario_id=eq.${usuarioId}`,
+        },
+        (payload) => {
+          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
+        }
+      )
+
+    channel.subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [appPrincipal, browserNotifsEnabled, isAgendaPage, masterUsuario?.id])
+
+  useEffect(() => {
+    if (!isAgendaPage) return
+    if (!notifCount && !notifMessage) return
+    setNotifCount(0)
+    setNotifMessage(null)
+  }, [isAgendaPage, notifCount, notifMessage])
 
   const nav = isFuncionario && !isFuncionarioAdmin
     ? [
@@ -120,6 +280,43 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Button>
           </div>
         </div>
+
+        {browserNotifsPermission !== 'granted' ? (
+          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex items-center justify-between gap-3">
+            <div>Ative as notificações do navegador para receber alertas de novos agendamentos.</div>
+            <Button variant="secondary" onClick={enableBrowserNotifications}>
+              Ativar notificações
+            </Button>
+          </div>
+        ) : null}
+
+        {notifMessage ? (
+          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 flex items-center justify-between gap-3">
+            <div className="font-medium">{notifMessage}</div>
+            <div className="flex items-center gap-2">
+              {notifCount > 1 ? <div className="text-xs text-emerald-800">+{notifCount - 1} novos</div> : null}
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setNotifCount(0)
+                  setNotifMessage(null)
+                  navigate(isFuncionario && !isFuncionarioAdmin ? '/funcionario/agenda' : '/dashboard')
+                }}
+              >
+                Ver agenda
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setNotifCount(0)
+                  setNotifMessage(null)
+                }}
+              >
+                Fechar
+              </Button>
+            </div>
+          </div>
+        ) : null}
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-[240px_1fr]">
           <nav className="md:sticky md:top-6 md:h-fit">

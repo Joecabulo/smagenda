@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { AdminShell } from '../../components/layout/AdminShell'
-import { Badge } from '../../components/ui/Badge'
-import { Button } from '../../components/ui/Button'
-import { Card } from '../../components/ui/Card'
-import { Input } from '../../components/ui/Input'
-import { supabase, supabaseEnv } from '../../lib/supabase'
-import { useAuth } from '../../state/auth/useAuth'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { AdminShell } from 'components/layout/AdminShell'
+import { Badge } from 'components/ui/Badge'
+import { Button } from 'components/ui/Button'
+import { Card } from 'components/ui/Card'
+import { Input } from 'components/ui/Input'
+import { supabase, supabaseEnv } from 'lib/supabase'
+import { useAuth } from 'state/auth/useAuth'
 
 type ClienteRow = {
   id: string
@@ -175,19 +175,8 @@ async function callAdminWhatsapp(body: unknown) {
 }
 
 export function AdminWhatsappAvisosPage() {
-  const { principal, session } = useAuth()
+  const { principal } = useAuth()
   const superAdminId = principal?.kind === 'super_admin' ? principal.profile.id : null
-  const sessionEmail = session?.user?.email ?? null
-  const principalEmail = principal?.kind === 'super_admin' ? principal.profile.email : null
-  const superAdminEmail = principalEmail ?? sessionEmail
-  const superAdminNome = (() => {
-    if (principal?.kind === 'super_admin' && principal.profile.nome) return principal.profile.nome
-    if (superAdminEmail) {
-      const prefix = superAdminEmail.split('@')[0]?.trim()
-      if (prefix) return prefix
-    }
-    return 'Super Admin'
-  })()
 
   const [configLoading, setConfigLoading] = useState(true)
   const [schemaIncompleto, setSchemaIncompleto] = useState(false)
@@ -196,6 +185,8 @@ export function AdminWhatsappAvisosPage() {
   const [instanceName, setInstanceName] = useState('')
   const [savingConfig, setSavingConfig] = useState(false)
   const [configSaved, setConfigSaved] = useState(false)
+
+  const [globalConfigured, setGlobalConfigured] = useState<boolean | null>(null)
 
   const [instanceState, setInstanceState] = useState<string | null>(null)
   const [qrBase64, setQrBase64] = useState<string | null>(null)
@@ -240,25 +231,24 @@ export function AdminWhatsappAvisosPage() {
       setError(null)
       setLastSendSummary(null)
       setSchemaIncompleto(false)
-      const { data, error: err } = await supabase
-        .from('super_admin')
-        .select('id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name')
-        .eq('id', superAdminId)
-        .maybeSingle()
-      if (err) {
-        if (isMissingColumnError(err.message)) {
-          setSchemaIncompleto(true)
-        } else {
-          setError(err.message)
-        }
+
+      const selectLegacy = 'id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name'
+
+      const res = await supabase.from('super_admin').select(selectLegacy).eq('id', superAdminId).maybeSingle()
+      if (res.error) {
+        if (isMissingColumnError(res.error.message)) setSchemaIncompleto(true)
+        else setError(res.error.message)
         setConfigLoading(false)
         return
       }
 
-      const row = (data ?? null) as unknown as SuperAdminConfigRow | null
+      const row = (res.data ?? null) as unknown as SuperAdminConfigRow | null
       setApiUrl(row?.whatsapp_api_url ?? '')
       setApiKey(row?.whatsapp_api_key ?? '')
       setInstanceName(row?.whatsapp_instance_name ?? '')
+
+      setGlobalConfigured(Boolean((row?.whatsapp_api_url ?? '').trim() && (row?.whatsapp_api_key ?? '').trim()))
+
       setConfigLoading(false)
     }
 
@@ -333,11 +323,11 @@ export function AdminWhatsappAvisosPage() {
       })
   }, [superAdminId])
 
-  const conectado = useMemo(() => Boolean(apiUrl.trim() && apiKey.trim()), [apiUrl, apiKey])
+  const evolutionConfigured = useMemo(() => Boolean(apiUrl.trim() && apiKey.trim()), [apiUrl, apiKey])
   const filteredClientes = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return clientes
-    return clientes.filter((c) => (c.nome_negocio ?? '').toLowerCase().includes(q) || (c.slug ?? '').toLowerCase().includes(q) || (c.telefone ?? '').toLowerCase().includes(q))
+    return clientes.filter((c: ClienteRow) => (c.nome_negocio ?? '').toLowerCase().includes(q) || (c.slug ?? '').toLowerCase().includes(q) || (c.telefone ?? '').toLowerCase().includes(q))
   }, [clientes, query])
 
   const selectedIds = useMemo(() => Object.keys(selected).filter((id) => selected[id] === true), [selected])
@@ -345,10 +335,6 @@ export function AdminWhatsappAvisosPage() {
 
   const enableWhatsappSelected = async (enabled: boolean) => {
     if (selectedCount === 0) return
-    if (enabled && (!apiUrl.trim() || !apiKey.trim())) {
-      setError('Preencha e salve a Evolution API acima antes de habilitar para clientes.')
-      return
-    }
     setUpdatingClientesWhatsapp(true)
     setError(null)
     setLastSendSummary(null)
@@ -372,8 +358,8 @@ export function AdminWhatsappAvisosPage() {
       return
     }
 
-    setClientes((prev) =>
-      prev.map((c) => {
+    setClientes((prev: ClienteRow[]) =>
+      prev.map((c: ClienteRow) => {
         if (!selectedIds.includes(c.id)) return c
         return { ...c, whatsapp_habilitado: enabled }
       })
@@ -407,8 +393,8 @@ export function AdminWhatsappAvisosPage() {
       return
     }
 
-    setClientes((prev) =>
-      prev.map((c) => {
+    setClientes((prev: ClienteRow[]) =>
+      prev.map((c: ClienteRow) => {
         if (!selectedIds.includes(c.id)) return c
         return { ...c, tema_prospector_habilitado: enabled }
       })
@@ -422,37 +408,84 @@ export function AdminWhatsappAvisosPage() {
     setSavingConfig(true)
     setError(null)
     setConfigSaved(false)
-    if (!superAdminEmail) {
-      setError('Não foi possível obter o email do Super Admin para salvar a configuração. Faça login novamente.')
-      setSavingConfig(false)
-      return
-    }
+
+    const isMissingColumnError = (message: string) => message.toLowerCase().includes('does not exist') && message.toLowerCase().includes('column')
+
     const payload = {
       whatsapp_api_url: apiUrl.trim() || null,
       whatsapp_api_key: apiKey.trim() || null,
       whatsapp_instance_name: instanceName.trim() || null,
-      email: superAdminEmail,
-      nome: superAdminNome,
     }
-    const { data, error: err } = await supabase
-      .from('super_admin')
-      .upsert({ id: superAdminId, ...payload }, { onConflict: 'id' })
-      .select('id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name')
-      .maybeSingle()
-    if (err) {
-      setError(err.message)
+    const selectLegacy = 'id,whatsapp_api_url,whatsapp_api_key,whatsapp_instance_name'
+
+    const existing = await supabase.from('super_admin').select('id').eq('id', superAdminId).maybeSingle()
+    if (existing.error) {
+      const msg = existing.error.message
+      if (isMissingColumnError(msg)) setError('Seu Supabase ainda não tem as colunas do WhatsApp. Execute o bloco “SQL do WhatsApp (Super Admin)” em /admin/configuracoes.')
+      else setError(msg)
       setSavingConfig(false)
       return
     }
-    if (!data) {
+
+    if (!existing.data) {
+      const { data: userData, error: userErr } = await supabase.auth.getUser()
+      if (userErr) {
+        setError(userErr.message)
+        setSavingConfig(false)
+        return
+      }
+      const authEmail = userData.user?.email ?? null
+      if (!authEmail) {
+        setError('Seu usuário no Supabase Auth não tem email. Faça login com email/senha (ou ajuste o provedor) e tente novamente.')
+        setSavingConfig(false)
+        return
+      }
+
+      const inserted = await supabase
+        .from('super_admin')
+        .insert({ id: superAdminId, nome: 'Super Admin', email: authEmail, nivel: 'super_admin', ...payload })
+        .select(selectLegacy)
+        .maybeSingle()
+
+      if (inserted.error) {
+        const msg = inserted.error.message
+        if (isMissingColumnError(msg)) setError('Seu Supabase ainda não tem as colunas do WhatsApp. Execute o bloco “SQL do WhatsApp (Super Admin)” em /admin/configuracoes.')
+        else setError(msg)
+        setSavingConfig(false)
+        return
+      }
+
+      const row = inserted.data as unknown as SuperAdminConfigRow
+      setApiUrl(row.whatsapp_api_url ?? '')
+      setApiKey(row.whatsapp_api_key ?? '')
+      setInstanceName(row.whatsapp_instance_name ?? '')
+      setGlobalConfigured(Boolean((row.whatsapp_api_url ?? '').trim() && (row.whatsapp_api_key ?? '').trim()))
+      setConfigSaved(true)
+      setSavingConfig(false)
+      return
+    }
+
+    const res = await supabase.from('super_admin').update(payload).eq('id', superAdminId).select(selectLegacy).maybeSingle()
+
+    if (res.error) {
+      const msg = res.error.message
+      if (isMissingColumnError(msg)) setError('Seu Supabase ainda não tem as colunas do WhatsApp. Execute o bloco “SQL do WhatsApp (Super Admin)” em /admin/configuracoes.')
+      else setError(msg)
+      setSavingConfig(false)
+      return
+    }
+
+    if (!res.data) {
       setError('Não foi possível salvar a configuração do Super Admin. Em /admin/configuracoes, execute “SQL do WhatsApp (Super Admin)” e “SQL do Bootstrap (Super Admin)”.')
       setSavingConfig(false)
       return
     }
-    const row = data as unknown as SuperAdminConfigRow
+
+    const row = res.data as unknown as SuperAdminConfigRow
     setApiUrl(row.whatsapp_api_url ?? '')
     setApiKey(row.whatsapp_api_key ?? '')
     setInstanceName(row.whatsapp_instance_name ?? '')
+    setGlobalConfigured(Boolean((row.whatsapp_api_url ?? '').trim() && (row.whatsapp_api_key ?? '').trim()))
     setConfigSaved(true)
     setSavingConfig(false)
   }
@@ -522,7 +555,7 @@ export function AdminWhatsappAvisosPage() {
   }
 
   const checkStatus = async () => {
-    if (!conectado) {
+    if (globalConfigured !== true) {
       setError('Preencha a Evolution API (URL e Key), clique em Salvar e tente novamente.')
       return
     }
@@ -576,7 +609,7 @@ export function AdminWhatsappAvisosPage() {
   }
 
   const connect = async () => {
-    if (!conectado) {
+    if (globalConfigured !== true) {
       setError('Preencha a Evolution API (URL e Key), clique em Salvar e tente novamente.')
       return
     }
@@ -633,7 +666,7 @@ export function AdminWhatsappAvisosPage() {
   }
 
   const disconnect = async () => {
-    if (!conectado) {
+    if (globalConfigured !== true) {
       setError('Preencha a Evolution API (URL e Key), clique em Salvar e tente novamente.')
       return
     }
@@ -767,9 +800,10 @@ export function AdminWhatsappAvisosPage() {
           <div className="p-6 space-y-4">
             <div className="text-sm font-semibold text-slate-900">Configuração</div>
             {configLoading ? <div className="text-sm text-slate-600">Carregando…</div> : null}
-            <Input label="API URL" value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} placeholder="https://..." />
-            <Input label="API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="..." />
-            <Input label="Instance name (opcional)" value={instanceName} onChange={(e) => setInstanceName(e.target.value)} placeholder="smagenda-admin" />
+            <div className="text-sm font-semibold text-slate-900">Evolution API</div>
+            <Input label="API URL" value={apiUrl} onChange={(e: ChangeEvent<HTMLInputElement>) => setApiUrl(e.target.value)} placeholder="https://..." />
+            <Input label="API Key" value={apiKey} onChange={(e: ChangeEvent<HTMLInputElement>) => setApiKey(e.target.value)} placeholder="..." />
+            <Input label="Instance name (opcional)" value={instanceName} onChange={(e: ChangeEvent<HTMLInputElement>) => setInstanceName(e.target.value)} placeholder="smagenda-admin" />
             <div className="flex justify-end">
               <Button onClick={saveConfig} disabled={savingConfig || schemaIncompleto}>
                 Salvar
@@ -781,7 +815,11 @@ export function AdminWhatsappAvisosPage() {
         <Card>
           <div className="p-6 space-y-4">
             <div className="text-sm font-semibold text-slate-900">Status e conexão</div>
-            <div className="text-sm text-slate-700">Configuração: {conectado ? '🟢 OK' : '🟡 Pendente'}</div>
+            <div className="text-sm text-slate-700">
+              Configuração global: {globalConfigured === true ? '🟢 OK' : globalConfigured === false ? '🟡 Pendente' : '—'}
+            </div>
+
+            <div className="text-sm text-slate-700">Configuração Evolution: {evolutionConfigured ? '🟢 OK' : '🟡 Pendente'}</div>
             <div className="text-sm text-slate-700">Conexão: {checkingStatus ? 'verificando…' : instanceState ?? '—'}</div>
             <div className="flex flex-wrap gap-2">
               <Button variant="secondary" onClick={checkStatus} disabled={checkingStatus || connecting || disconnecting}>
@@ -816,7 +854,7 @@ export function AdminWhatsappAvisosPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-slate-900">Diagnóstico</div>
-                <div className="text-sm text-slate-600">Valida sessão, Super Admin e Evolution API.</div>
+                <div className="text-sm text-slate-600">Valida sessão, Super Admin e configuração do WhatsApp.</div>
               </div>
               <Button variant="secondary" onClick={() => void runDiagnostics()} disabled={diagRunning}>
                 {diagRunning ? 'Executando…' : 'Executar diagnóstico'}
@@ -880,7 +918,7 @@ export function AdminWhatsappAvisosPage() {
               </div>
             ) : null}
 
-            <Input label="Buscar" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Nome, slug ou telefone" />
+            <Input label="Buscar" value={query} onChange={(e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)} placeholder="Nome, slug ou telefone" />
 
             <div className="rounded-xl border border-slate-200 bg-white">
               <div className="divide-y divide-slate-100">
@@ -894,7 +932,7 @@ export function AdminWhatsappAvisosPage() {
                       <input
                         type="checkbox"
                         checked={selected[c.id] === true}
-                        onChange={(e) => setSelected((prev) => ({ ...prev, [c.id]: e.target.checked }))}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSelected((prev: Record<string, boolean>) => ({ ...prev, [c.id]: e.target.checked }))}
                         className="mt-1"
                       />
                       <div className="flex-1">
@@ -927,15 +965,15 @@ export function AdminWhatsappAvisosPage() {
             <textarea
               className="w-full min-h-[140px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
               value={mensagem}
-              onChange={(e) => setMensagem(e.target.value)}
+              onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setMensagem(e.target.value)}
               placeholder="Digite o aviso..."
             />
             <div className="flex justify-end">
-              <Button onClick={sendAvisos} disabled={sending || selectedCount === 0 || !conectado}>
+              <Button onClick={sendAvisos} disabled={sending || selectedCount === 0 || !evolutionConfigured}>
                 Enviar avisos
               </Button>
             </div>
-            {!conectado ? <div className="text-sm text-slate-600">Configure a Evolution API e conecte o WhatsApp para enviar.</div> : null}
+            {!evolutionConfigured ? <div className="text-sm text-slate-600">Configure a Evolution API e conecte o WhatsApp para enviar avisos.</div> : null}
           </div>
         </Card>
       </div>

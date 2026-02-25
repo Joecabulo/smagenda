@@ -1,0 +1,308 @@
+SMAGENDA — REGRAS DE NEGÓCIO E EXPLICAÇÕES DAS FUNÇÕES
+
+Objetivo
+- Este arquivo consolida regras de negócio e explica o que cada função principal faz, para uso em chatbot/RAG.
+- As regras descritas abaixo são baseadas no comportamento real implementado no código.
+
+Visão geral do produto
+- O SMagenda é um sistema de gestão de agenda, serviços e clientes.
+- Há um painel (usuário/funcionário) e um link público para o cliente final agendar.
+- O sistema integra com WhatsApp (via WhatsApp Business Platform / Meta Cloud API) e com e-mail (via Resend) para automações.
+- Observação: a Evolution API pode existir como legado, mas o modelo recomendado/atual é Meta.
+- Cobrança do SaaS é feita via Stripe e atualiza o status do cliente no banco.
+
+Conceitos e entidades (banco)
+- usuarios: conta principal (o “cliente do SMagenda”). Campos relevantes: plano, status_pagamento, ativo, limite_funcionarios, limite_agendamentos_mes, slug, nome_negocio, telefone, endereco, whatsapp_*.
+- funcionarios: usuários secundários vinculados a um usuario_master_id. Possuem permissões (agenda/financeiro/serviços etc.) e podem estar ativos/inativos.
+- servicos: catálogo do usuário (nome, preço, regras de antecedência/buffers, taxa_agendamento etc.).
+- agendamentos: registros do agendamento. Campos relevantes: status, data, hora_inicio, cliente_nome, cliente_telefone, extras, (opcional) unidade_id, funcionario_id.
+- unidades: filiais (multi-unidades), quando habilitado.
+- super_admin: configurações globais e permissões do super administrador. Contém configuração global do WhatsApp (Meta Cloud API; Evolution legado) e acesso a telas admin.
+- taxa_agendamento_pagamentos: registros de pagamento/uso de “taxa de agendamento” no link público (inclui fluxo de crédito).
+
+Planos, limites e acesso
+
+Planos expostos no app (tela de pagamento)
+- FREE: R$ 0/mês; até 30 agendamentos/mês; 1 profissional; lembretes manuais; WhatsApp 0/mês; suporte por e-mail.
+- BASIC: R$ 34,99/mês; até 60 agendamentos/mês; 1 profissional; lembretes automáticos via WhatsApp; WhatsApp 100/mês; até 3 serviços; página pública personalizável.
+- PRO: R$ 59,99/mês; até 6 profissionais (4 inclusos + até 2 adicionais); serviços ilimitados; logo e fotos; relatórios; suporte via WhatsApp; WhatsApp 300/mês.
+- EMPRESA (enterprise): R$ 98,99/mês; até 10 profissionais; multi-unidades; agendamentos ilimitados; serviços ilimitados; WhatsApp 500/mês.
+
+Como o FREE aparece
+- O FREE só aparece quando o usuário está em trial e ainda não consumiu o trial gratuito.
+- Regra de exibição: plano=free, status_pagamento=trial e free_trial_consumido != true.
+
+Limite de funcionários (regra efetiva)
+- BASIC/FREE: 1 ativo.
+- PRO/TEAM: base 4 e máximo 6; pode variar por limite_funcionarios no usuário.
+- ENTERPRISE: 10.
+- A criação de funcionário bloqueia quando o número de funcionários ativos atinge o limite efetivo.
+
+Limite de agendamentos por mês (regra por plano)
+- FREE: 30/mês.
+- BASIC: 60/mês.
+- PRO: 180/mês.
+- TEAM: 300/mês.
+- ENTERPRISE: ilimitado (null).
+- Observação: a existência do plano “team” é tratada como “pro” na UI em alguns pontos, mas o backend reconhece “team” em regras de limite.
+
+Limites por plano via SQL (serviços e fotos)
+- Limite de serviços no BASIC/FREE: 3 serviços no máximo.
+  - Enforced no banco via trigger (exceção: 'limite_servicos_atingido').
+- Fotos em serviços (foto_url): permitido apenas em PRO/TEAM/EMPRESA.
+  - Enforced no banco via trigger (exceção: 'plano_sem_foto_servico').
+
+Ativo e status de pagamento
+- usuarios.ativo controla se a conta está ativa.
+- status_pagamento é normalizado em valores como: ativo, trial, inadimplente, suspenso, cancelado.
+- Em fluxos sensíveis (ex.: criar funcionário), se status_pagamento não for ativo/trial, a operação é bloqueada.
+- Trial expira por data_vencimento: se status_pagamento=trial e data_vencimento já passou, bloqueia operações (ex.: criação de funcionários).
+
+Status de agendamento (negócio)
+- confirmado: usado para envio de confirmação e para lembretes automáticos.
+- cancelado: usado para envio de aviso de cancelamento.
+- pendente: usado no link público quando existe taxa de agendamento e o pagamento ainda não foi concluído.
+- nao_compareceu (no-show): usado em relatórios e para converter taxa paga em crédito (quando habilitado).
+
+WhatsApp e mensagens automáticas
+
+Configuração global e habilitação por cliente
+- Situação atual (implementação no código hoje): integração via WhatsApp Business Platform (Meta Cloud API), configurada globalmente no super_admin.
+- Compatibilidade: se Meta não estiver configurado e existir URL/key, o sistema pode operar via Evolution (legado).
+- Regra de seleção do provedor (backend):
+  - Se super_admin.whatsapp_meta_access_token e super_admin.whatsapp_meta_phone_number_id estiverem preenchidos -> provider=meta.
+  - Senão, se super_admin.whatsapp_api_url e super_admin.whatsapp_api_key estiverem preenchidos -> provider=evolution.
+- Cada cliente pode ter o recurso habilitado/desabilitado por whatsapp_habilitado (quando o schema existe).
+- A função exige SERVICE_ROLE_KEY para ler a configuração global do WhatsApp (caso contrário retorna erro orientando configurar o segredo no Supabase).
+
+Modelo de integração (Meta Cloud API)
+- Conceitos principais:
+  - WABA (WhatsApp Business Account) e Phone Number ID (número habilitado na Meta).
+  - Access Token (permanente via System User) para chamadas server-side.
+  - Webhook (Meta) para status de mensagens: sent/delivered/read/failed.
+- Fluxo de envio (alto nível):
+  - O backend monta o payload e envia para /{PHONE_NUMBER_ID}/messages.
+  - O backend registra message_id retornado pela Meta.
+  - O webhook atualiza o status real (delivered/read/failed), que é o que importa para métricas e para regra de cobrança por pacote.
+- Requisitos de produção (para não simular):
+  - Token e phone_number_id reais configurados em segredo (Edge Functions Secrets).
+  - Webhook verificado e ativo na Meta (verify token + assinatura), recebendo eventos reais.
+
+Instância e conexão
+- Evolution (legado): cada usuário opera uma instância (instanceName) derivada do slug ou de whatsapp_instance_name.
+- Meta (Cloud API): não existe “instância/QR Code” por cliente. O número é conectado e gerenciado no Business Manager/WhatsApp Manager da Meta.
+- Regra prática de UI/UX (migração): a tela “Conectar WhatsApp” passa a ser uma tela de status/configuração (ex.: número ativo, qualidade do número, webhooks) em vez de QR code.
+- Fluxos suportados (Meta):
+  - config_status: valida se token/phone_number_id/webhook estão configurados e se a API responde.
+  - send_test: envia mensagem de teste usando o número oficial configurado.
+
+Ações administrativas (super admin)
+- A Edge Function whatsapp também expõe ações admin_* para telas do super administrador.
+- Em geral, ações admin_* exigem que o chamador exista em public.super_admin.
+- Ações relevantes:
+  - admin_status / admin_connect / admin_disconnect: gerenciar conexão da instância do super admin.
+  - admin_diagnostics: retorna informações úteis para diagnosticar configuração/conexão.
+  - admin_send_aviso: envia um aviso (texto) para uma lista de cliente_ids (usa telefone/nome do cliente).
+
+Templates e variáveis (mensagens)
+- O usuário pode editar templates de confirmação/lembrete/cancelamento.
+- Variáveis suportadas (exemplos):
+  - {nome}, {data}, {hora}, {servico}, {preco}
+  - {cliente_endereco}, {endereco}
+  - {profissional_nome}, {telefone_profissional}
+  - {unidade_nome}, {unidade_endereco}, {unidade_telefone}
+  - {nome_negocio}
+- Regras de fallback para endereço:
+  1) extras.endereco (endereço do cliente) se existir
+  2) unidade.endereco se existir
+  3) usuarios.endereco
+
+Confirmação (envio)
+- Só envia se o agendamento estiver com status “confirmado”.
+- Se a coluna confirmacao_enviada existir e estiver true, não reenviar.
+- Se enviar_confirmacao estiver false no usuário, não envia.
+- Se WhatsApp não estiver configurado globalmente, retorna “skipped: not_configured”.
+- Se telefone do cliente for inválido, tenta fallback por e-mail (se houver RESEND_API_KEY e extras.email válido).
+- Após envio bem-sucedido, marca confirmacao_enviada=true e grava confirmacao_enviada_em (quando o schema suporta).
+
+Janela de 24h e templates (Meta)
+- A Meta diferencia:
+  - Mensagens template (ex.: confirmação/lembrete/cancelamento), com categoria (Utility/Marketing/Authentication).
+  - Mensagens livres dentro da janela de atendimento de 24h após a última mensagem do cliente.
+- Regra de negócio (recomendação para evitar custo inesperado): fora da janela de 24h, o sistema deve usar somente templates aprovados.
+
+Cancelamento (envio)
+- Só envia se o agendamento estiver com status “cancelado”.
+- Se enviar_cancelamento estiver false no usuário, não envia.
+- Se WhatsApp não estiver configurado globalmente, retorna “skipped: not_configured”.
+- Se telefone do cliente for inválido, tenta fallback por e-mail (se houver extras.email válido e Resend configurado).
+
+Lembretes (envio automático)
+- Rodado por cron na Edge Function whatsapp-lembretes.
+- A mesma função também pode enviar confirmações pendentes (confirmacao_enviada=false) e avisos adicionais por WhatsApp.
+- Lembretes: usa lembrete_horas_antes com fallback seguro (padrão 24h, limitado entre 1 e 168) e envia dentro de uma janela de 1 hora.
+- Confirmações em lote (cron): seleciona agendamentos confirmados com confirmacao_enviada=false em uma janela ampla (de ~7 dias atrás até ~90 dias à frente) e envia.
+- Após envio bem-sucedido, marca lembrete_enviado=true (e lembrete_enviado_em) e/ou confirmacao_enviada=true (e confirmacao_enviada_em), quando as colunas existem.
+
+Cota de WhatsApp (Meta) por plano
+- O limite de mensagens é controlado por usuarios.whatsapp_quota_mensal (quota) e usuarios.whatsapp_consumo_mes (consumo).
+- O consumo é contabilizado quando a Meta reporta status=delivered no webhook (não apenas “sent”).
+- Quota mensal padrão (sem custo adicional), aplicada automaticamente no sync do Stripe (payments):
+  - FREE: 0/mês
+  - BASIC: 100/mês
+  - PRO/TEAM: 300/mês
+  - EMPRESA (enterprise): 500/mês
+- Reset do consumo: no início de cada mês, whatsapp_consumo_mes volta para 0 automaticamente quando a função whatsapp_reset_usage_if_needed roda.
+
+Créditos extras de WhatsApp (regra de negócio)
+- O cliente pode comprar créditos extras para aumentar o limite de envios sem interromper as automações.
+- Modelo recomendado: crédito adicional aumenta o limite mensal (whatsapp_quota_mensal) e pode ser ajustado pelo suporte/super admin.
+- Pacotes e preços sugeridos (BRL):
+  - +100 mensagens: R$ 19,90
+  - +500 mensagens: R$ 79,90
+  - +1000 mensagens: R$ 139,90
+- Observação (custos Meta): a cobrança real tende a depender de categoria/país e considera templates entregues (delivered). Por isso o controle do SMagenda conta deliveries.
+
+Autenticação do cron (whatsapp-lembretes)
+- Pode exigir CRON_SECRET (env). Quando definido, a chamada precisa enviar header x-cron-secret com o valor exato.
+
+Avisos de cobrança (WhatsApp)
+- A Edge Function whatsapp-lembretes também suporta avisos automáticos de cobrança via action:
+  - billing_daily: roda diariamente, calcula dias até o vencimento (data_vencimento) e pode:
+    - avisar quando vence (3/1/0 dias)
+    - avisar atrasos (3/7 dias)
+    - suspender (14 dias) e desativar usuarios + funcionarios
+    - cancelar (30 dias) e desativar usuarios + funcionarios
+  - billing_status_changed: envia aviso pontual quando o status_pagamento muda.
+  - Observação: nos avisos de cobrança, só envia se whatsapp_habilitado === true e telefone do usuário for válido.
+
+Aviso de novo agendamento (para o profissional)
+- whatsapp-lembretes action=funcionario_novo_agendamento: envia mensagem para o telefone do funcionário quando entra/atribui um agendamento.
+
+Pagamentos (Stripe)
+
+Fluxos principais da Edge Function payments
+- create_checkout: cria uma sessão de checkout para plano/assinatura (ou pagamento), com metadata para aplicar limites.
+- sync_checkout_session: sincroniza a sessão do Stripe e atualiza usuarios (plano, limite_funcionarios, limite_agendamentos_mes, status_pagamento, vencimento, ids Stripe).
+- create_billing_portal: cria acesso ao portal do Stripe para o usuário gerenciar assinatura.
+
+Método PIX (checkout)
+- O create_checkout suporta metodo='pix'.
+- Para planos, PIX roda como pagamento one-time (não assinatura recorrente automática).
+- Para resolver o Price do PIX, usa STRIPE_PRICE_{PLANO}_PIX (ou STRIPE_PRICE_EMPRESA_PIX) quando configurado; caso contrário, tenta resolver um Price one-time ativo via Stripe API.
+
+Status do Stripe para o SMagenda
+- Há um mapeamento de status de assinatura do Stripe para status_pagamento:
+  - active/trialing -> ativo
+  - past_due/unpaid -> inadimplente
+  - canceled/incomplete_expired -> cancelado
+  - incomplete/paused/outros -> suspenso
+
+Webhook do Stripe
+- A Edge Function valida assinatura do webhook usando o header stripe-signature e HMAC SHA-256.
+- Sem assinatura válida, o evento não deve ser aplicado.
+- Eventos tratados (status do usuário/assinatura):
+  - checkout.session.completed / checkout.session.async_payment_succeeded
+  - invoice.payment_succeeded / invoice.payment_failed
+  - customer.subscription.updated / customer.subscription.deleted
+
+Regras de limites aplicadas a partir do Stripe
+- O plano é obtido por metadata (item/plano) e normalizado.
+- limite_funcionarios é calculado por:
+  - base do plano (ex.: pro/team=4, enterprise=10)
+  - + funcionários adicionais quando a assinatura inclui itens extras (price/produto extra)
+  - clamp: pro/team máximo 6; enterprise máximo 10.
+- limite_agendamentos_mes é derivado do plano (free/basic/pro/team/enterprise).
+
+Taxa de agendamento no link público (checkout por agendamento)
+
+Objetivo
+- Permitir cobrar uma taxa por serviço no agendamento público.
+
+Fluxo
+- create_booking_fee_checkout:
+  - valida usuario_id, servico_id, data/hora, cliente_nome/telefone e slug.
+  - valida que o usuário do slug está ativo.
+  - valida que o serviço está ativo e tem taxa_agendamento válida.
+  - tenta consumir um crédito existente (RPC consume_taxa_agendamento_credito).
+    - se houver crédito, cria agendamento já como “confirmado” e marca o crédito como usado/reservado.
+    - se não houver crédito, cria agendamento “pendente” e cria checkout no Stripe.
+  - trata multi-unidades: valida unidade_slug e exige unidade_id compatível.
+- sync_booking_fee_session:
+  - finaliza o agendamento após pagamento confirmado no Stripe.
+
+Flag de habilitação (produção)
+- O link público só usa o fluxo de taxa via Stripe quando VITE_ENABLE_TAXA_AGENDAMENTO=1 no frontend.
+- A Edge Function payments também exige ENABLE_BOOKING_FEE=1 no ambiente; caso contrário retorna error=feature_disabled.
+- Quando desabilitado, o link público cria o agendamento direto via RPC (sem checkout de taxa).
+
+Créditos por falta (no-show)
+- Quando um agendamento pago vira “nao_compareceu”, a taxa pode ser convertida em crédito para o cliente (dependendo do SQL/trigger aplicado).
+- O crédito é consumido automaticamente no próximo agendamento público do mesmo telefone.
+
+Criação de funcionários (Edge Functions)
+
+create-funcionario
+- Permite que o usuário master crie um funcionário.
+- Requisitos:
+  - sessão válida do usuário master.
+  - master ativo.
+  - status_pagamento ativo ou trial (trial precisa não estar expirado por data_vencimento).
+  - respeitar limite de funcionários ativos por plano.
+- Implementação:
+  - cria usuário no Auth (com email_confirm=true) e grava user_metadata com usuario_master_id e permissao.
+  - insere linha em public.funcionarios com permissões detalhadas e dados de agenda.
+  - se falhar ao inserir funcionário, remove o usuário do Auth (rollback).
+
+admin-create-funcionario
+- Permite que super_admin crie funcionário para qualquer cliente.
+- Requisitos:
+  - chamador precisa existir em public.super_admin.
+  - master precisa existir e estar ativo.
+  - respeitar limite de funcionários ativos por plano.
+- Observação: este fluxo não valida status_pagamento/trial do cliente; ele checa apenas ativo e limite.
+
+Resend (domínio de e-mail)
+
+resend-domain
+- Acesso restrito ao super_admin.
+- Integra com a API do Resend para:
+  - status: listar/verificar um domínio e retornar registros esperados.
+  - verify: solicitar verificação do domínio.
+  - send_test: enviar e-mail de teste.
+- Inclui verificação DNS via DNS-over-HTTPS (Cloudflare) para comparar registros TXT/MX esperados com o que está publicado.
+
+Funções Cloudflare (/functions/api) — Google Maps
+- São endpoints server-side para consumir Google Maps/Places usando a chave do ambiente (GOOGLE_MAPS_API_KEY), evitando expor a chave no frontend.
+- Endpoints:
+  - /api/health: retorna ok e se há chave.
+  - /api/geocode: geocoding por endereço.
+  - /api/places/textsearch: busca textual no Places.
+  - /api/places/details: detalhes de um place_id.
+
+Pontos de atenção (erros comuns que o chatbot deve saber explicar)
+- “whatsapp_not_configured”: super_admin ainda não concluiu a configuração global do WhatsApp (Meta token/phone_number_id, ou Evolution legado).
+- “invalid_evolution_url”: URL da Evolution é local/privada; precisa ser pública (somente legado).
+- “only_master_can_manage”: apenas o usuário master conecta/desconecta e faz testes de instância.
+- “instance_not_connected”: instância existe, mas não está conectada (escaneie o QR code).
+- “whatsapp_disabled”: o cliente está com whatsapp_habilitado=false (quando o schema existe).
+- “missing_message_data”: telefone inválido e/ou template vazio (confirmação/cancelamento).
+- “whatsapp_quota_exceeded”: atingiu o limite mensal de mensagens (quota x consumo). O cliente precisa comprar mais créditos ou aguardar o próximo mês.
+- “feature_disabled”: funcionalidade de taxa de agendamento desligada por env (ENABLE_BOOKING_FEE != 1).
+- “payment_inactive” / “trial_expired”: cliente está inadimplente/suspenso/cancelado ou trial expirou; acesso a certas ações é bloqueado.
+- “schema_incomplete”: faltam colunas/tabelas; executar os SQLs do painel de Admin Configurações.
+
+Preços e pacotes (Meta)
+- Ao migrar para a Cloud API, o custo tende a seguir a cobrança da Meta por template entregue (por categoria/país), e pode mudar ao longo do tempo.
+- Para precificar pacotes no SaaS, a contagem que deve importar é a de templates efetivamente entregues (status delivered), não apenas “enviado”.
+
+Referências internas (arquivos do código)
+- smagenda/supabase/functions/whatsapp/index.ts
+- smagenda/supabase/functions/whatsapp-lembretes/index.ts
+- smagenda/supabase/functions/payments/index.ts
+- smagenda/supabase/functions/create-funcionario/index.ts
+- smagenda/supabase/functions/admin-create-funcionario/index.ts
+- smagenda/supabase/functions/resend-domain/index.ts
+- smagenda/src/views/app/PagamentoPage.tsx
+- smagenda/src/views/app/MensagensSettingsPage.tsx
+- smagenda/src/views/app/WhatsappSettingsPage.tsx

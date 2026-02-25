@@ -396,47 +396,6 @@ function DatePopupCalendar(args: {
   )
 }
 
-async function callPublicPaymentsFn(body: Record<string, unknown>) {
-  if (!supabaseEnv.ok) {
-    return { ok: false as const, status: 0, body: { error: 'missing_supabase_env' } as unknown }
-  }
-
-  const supabaseUrl = String(supabaseEnv.values.VITE_SUPABASE_URL ?? '')
-    .trim()
-    .replace(/^['"`\s]+|['"`\s]+$/g, '')
-    .replace(/\/+$/g, '')
-  const supabaseAnonKey = String(supabaseEnv.values.VITE_SUPABASE_ANON_KEY ?? '')
-    .trim()
-    .replace(/^['"`\s]+|['"`\s]+$/g, '')
-
-  const fnUrl = `${supabaseUrl}/functions/v1/payments`
-
-  let res: Response
-  try {
-    res = await fetch(fnUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        apikey: supabaseAnonKey,
-      },
-      body: JSON.stringify(body),
-    })
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : 'Falha de rede'
-    return { ok: false as const, status: 0, body: { error: 'network_error', message: msg } as unknown }
-  }
-
-  const text = await res.text().catch(() => '')
-  let parsed: unknown = null
-  try {
-    parsed = text ? (JSON.parse(text) as unknown) : null
-  } catch {
-    parsed = text
-  }
-
-  return { ok: res.ok as boolean, status: res.status, body: parsed as unknown }
-}
-
 type Funcionario = {
   id: string
   nome_completo: string
@@ -732,20 +691,10 @@ export function PublicBookingPage() {
   const [clienteEmail, setClienteEmail] = useState('')
   const [clientePlaca, setClientePlaca] = useState('')
   const [clienteEndereco, setClienteEndereco] = useState('')
+  const [clienteDetalhe, setClienteDetalhe] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [successId, setSuccessId] = useState<string | null>(null)
   const [logoFailed, setLogoFailed] = useState(false)
-
-  const [syncingPayment, setSyncingPayment] = useState(() => {
-    try {
-      const qp = new URLSearchParams(window.location.search)
-      const paid = qp.get('paid') === '1'
-      const sessionId = (qp.get('session_id') ?? '').trim()
-      return Boolean(enableTaxaAgendamento && paid && sessionId)
-    } catch {
-      return false
-    }
-  })
 
   const [modalOpen, setModalOpen] = useState(false)
 
@@ -1273,65 +1222,14 @@ export function PublicBookingPage() {
     if (needsEndereco) extras.endereco = clienteEndereco.trim()
     if (needsPlaca && placa) extras.placa = placa
     if (email) extras.email = email
+    if (clienteDetalhe.trim()) extras.detalhe = clienteDetalhe.trim()
     const extrasFinal = Object.keys(extras).length > 0 ? extras : null
 
     const taxa = typeof selectedServico.taxa_agendamento === 'number' && Number.isFinite(selectedServico.taxa_agendamento) ? selectedServico.taxa_agendamento : 0
     const normalizedTaxa = Math.max(0, taxa)
     if (enableTaxaAgendamento && normalizedTaxa > 0) {
-      const payload: Record<string, unknown> = {
-        action: 'create_booking_fee_checkout',
-        usuario_id: usuarioId,
-        servico_id: selectedServico.id,
-        data,
-        hora_inicio: effectiveHora,
-        cliente_nome: clienteNomeFinal,
-        cliente_telefone: telefone,
-        cliente_endereco: needsEndereco ? clienteEndereco.trim() : null,
-        slug: slug ?? null,
-        unidade_slug: unidadeSlug ?? null,
-      }
-      if (showCapacidadePorHorario) payload.qtd_vagas = qtdVagasInt
-      if (extrasFinal) payload.extras = extrasFinal
-      if (hasStaff) payload.funcionario_id = funcionarioId
-      if (usuario?.unidade_id) payload.unidade_id = usuario.unidade_id
-
-      const res = await callPublicPaymentsFn(payload)
-      if (!res.ok) {
-        const obj = res.body && typeof res.body === 'object' ? (res.body as Record<string, unknown>) : null
-        const msg =
-          (typeof obj?.message === 'string' && obj.message.trim()) ||
-          (typeof obj?.error === 'string' && obj.error.trim()) ||
-          (typeof res.body === 'string' && res.body.trim()) ||
-          `Erro ao iniciar pagamento (HTTP ${res.status}).`
-        const lower = msg.toLowerCase()
-        if (lower.includes('capacidade_esgotada')) {
-          setError('Esse horário não tem vagas suficientes. Selecione outro horário.')
-        } else {
-          setError(msg)
-        }
-        setSubmitting(false)
-        return
-      }
-
-      const body = res.body && typeof res.body === 'object' ? (res.body as Record<string, unknown>) : null
-      const checkoutUrl = typeof body?.checkout_url === 'string' ? body.checkout_url.trim() : ''
-      const kind = typeof body?.kind === 'string' ? body.kind.trim().toLowerCase() : ''
-      const agendamentoId = typeof body?.agendamento_id === 'string' ? body.agendamento_id.trim() : ''
-
-      if (kind === 'credit' && agendamentoId) {
-        setSuccessId(agendamentoId)
-        setSubmitting(false)
-        setModalOpen(false)
-        return
-      }
-
-      if (!checkoutUrl) {
-        setError('Falha ao iniciar pagamento: checkout_url ausente.')
-        setSubmitting(false)
-        return
-      }
-
-      window.location.href = checkoutUrl
+      setError('Pagamento automático indisponível no momento. Remova a taxa ou tente mais tarde.')
+      setSubmitting(false)
       return
     }
 
@@ -1383,44 +1281,6 @@ export function PublicBookingPage() {
     setSubmitting(false)
     setModalOpen(false)
   }
-
-  useEffect(() => {
-    const qp = (() => {
-      try {
-        return new URLSearchParams(window.location.search)
-      } catch {
-        return null
-      }
-    })()
-
-    const paid = qp?.get('paid') === '1'
-    const sessionId = (qp?.get('session_id') ?? '').trim()
-    if (!enableTaxaAgendamento || !paid || !sessionId) return
-    if (!syncingPayment || submitting) return
-
-    callPublicPaymentsFn({ action: 'sync_booking_fee_session', session_id: sessionId })
-      .then((res) => {
-        if (!res.ok) {
-          const obj = res.body && typeof res.body === 'object' ? (res.body as Record<string, unknown>) : null
-          const msg =
-            (typeof obj?.message === 'string' && obj.message.trim()) ||
-            (typeof obj?.error === 'string' && obj.error.trim()) ||
-            (typeof res.body === 'string' && res.body.trim()) ||
-            `Erro ao confirmar pagamento (HTTP ${res.status}).`
-          setError(msg)
-          setSyncingPayment(false)
-          return
-        }
-        const body = res.body && typeof res.body === 'object' ? (res.body as Record<string, unknown>) : null
-        const agendamentoId = typeof body?.agendamento_id === 'string' ? body.agendamento_id.trim() : ''
-        if (agendamentoId) setSuccessId(agendamentoId)
-        setSyncingPayment(false)
-      })
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : 'Erro ao confirmar pagamento')
-        setSyncingPayment(false)
-      })
-  }, [enableTaxaAgendamento, slug, submitting, syncingPayment, unidadeSlug])
 
   const canSubmit = Boolean(
     usuarioId &&
@@ -2057,6 +1917,12 @@ export function PublicBookingPage() {
                         <div className="font-semibold text-right">{clienteEndereco.trim()}</div>
                       </div>
                     ) : null}
+                    {clienteDetalhe.trim() ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <div>Detalhe</div>
+                        <div className="font-semibold text-right">{clienteDetalhe.trim()}</div>
+                      </div>
+                    ) : null}
                     <div className="flex items-center justify-between gap-2">
                       <div>{labels.servico}</div>
                       <div className="font-semibold">{selectedServico?.nome ?? '—'}</div>
@@ -2090,6 +1956,7 @@ export function PublicBookingPage() {
                   <Input label="Email (opcional)" value={clienteEmail} onChange={(e) => setClienteEmail(e.target.value)} />
                   {needsPlaca ? <Input label="Placa do carro" value={clientePlaca} onChange={(e) => setClientePlaca(e.target.value)} /> : null}
                   {needsEndereco ? <Input label="Endereço" value={clienteEndereco} onChange={(e) => setClienteEndereco(e.target.value)} /> : null}
+                  <Input label="Detalhe (opcional)" value={clienteDetalhe} onChange={(e) => setClienteDetalhe(e.target.value)} />
 
                   <div className="flex justify-between">
                     <Button variant="secondary" onClick={closeModal}>

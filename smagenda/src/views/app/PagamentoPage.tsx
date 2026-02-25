@@ -1,175 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useMemo, useState } from 'react'
 import { AppShell } from '../../components/layout/AppShell'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
 import { PageTutorial, TutorialOverlay } from '../../components/ui/TutorialOverlay'
-import { checkJwtProject, supabase, supabaseEnv } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
-
-type FnResult = { ok: true; status: number; body: unknown } | { ok: false; status: number; body: unknown }
-
-function safeJson(value: unknown) {
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return null
-  }
-}
-
-async function callPaymentsFn(body: Record<string, unknown>): Promise<FnResult> {
-  if (!supabaseEnv.ok) {
-    return { ok: false as const, status: 0, body: { error: 'missing_supabase_env' } }
-  }
-
-  const supabaseUrl = String(supabaseEnv.values.VITE_SUPABASE_URL ?? '')
-    .trim()
-    .replace(/^['"`\s]+|['"`\s]+$/g, '')
-    .replace(/\/+$/g, '')
-  const supabaseAnonKey = String(supabaseEnv.values.VITE_SUPABASE_ANON_KEY ?? '')
-    .trim()
-    .replace(/^['"`\s]+|['"`\s]+$/g, '')
-  const fnUrl = `${supabaseUrl}/functions/v1/payments`
-
-  const tryRefresh = async () => {
-    const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession()
-    if (refreshErr) return null
-    return refreshed.session ?? null
-  }
-
-  const { data: sessionData } = await supabase.auth.getSession()
-  let session = sessionData.session
-  const now = Math.floor(Date.now() / 1000)
-  const expiresAt = session?.expires_at ?? null
-
-  if (session && (!expiresAt || expiresAt <= now + 60)) {
-    const refreshed = await tryRefresh()
-    if (refreshed) session = refreshed
-  }
-
-  if (session) {
-    const { error: userErr } = await supabase.auth.getUser()
-    const userErrMsg = typeof userErr?.message === 'string' ? userErr.message : ''
-    if (userErr && /invalid\s+jwt/i.test(userErrMsg)) {
-      const refreshed = await tryRefresh()
-      if (refreshed) session = refreshed
-    }
-  }
-
-  const token = session?.access_token ?? null
-  if (!token) {
-    return { ok: false as const, status: 401, body: { error: 'session_expired' } }
-  }
-
-  const tokenProject = checkJwtProject(token, supabaseUrl)
-  if (!tokenProject.ok) {
-    await supabase.auth.signOut().catch(() => undefined)
-    return { ok: false as const, status: 401, body: { error: 'jwt_project_mismatch', iss: tokenProject.iss, expected: tokenProject.expectedPrefix } }
-  }
-
-  const callFetch = async (jwt: string) => {
-    let res: Response
-    try {
-      res = await fetch(fnUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          apikey: supabaseAnonKey,
-          Authorization: `Bearer ${jwt}`,
-        },
-        body: JSON.stringify(body),
-      })
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Falha de rede'
-      return { ok: false as const, status: 0, body: { error: 'network_error', message: msg } }
-    }
-
-    const text = await res.text()
-    let parsed: unknown = null
-    try {
-      parsed = text ? JSON.parse(text) : null
-    } catch {
-      parsed = text
-    }
-
-    if (!res.ok && res.status === 404) {
-      const raw = typeof parsed === 'string' ? parsed : text
-      if (typeof raw === 'string' && raw.includes('Requested function was not found')) {
-        return {
-          ok: false as const,
-          status: 404,
-          body: {
-            error: 'function_not_deployed',
-            message: 'A função payments não está publicada no Supabase. Faça deploy da Edge Function `payments` no seu projeto.',
-          },
-        }
-      }
-    }
-
-    if (
-      !res.ok &&
-      res.status === 401 &&
-      parsed &&
-      typeof parsed === 'object' &&
-      (parsed as Record<string, unknown>).message === 'Invalid JWT' &&
-      (parsed as Record<string, unknown>).code === 401
-    ) {
-      return { ok: false as const, status: 401, body: { error: 'supabase_gateway_invalid_jwt' } }
-    }
-
-    if (!res.ok) console.error('payments error', { status: res.status, body: parsed, body_json: safeJson(parsed) })
-
-    if (!res.ok) return { ok: false as const, status: res.status, body: parsed }
-    return { ok: true as const, status: res.status, body: parsed }
-  }
-
-  const first = await callFetch(token)
-  if (!first.ok && first.status === 401) {
-    const refreshed = await tryRefresh()
-    const nextToken = refreshed?.access_token ?? null
-    if (!nextToken) {
-      await supabase.auth.signOut().catch(() => undefined)
-      return { ok: false as const, status: 401, body: { error: 'invalid_jwt' } }
-    }
-    const nextProject = checkJwtProject(nextToken, supabaseUrl)
-    if (!nextProject.ok) {
-      await supabase.auth.signOut().catch(() => undefined)
-      return { ok: false as const, status: 401, body: { error: 'jwt_project_mismatch', iss: nextProject.iss, expected: nextProject.expectedPrefix } }
-    }
-    return callFetch(nextToken)
-  }
-
-  return first
-}
-
-async function createCheckoutPagamento(
-  usuarioId: string,
-  item: string,
-  metodo: 'card' | 'pix',
-  funcionariosTotal?: number | null
-): Promise<FnResult> {
-  const payload: Record<string, unknown> = { action: 'create_checkout', usuario_id: usuarioId, plano: item, metodo }
-  if (typeof funcionariosTotal === 'number' && Number.isFinite(funcionariosTotal)) payload.funcionarios_total = funcionariosTotal
-  return callPaymentsFn(payload)
-}
-
-async function createBillingPortalPagamento(usuarioId: string): Promise<FnResult> {
-  const payload: Record<string, unknown> = { action: 'create_billing_portal', usuario_id: usuarioId }
-  return callPaymentsFn(payload)
-}
-
-async function syncCheckoutSessionPagamento(sessionId: string, usuarioId: string | null): Promise<FnResult> {
-  const payload: Record<string, unknown> = { action: 'sync_checkout_session', session_id: sessionId }
-  if (usuarioId) payload.usuario_id = usuarioId
-  return callPaymentsFn(payload)
-}
-
-async function getUsuarioStripeStatusPagamento(usuarioId: string): Promise<FnResult> {
-  const payload: Record<string, unknown> = { action: 'admin_get_usuario_stripe_status', usuario_id: usuarioId }
-  return callPaymentsFn(payload)
-}
 
 type PlanKey = 'free' | 'basic' | 'pro' | 'team' | 'enterprise'
 
@@ -190,8 +26,6 @@ type ServiceCard = {
 
 export function PagamentoPage() {
   const { appPrincipal, refresh } = useAuth()
-  const location = useLocation()
-  const navigate = useNavigate()
   const usuario = appPrincipal?.kind === 'usuario' ? appPrincipal.profile : null
   const usuarioId = usuario?.id ?? null
 
@@ -217,45 +51,10 @@ export function PagamentoPage() {
     []
   )
 
-  const [checkoutNotice, setCheckoutNotice] = useState<null | { kind: 'success' | 'cancel'; item: string | null }>(null)
   const [userSelectedPlan, setUserSelectedPlan] = useState<PlanKey | null>(null)
   const [selectedService, setSelectedService] = useState<ServiceCard['key'] | null>(null)
-  const [creatingCheckout, setCreatingCheckout] = useState(false)
-  const [openingPortal, setOpeningPortal] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [funcionariosTotal, setFuncionariosTotal] = useState<number | null>(null)
-
-  const formatCheckoutError = (status: number, body: unknown) => {
-    if (typeof body === 'string' && body.trim()) return body
-    if (body && typeof body === 'object') {
-      const obj = body as Record<string, unknown>
-      const err = typeof obj.error === 'string' ? obj.error : null
-      const message = typeof obj.message === 'string' && obj.message.trim() ? obj.message.trim() : null
-      if (message) {
-        const stripeStatus = typeof obj.stripe_status === 'number' && Number.isFinite(obj.stripe_status) ? obj.stripe_status : null
-        if (err === 'stripe_error') {
-          const mode = typeof obj.stripe_key_mode === 'string' && obj.stripe_key_mode.trim() ? obj.stripe_key_mode.trim() : 'unknown'
-          if (stripeStatus) return `Stripe (${mode}, HTTP ${stripeStatus}): ${message}`
-          return `Stripe (${mode}): ${message}`
-        }
-        return message
-      }
-      if (err === 'missing_supabase_env') return 'Configuração do Supabase ausente no ambiente.'
-      if (err === 'invalid_action') {
-        return 'A função payments do Supabase está desatualizada (não reconhece a ação solicitada). Faça deploy da Edge Function payments e tente novamente.'
-      }
-      if (err === 'network_error') return typeof obj.message === 'string' && obj.message.trim() ? obj.message : 'Falha de rede ao iniciar pagamento.'
-      if (err === 'session_expired' || err === 'invalid_jwt') return 'Sessão expirada no Supabase. Saia e entre novamente.'
-      if (err === 'jwt_project_mismatch') return 'Sessão do Supabase pertence a outro projeto. Saia e entre novamente.'
-      if (err === 'supabase_gateway_invalid_jwt') return 'A Edge Function está exigindo JWT no gateway. Faça deploy com verify_jwt=false.'
-      if (err === 'function_not_deployed') return 'A função payments não está publicada no Supabase.'
-      const asJson = safeJson(body)
-      if (err && asJson) return `Erro ao iniciar pagamento: ${err} (HTTP ${status}): ${asJson}`
-      if (err) return `Erro ao iniciar pagamento: ${err} (HTTP ${status}).`
-      if (asJson) return `Erro ao iniciar pagamento (HTTP ${status}): ${asJson}`
-    }
-    return `Erro ao iniciar pagamento (HTTP ${status}).`
-  }
 
   const canShowFree = Boolean(usuario && usuario.plano === 'free' && usuario.status_pagamento === 'trial' && usuario.free_trial_consumido !== true)
 
@@ -332,62 +131,7 @@ export function PagamentoPage() {
 
   const effectiveFuncionariosTotal = funcionariosTotal ?? (selectedPlan === 'pro' ? defaultProFuncionariosTotal : defaultFuncionariosTotal)
 
-  useEffect(() => {
-    const run = async () => {
-      const search = location.search ?? ''
-      if (!search) return
-      const params = new URLSearchParams(search)
-      const checkout = (params.get('checkout') ?? '').trim().toLowerCase()
-      if (checkout !== 'success' && checkout !== 'cancel') return
-
-      const item = (params.get('item') ?? params.get('plano') ?? '').trim().toLowerCase() || null
-      setCheckoutNotice({ kind: checkout, item })
-
-      const sessionId = (params.get('session_id') ?? '').trim()
-      const usuarioIdFromParams = (params.get('usuario_id') ?? '').trim() || null
-
-      const first = await refresh()
-      const refreshedUsuarioId = first?.kind === 'usuario' ? first.profile.id : null
-      const effectiveUsuarioId = refreshedUsuarioId ?? usuarioIdFromParams
-
-      if (checkout === 'success') {
-        if (sessionId) {
-          const sync = await syncCheckoutSessionPagamento(sessionId, effectiveUsuarioId)
-          if (!sync.ok) {
-            setError(formatCheckoutError(sync.status, sync.body))
-          } else {
-            await refresh()
-          }
-        }
-
-        let tries = 0
-        while (tries < 10) {
-          await new Promise((r) => setTimeout(r, 2000))
-          if (effectiveUsuarioId) {
-            await getUsuarioStripeStatusPagamento(effectiveUsuarioId).catch(() => undefined)
-          }
-          const next = await refresh()
-          if (next?.kind === 'usuario' && next.profile.status_pagamento === 'ativo') break
-          tries += 1
-        }
-      }
-
-      navigate('/pagamento', { replace: true })
-    }
-    run().catch(() => undefined)
-  }, [location.search, navigate, refresh])
-
-  useEffect(() => {
-    const run = async () => {
-      if (!usuarioId || !usuario) return
-      if (usuario.status_pagamento === 'ativo') return
-      await getUsuarioStripeStatusPagamento(usuarioId).catch(() => undefined)
-      await refresh()
-    }
-    run().catch(() => undefined)
-  }, [refresh, usuario, usuarioId])
-
-  const startPlanCheckout = async (metodo: 'card' | 'pix') => {
+  const startPlanCheckout = async (_metodo: 'card' | 'pix') => {
     if (!usuarioId) return
     const plan = selectedPlan
     if (!plan || plan === 'free') {
@@ -403,64 +147,12 @@ export function PagamentoPage() {
       return
     }
 
-    const total = plan === 'pro' ? Math.max(includedPro, Math.min(maxPro, requested)) : 1
-
-    setCreatingCheckout(true)
-    setError(null)
-    const res = await createCheckoutPagamento(usuarioId, plan, metodo, total)
-    if (!res.ok) {
-      setError(formatCheckoutError(res.status, res.body))
-      setCreatingCheckout(false)
-      return
-    }
-    const body = res.body as Record<string, unknown>
-    const url = typeof body.url === 'string' ? body.url : null
-    if (!url) {
-      setError('A função não retornou o link de checkout.')
-      setCreatingCheckout(false)
-      return
-    }
-    window.location.href = url
+    setError('Pagamento automático indisponível no momento. Tente mais tarde.')
   }
 
-  const openBillingPortal = async () => {
-    if (!usuarioId) return
-    setOpeningPortal(true)
-    setError(null)
-    const res = await createBillingPortalPagamento(usuarioId)
-    if (!res.ok) {
-      setError(formatCheckoutError(res.status, res.body))
-      setOpeningPortal(false)
-      return
-    }
-    const body = res.body as Record<string, unknown>
-    const url = typeof body.url === 'string' ? body.url : null
-    if (!url) {
-      setError('A função não retornou o link do portal.')
-      setOpeningPortal(false)
-      return
-    }
-    window.location.href = url
-  }
-
-  const startServiceCheckout = async (metodo: 'card' | 'pix') => {
+  const startServiceCheckout = async (_metodo: 'card' | 'pix') => {
     if (!usuarioId || !selectedService) return
-    setCreatingCheckout(true)
-    setError(null)
-    const res = await createCheckoutPagamento(usuarioId, selectedService, metodo)
-    if (!res.ok) {
-      setError(formatCheckoutError(res.status, res.body))
-      setCreatingCheckout(false)
-      return
-    }
-    const body = res.body as Record<string, unknown>
-    const url = typeof body.url === 'string' ? body.url : null
-    if (!url) {
-      setError('A função não retornou o link de checkout.')
-      setCreatingCheckout(false)
-      return
-    }
-    window.location.href = url
+    setError('Pagamento automático indisponível no momento. Tente mais tarde.')
   }
 
   const formatStatusPagamento = (value: string) => {
@@ -509,33 +201,7 @@ export function PagamentoPage() {
               </Button>
             </div>
 
-        {checkoutNotice ? (
-          <div
-            className={[
-              'rounded-xl border p-4 text-sm',
-              checkoutNotice.kind === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-900',
-            ].join(' ')}
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="space-y-1">
-                <div className="font-semibold">{checkoutNotice.kind === 'success' ? 'Pagamento concluído' : 'Pagamento cancelado'}</div>
-                <div>
-                  {checkoutNotice.item ? `Item: ${checkoutNotice.item.toUpperCase()}. ` : ''}Status: {formatStatusPagamento(usuario.status_pagamento)}.
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button variant="secondary" onClick={() => void refresh()}>
-                  Atualizar
-                </Button>
-                <Button variant="secondary" onClick={() => setCheckoutNotice(null)}>
-                  Fechar
-                </Button>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
+            {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
 
             <div
               className={
@@ -649,30 +315,18 @@ export function PagamentoPage() {
                     }
                   >
                     <div className="flex flex-wrap justify-end gap-2">
-                      <Button variant="secondary" onClick={() => void startPlanCheckout('pix')} disabled={creatingCheckout || selectedPlan === 'free'}>
-                        {creatingCheckout ? 'Abrindo…' : 'PIX (30 dias)'}
+                      <Button variant="secondary" onClick={() => void startPlanCheckout('pix')} disabled={selectedPlan === 'free'}>
+                        PIX (30 dias)
                       </Button>
-                      <Button onClick={() => void startPlanCheckout('card')} disabled={creatingCheckout || selectedPlan === 'free'}>
-                        {creatingCheckout ? 'Abrindo…' : 'Cartão (assinatura)'}
+                      <Button onClick={() => void startPlanCheckout('card')} disabled={selectedPlan === 'free'}>
+                        Cartão (assinatura)
                       </Button>
                     </div>
                   </div>
 
-                  {(Boolean(usuario.stripe_customer_id) || (usuario.status_pagamento === 'ativo' && usuario.plano !== 'free')) ? (
-                    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                          <div className="text-sm font-semibold text-slate-900">Assinatura</div>
-                          <div className="text-xs text-slate-600">Cancelar ou trocar forma de pagamento pelo Stripe.</div>
-                        </div>
-                        <Button variant="secondary" onClick={() => void openBillingPortal()} disabled={openingPortal}>
-                          {openingPortal ? 'Abrindo…' : 'Gerenciar / Cancelar'}
-                        </Button>
-                      </div>
-                    </div>
-                  ) : usuario.status_pagamento === 'ativo' ? (
+                  {usuario.status_pagamento === 'ativo' ? (
                     <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-700">
-                      Se você pagou por PIX (30 dias), não existe assinatura para cancelar. Ao vencer, basta não renovar.
+                      Para alterações de pagamento, entre em contato com o suporte.
                     </div>
                   ) : null}
                 </div>
@@ -726,11 +380,11 @@ export function PagamentoPage() {
             </div>
 
                   <div className="flex flex-wrap justify-end gap-2">
-                    <Button variant="secondary" onClick={() => void startServiceCheckout('pix')} disabled={creatingCheckout || !selectedService}>
-                      {creatingCheckout ? 'Abrindo…' : 'Pagar com PIX'}
+                    <Button variant="secondary" onClick={() => void startServiceCheckout('pix')} disabled={!selectedService}>
+                      Pagar com PIX
                     </Button>
-                    <Button onClick={() => void startServiceCheckout('card')} disabled={creatingCheckout || !selectedService}>
-                      {creatingCheckout ? 'Abrindo…' : 'Pagar com cartão'}
+                    <Button onClick={() => void startServiceCheckout('card')} disabled={!selectedService}>
+                      Pagar com cartão
                     </Button>
                   </div>
                 </div>

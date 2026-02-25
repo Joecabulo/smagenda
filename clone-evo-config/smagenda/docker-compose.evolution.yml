@@ -1,0 +1,50 @@
+
+version: '3.9'
+
+services:
+  evolution-api:
+    container_name: evolution_api
+    image: evoapicloud/evolution-api:v2.3.7
+    restart: always
+    ports:
+      - '8080:8080'
+    environment:
+      AUTHENTICATION_TYPE: apikey
+      AUTHENTICATION_API_KEY: ${EVOLUTION_AUTH_KEY}
+      CORS_ORIGIN: ${EVOLUTION_CORS_ORIGIN}
+      CONFIG_SESSION_PHONE_VERSION: ${EVOLUTION_CONFIG_SESSION_PHONE_VERSION:-2.3000.1030444778}
+      DATABASE_ENABLED: ${EVOLUTION_DATABASE_ENABLED}
+      DATABASE_PROVIDER: ${EVOLUTION_DATABASE_PROVIDER}
+      DATABASE_CONNECTION_URI: ${EVOLUTION_DATABASE_CONNECTION_URI}
+      CACHE_REDIS_ENABLED: ${EVOLUTION_CACHE_REDIS_ENABLED}
+      CACHE_REDIS_URI: ${EVOLUTION_CACHE_REDIS_URI}
+      CACHE_REDIS_PREFIX_KEY: ${EVOLUTION_CACHE_REDIS_PREFIX_KEY}
+    volumes:
+      - evolution_instances:/evolution/instances
+    depends_on:
+      - evolution_db
+      - evolution_redis
+
+  evolution_db:
+    container_name: evolution_db
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: ${EVOLUTION_POSTGRES_DB}
+      POSTGRES_USER: ${EVOLUTION_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${EVOLUTION_POSTGRES_PASSWORD}
+    volumes:
+      - evolution_db_data:/var/lib/postgresql/data
+
+  evolution_redis:
+    container_name: evolution_redis
+    image: redis:7-alpine
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - evolution_redis_data:/data
+
+volumes:
+  evolution_instances:
+  evolution_db_data:
+  evolution_redis_data:

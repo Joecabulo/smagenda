@@ -554,7 +554,7 @@ export function LandingPage() {
 
             <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
               {[
-                { title: 'Checkout em produção', desc: 'Pagamento via PIX (30 dias) ou cartão (assinatura) no Stripe.' },
+                { title: 'Checkout em produção', desc: 'Pagamento via PIX (30 dias) ou cartão (assinatura).' },
                 { title: 'Cancelamento simples', desc: 'Você controla sua assinatura dentro do painel.' },
                 { title: 'Suporte humano', desc: waLink && supportWhatsAppRaw ? `Atendimento via WhatsApp: ${supportWhatsAppRaw}` : 'Atendimento via WhatsApp e email.' },
               ].map((s) => (
@@ -585,7 +585,7 @@ export function LandingPage() {
                 },
                 {
                   q: 'Como funciona a cobrança?',
-                  a: 'No painel, você escolhe PIX (30 dias) ou cartão (assinatura). O checkout abre em produção via Stripe.',
+                  a: 'No painel, você escolhe PIX (30 dias) ou cartão (assinatura).',
                 },
                 {
                   q: 'Consigo reduzir faltas (no-show)?',

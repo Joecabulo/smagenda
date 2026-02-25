@@ -15,6 +15,109 @@ type AuditLogRow = {
 
 type UsuarioMini = { id: string; nome_negocio: string; slug: string }
 
+function formatDateTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('pt-BR')
+}
+
+function parseRegistroId(input: string | null) {
+  if (!input) return null
+  if (input.includes('|') && !input.includes(':')) {
+    const parts = input.split('|')
+    if (parts.length < 2) return { raw: input }
+    return { messageId: parts[0] || null, instanceName: parts[1] || null, masked: parts[2] || null, raw: input }
+  }
+  const [type, ...rest] = input.split(':')
+  if (!rest.length) return { raw: input }
+  const value = rest.join(':')
+  const parts = value.split('|')
+  return { type, value, parts, raw: input }
+}
+
+function describeLog(l: AuditLogRow, usuario: UsuarioMini | null) {
+  const action = (l.acao ?? '').toString()
+  const actionKey = action.toLowerCase()
+  const table = (l.tabela ?? '').toString()
+  const tableKey = table.toLowerCase()
+  const tableLabel =
+    tableKey === 'usuarios'
+      ? 'Usuário'
+      : tableKey === 'funcionarios'
+        ? 'Funcionário'
+      : tableKey === 'agendamentos'
+        ? 'Agendamento'
+        : tableKey === 'auth'
+          ? 'Autenticação'
+        : tableKey === 'whatsapp_webhook'
+          ? 'WhatsApp'
+          : table
+  const actionLabel =
+    tableKey === 'auth' && actionKey === 'login'
+      ? 'Login realizado'
+      : tableKey === 'usuarios' && actionKey === 'insert'
+        ? 'Novo cadastro de usuário'
+        : tableKey === 'usuarios' && actionKey === 'update'
+          ? 'Dados do usuário atualizados'
+          : tableKey === 'usuarios' && actionKey === 'delete'
+            ? 'Usuário removido'
+            : tableKey === 'funcionarios' && actionKey === 'insert'
+              ? 'Funcionário adicionado'
+              : tableKey === 'funcionarios' && actionKey === 'update'
+                ? 'Funcionário atualizado'
+                : tableKey === 'funcionarios' && actionKey === 'delete'
+                  ? 'Funcionário removido'
+                  : actionKey === 'insert'
+                    ? `Criado em ${tableLabel}`
+                    : actionKey === 'update'
+                      ? `Atualizado em ${tableLabel}`
+                      : actionKey === 'delete'
+                        ? `Excluído em ${tableLabel}`
+                        : actionKey === 'webhook_invalid_key'
+                          ? 'Webhook recusado: API Key inválida'
+                          : actionKey === 'webhook_secret_invalid'
+                            ? 'Webhook recusado: segredo inválido'
+                        : actionKey === 'received'
+                          ? 'Webhook recebido'
+                          : actionKey === 'processing'
+                            ? 'Webhook processando'
+                            : actionKey === 'skip_no_text'
+                              ? 'Webhook ignorado: sem texto'
+                              : actionKey === 'skip_from_me'
+                                ? 'Webhook ignorado: mensagem enviada por você'
+                                : actionKey === 'skip_group'
+                                  ? 'Webhook ignorado: grupo'
+                                  : actionKey === 'skip_no_phone'
+                                    ? 'Webhook ignorado: sem telefone'
+                                    : action
+  const registro = parseRegistroId(l.registro_id)
+  const registroLabel =
+    tableKey === 'whatsapp_webhook' && registro
+      ? [registro.instanceName ? `instância ${registro.instanceName}` : null, registro.masked ? `tel ${registro.masked}` : null, registro.messageId ? `msg ${registro.messageId}` : null]
+          .filter(Boolean)
+          .join(' • ')
+      : registro?.type === 'cadastro'
+        ? `cadastro ${registro.value}`
+        : registro?.type === 'usuario'
+          ? `usuário ${registro.value}`
+          : registro?.type === 'funcionario'
+            ? (() => {
+                const nome = registro.parts?.[0]?.trim()
+                const email = registro.parts?.[1]?.trim()
+                if (nome && email) return `funcionário ${nome} (${email})`
+                if (nome) return `funcionário ${nome}`
+                if (email) return `funcionário ${email}`
+                return registro.value
+              })()
+            : registro?.type === 'agendamento'
+              ? `cliente ${registro.value}`
+              : registro?.type === 'login'
+                ? `perfil ${registro.value}`
+                : l.registro_id
+  const usuarioLabel = usuario ? usuario.nome_negocio : l.usuario_id ?? '—'
+  return { title: `${usuarioLabel} • ${actionLabel} • ${tableLabel}`, registroLabel }
+}
+
 export function AdminLogsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -94,15 +197,23 @@ export function AdminLogsPage() {
                 <div key={l.id} className="p-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
+                      {(() => {
+                        const usuario = l.usuario ? l.usuario : null
+                        const desc = describeLog(l, usuario)
+                        return (
+                          <>
                       <div className="text-sm font-semibold text-slate-900">
-                        {l.usuario ? l.usuario.nome_negocio : l.usuario_id ?? '—'} • {l.acao.toUpperCase()} {l.tabela}
+                        {desc.title}
                       </div>
                       <div className="text-sm text-slate-600">
-                        {l.criado_em}
+                        {formatDateTime(l.criado_em)}
                         {l.usuario ? ` • /${l.usuario.slug}` : ''}
                         {l.ator_email ? ` • ${l.ator_email}` : ''}
-                        {l.registro_id ? ` • ${l.registro_id}` : ''}
+                        {desc.registroLabel ? ` • ${desc.registroLabel}` : ''}
                       </div>
+                          </>
+                        )
+                      })()}
                     </div>
                     <div className="text-sm font-medium text-slate-700">{l.tabela}</div>
                   </div>

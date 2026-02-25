@@ -67,7 +67,6 @@ function toUsuarioProfile(row: Record<string, unknown>, userId: string): Usuario
     intervalo_inicio: typeof row.intervalo_inicio === 'string' ? row.intervalo_inicio : null,
     intervalo_fim: typeof row.intervalo_fim === 'string' ? row.intervalo_fim : null,
     whatsapp_api_url: typeof row.whatsapp_api_url === 'string' ? row.whatsapp_api_url : null,
-    stripe_customer_id: typeof row.stripe_customer_id === 'string' ? row.stripe_customer_id : null,
     plano,
     tipo_conta: tipoConta,
     limite_funcionarios: typeof row.limite_funcionarios === 'number' ? row.limite_funcionarios : null,
@@ -317,7 +316,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .catch(() => undefined)
       .finally(() => setLoading(false))
 
-    const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data: subscription } = supabase.auth.onAuthStateChange((event, nextSession) => {
       if (nextSession?.access_token && supabaseEnv.ok) {
         const pj = checkJwtProject(nextSession.access_token, supabasePublicUrl)
         if (!pj.ok) {
@@ -341,7 +340,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return
       }
       resolvePrincipal(nextSession.user.id)
-        .then((p) => setPrincipal(p))
+        .then((p) => {
+          setPrincipal(p)
+          if (event === 'SIGNED_IN') {
+            const kind = p?.kind ?? 'desconhecido'
+            void (async () => {
+              try {
+                await supabase.rpc('audit_log_event', { p_tabela: 'auth', p_acao: 'login', p_registro_id: `login:${kind}` })
+              } catch {
+                return
+              }
+            })()
+          }
+        })
         .catch(() => setPrincipal(null))
     })
 
