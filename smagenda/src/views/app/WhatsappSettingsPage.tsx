@@ -214,6 +214,8 @@ export function WhatsappSettingsPage() {
 
   const [configurado, setConfigurado] = useState(false)
   const [whatsappHabilitado, setWhatsappHabilitado] = useState<boolean | null>(null)
+  const [botAtivo, setBotAtivo] = useState(true)
+  const [updatingBot, setUpdatingBot] = useState(false)
   const [loading, setLoading] = useState(true)
   const [connecting, setConnecting] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
@@ -264,11 +266,12 @@ export function WhatsappSettingsPage() {
 
       let enabled: boolean | null = null
 
-      const first = await supabase.from('usuarios').select('whatsapp_habilitado').eq('id', usuarioId).maybeSingle()
+      const first = await supabase.from('usuarios').select('whatsapp_habilitado, bot_ativo').eq('id', usuarioId).maybeSingle()
       if (first.error) {
         if (isMissingColumnError(first.error.message)) {
           enabled = null
           setWhatsappHabilitado(null)
+          setBotAtivo(true)
         } else {
           setError(first.error.message)
           setConfigurado(false)
@@ -276,9 +279,10 @@ export function WhatsappSettingsPage() {
           return
         }
       } else {
-        const row = (first.data ?? null) as unknown as { whatsapp_habilitado?: boolean | null } | null
+        const row = (first.data ?? null) as unknown as { whatsapp_habilitado?: boolean | null; bot_ativo?: boolean | null } | null
         enabled = typeof row?.whatsapp_habilitado === 'boolean' ? row.whatsapp_habilitado : null
         setWhatsappHabilitado(enabled)
+        setBotAtivo(typeof row?.bot_ativo === 'boolean' ? row.bot_ativo : true)
       }
       const cfg = await callWhatsappFunction({ action: 'config_status' })
       if (!cfg.ok) {
@@ -597,6 +601,19 @@ export function WhatsappSettingsPage() {
     setTimeout(() => setSaved(false), 2000)
   }
 
+  const toggleBot = async () => {
+    if (!usuarioId) return
+    setUpdatingBot(true)
+    const next = !botAtivo
+    const { error: updateErr } = await supabase.from('usuarios').update({ bot_ativo: next }).eq('id', usuarioId)
+    if (updateErr) {
+      setError(`Erro ao atualizar bot: ${updateErr.message}`)
+    } else {
+      setBotAtivo(next)
+    }
+    setUpdatingBot(false)
+  }
+
   const isConnected = instanceState?.toLowerCase() === 'open'
   const connectionLabel = (() => {
     if (!habilitado || !configurado) return '—'
@@ -626,6 +643,31 @@ export function WhatsappSettingsPage() {
 
         {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div> : null}
         {saved ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">Enviado.</div> : null}
+
+        <div>
+          <Card>
+            <div className="p-6">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="text-sm font-semibold text-slate-900">Assistente Automático (Bot)</div>
+                  <div className="text-sm text-slate-500 max-w-2xl">
+                    Se ativado, o sistema responderá automaticamente mensagens como "Agendar" e perguntas sobre serviços.
+                    Se desativado, o sistema não responderá nada automaticamente.
+                  </div>
+                </div>
+                <div className="shrink-0">
+                  <Button
+                    variant={botAtivo ? 'primary' : 'secondary'}
+                    onClick={toggleBot}
+                    disabled={updatingBot || loading}
+                  >
+                    {updatingBot ? 'Atualizando...' : botAtivo ? 'Ativado' : 'Desativado'}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </Card>
+        </div>
 
         <div
           className={

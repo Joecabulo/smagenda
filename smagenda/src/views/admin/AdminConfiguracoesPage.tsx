@@ -3875,6 +3875,7 @@ grant execute on function public.public_create_agendamento_publico(uuid, date, t
 
   const sqlWhatsappAutomacao = useMemo(() => {
     return `alter table public.usuarios add column if not exists whatsapp_instance_name text;
+alter table public.usuarios add column if not exists bot_ativo boolean not null default true;
 alter table public.usuarios add column if not exists enviar_confirmacao boolean not null default true;
 alter table public.usuarios add column if not exists enviar_lembrete boolean not null default false;
 alter table public.usuarios add column if not exists enviar_cancelamento boolean not null default true;

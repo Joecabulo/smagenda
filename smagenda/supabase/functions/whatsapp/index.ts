@@ -82,6 +82,8 @@ type UsuarioInboundRow = {
   whatsapp_habilitado: boolean | null
   whatsapp_instance_name: string | null
   timezone: string | null
+  endereco?: string | null
+  bot_ativo?: boolean | null
 }
 
 type WhatsappConversaRow = {
@@ -424,7 +426,12 @@ function isNo(inputRaw: string) {
 
 function isTriggerAgendar(inputRaw: string) {
   const input = normalizeTextBasic(inputRaw).replace(/[^a-z0-9\s]/g, '')
-  return input === 'agendar' || input.startsWith('agendar ')
+  return input === 'agendar' || input.startsWith('agendar ') || input.includes('agendar')
+}
+
+function isPriceRequest(inputRaw: string) {
+  const input = normalizeTextBasic(inputRaw)
+  return input.includes('valor') || input.includes('preco') || input.includes('quanto custa') || input.includes('valores') || input.includes('tabela') || input.includes('servico') || input.includes('opco')
 }
 
 function isAvailabilityRequest(inputRaw: string) {
@@ -635,7 +642,7 @@ async function handleInboundRequest(args: {
   const userLookup = instanceFilter
     ? await dbClient
         .from('usuarios')
-        .select('id,slug,nome_negocio,whatsapp_habilitado,whatsapp_instance_name,timezone')
+        .select('id,slug,nome_negocio,whatsapp_habilitado,whatsapp_instance_name,timezone,endereco,bot_ativo')
         .or(instanceFilter)
         .limit(1)
         .maybeSingle()
@@ -651,7 +658,7 @@ async function handleInboundRequest(args: {
   if (!user?.id) {
     const fallback = await dbClient
       .from('usuarios')
-      .select('id,slug,nome_negocio,whatsapp_habilitado,whatsapp_instance_name,timezone')
+      .select('id,slug,nome_negocio,whatsapp_habilitado,whatsapp_instance_name,timezone,endereco,bot_ativo')
       .eq('whatsapp_habilitado', true)
       .limit(2)
     if (fallback.error) {
@@ -667,6 +674,11 @@ async function handleInboundRequest(args: {
   }
   if (!user?.id) return jsonResponse(200, { ok: true, skipped: true })
   if (user.whatsapp_habilitado === false) return jsonResponse(200, { ok: true, skipped: true })
+
+  const botAtivo = typeof user.bot_ativo === 'boolean' ? user.bot_ativo : true
+  if (!botAtivo) {
+    return jsonResponse(200, { ok: true, skipped: true, reason: 'bot_disabled' })
+  }
 
   const config = await loadGlobalWhatsappConfig(dbClient)
   if (!config.ok || !config.configured) return jsonResponse(200, { ok: false, error: 'whatsapp_not_configured' })
@@ -756,6 +768,9 @@ async function handleInboundRequest(args: {
       },
       { onConflict: 'usuario_id,cliente_telefone' }
     )
+    /*
+    // Removido para atender solicitação do usuário: não enviar mensagem automática para mensagens aleatórias.
+    // O bot só deve responder se o cliente enviar "Agendar".
     await evolutionSendTextWithFallback({
       apiUrl,
       apiKey,
@@ -763,6 +778,7 @@ async function handleInboundRequest(args: {
       phoneRaw: phone,
       text: 'Olá! Para iniciar um agendamento, envie "Agendar".',
     })
+    */
     return jsonResponse(200, { ok: true })
   }
 
@@ -795,21 +811,66 @@ async function handleInboundRequest(args: {
   if (estado === 'await_servico') {
     const { data: servicosRaw, error: servErr } = await dbClient
       .from('servicos')
-      .select('id,nome,capacidade_por_horario,dia_inteiro')
+      .select('id,nome,capacidade_por_horario,dia_inteiro,preco')
       .eq('usuario_id', user.id)
       .eq('ativo', true)
       .order('ordem', { ascending: true })
       .order('criado_em', { ascending: true })
     if (servErr) return jsonResponse(200, { ok: false, error: 'load_servicos_failed', message: servErr.message })
-    const servicos = (servicosRaw ?? []) as Array<{ id: string; nome: string | null; capacidade_por_horario?: number | null; dia_inteiro?: boolean | null }>
+    const servicos = (servicosRaw ?? []) as Array<{ id: string; nome: string | null; capacidade_por_horario?: number | null; dia_inteiro?: boolean | null; preco?: number | null }>
+    
+    const isPrice = isPriceRequest(text) || text.toLowerCase().includes('valor')
+
+    const buildList = (withPrice: boolean) => {
+      return servicos.map((s) => {
+        const preco = Number(s.preco ?? 0)
+        const precoStr = (withPrice && preco > 0) ? ` - ${formatBRL(preco)}` : ''
+        return `• ${s.nome ?? ''}${precoStr}`
+      }).join('\n')
+    }
+
+    const list = buildList(isPrice)
+
+    console.log(`[DEBUG] await_servico input="${text}" normalized="${normalizeTextBasic(text)}" isPriceRequest=${isPriceRequest(text)}`)
+
+    if (!servicos.length) {
+      await evolutionSendTextWithFallback({
+        apiUrl,
+        apiKey,
+        instanceName,
+        phoneRaw: phone,
+        text: 'Não encontrei serviços disponíveis. Tente novamente mais tarde.',
+      })
+      return jsonResponse(200, { ok: true })
+    }
+
+    if (isPrice) {
+      await evolutionSendTextWithFallback({
+        apiUrl,
+        apiKey,
+        instanceName,
+        phoneRaw: phone,
+        text: `Aqui estão os nossos serviços e valores:\n\n${list}\n\nQual você gostaria?`,
+      })
+      return jsonResponse(200, { ok: true })
+    }
+
     const normalizedInput = normalizeTextBasic(text)
     const matches = servicos
       .map((s) => ({ raw: s, nome: s.nome ?? '', normalized: normalizeTextBasic(s.nome ?? '') }))
-      .filter((s) => s.normalized && (normalizedInput === s.normalized || normalizedInput.includes(s.normalized)))
+      .filter((s) => {
+        if (!s.normalized) return false
+        // Match exato ou input contendo o nome do serviço
+        if (normalizedInput === s.normalized || normalizedInput.includes(s.normalized)) return true
+        // Match parcial: nome do serviço contém o input (se input > 3 chars)
+        if (normalizedInput.length >= 3 && s.normalized.includes(normalizedInput)) return true
+        return false
+      })
+
     if (matches.length === 1) {
       const match = matches[0]!.raw
       const capacidade = Math.max(1, Math.floor(Number(match.capacidade_por_horario ?? 1)))
-      dados = { ...dados, servico_id: match.id, servico_nome: match.nome ?? '', capacidade, dia_inteiro: Boolean(match.dia_inteiro) }
+      dados = { ...dados, servico_id: match.id, servico_nome: match.nome ?? '', capacidade, dia_inteiro: Boolean(match.dia_inteiro), servico_preco: formatBRL(Number(match.preco ?? 0)) }
       if (capacidade > 1) {
         estado = 'await_qtd'
         await dbClient.from('whatsapp_conversas').upsert(
@@ -855,23 +916,12 @@ async function handleInboundRequest(args: {
       return jsonResponse(200, { ok: true })
     }
 
-    const list = servicos.map((s) => (s.nome ?? '').trim()).filter(Boolean)
-    if (!list.length) {
-      await evolutionSendTextWithFallback({
-        apiUrl,
-        apiKey,
-        instanceName,
-        phoneRaw: phone,
-        text: 'Não encontrei serviços disponíveis. Tente novamente mais tarde.',
-      })
-      return jsonResponse(200, { ok: true })
-    }
     await evolutionSendTextWithFallback({
       apiUrl,
       apiKey,
       instanceName,
       phoneRaw: phone,
-      text: `Não encontrei esse serviço. Disponíveis: ${list.join(', ')}.`,
+      text: `Não encontrei esse serviço. Disponíveis:\n\n${list}`,
     })
     return jsonResponse(200, { ok: true })
   }
@@ -1240,7 +1290,7 @@ async function handleInboundRequest(args: {
     const payloadRpc = {
       p_usuario_id: user.id,
       p_data: String(dados.data ?? ''),
-      p_hora_inicio: String(dados.hora ?? ''),
+      p_hora_inicio: String(dados.hora ?? '').length === 5 ? `${String(dados.hora)}:00` : String(dados.hora ?? ''),
       p_servico_id: String(dados.servico_id ?? ''),
       p_cliente_nome: String(dados.cliente_nome ?? 'Cliente'),
       p_cliente_telefone: phone,
@@ -1250,8 +1300,10 @@ async function handleInboundRequest(args: {
       p_status: 'pendente',
       p_qtd_vagas: Math.max(1, Math.floor(Number(dados.qtd_vagas ?? 1))),
     }
+    console.log('[WHATSAPP_DEBUG] Tentando criar agendamento via RPC. Payload:', JSON.stringify(payloadRpc))
     const createRes = await dbClient.rpc('public_create_agendamento_publico', payloadRpc)
     if (createRes.error) {
+      console.error('[WHATSAPP_ERROR] Erro ao criar agendamento RPC:', JSON.stringify(createRes.error))
       await evolutionSendTextWithFallback({
         apiUrl,
         apiKey,
@@ -1261,17 +1313,19 @@ async function handleInboundRequest(args: {
       })
       return jsonResponse(200, { ok: false, error: createRes.error.message })
     }
+    console.log('[WHATSAPP_SUCCESS] Agendamento criado com sucesso via RPC.')
     await dbClient
       .from('whatsapp_conversas')
       .update({ estado: 'idle', dados: {}, atualizado_em: nowIso, ultima_mensagem_id: inbound.messageId })
       .eq('usuario_id', user.id)
       .eq('cliente_telefone', phone)
+
     await evolutionSendTextWithFallback({
       apiUrl,
       apiKey,
       instanceName,
       phoneRaw: phone,
-      text: 'Agendamento confirmado. Se precisar de algo, é só chamar.',
+      text: 'Agendamento confirmado com sucesso!',
     })
     return jsonResponse(200, { ok: true })
   }

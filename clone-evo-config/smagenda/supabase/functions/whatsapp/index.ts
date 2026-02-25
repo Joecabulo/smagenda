@@ -1441,8 +1441,10 @@ async function handleInboundRequest(args: { payload: unknown; supabaseUrl: strin
       p_status: 'pendente',
       p_qtd_vagas: Math.max(1, Math.floor(Number(dados.qtd_vagas ?? 1))),
     }
+    console.log('[WHATSAPP_DEBUG] Tentando criar agendamento via RPC. Payload:', JSON.stringify(payloadRpc))
     const createRes = await dbClient.rpc('public_create_agendamento_publico', payloadRpc)
     if (createRes.error) {
+      console.error('[WHATSAPP_ERROR] Erro ao criar agendamento RPC:', JSON.stringify(createRes.error))
       await evolutionSendTextWithFallback({
         apiUrl,
         apiKey,
@@ -1452,6 +1454,7 @@ async function handleInboundRequest(args: { payload: unknown; supabaseUrl: strin
       })
       return jsonResponse(200, { ok: false, error: createRes.error.message })
     }
+    console.log('[WHATSAPP_SUCCESS] Agendamento criado com sucesso via RPC.')
     await dbClient
       .from('whatsapp_conversas')
       .update({ estado: 'idle', dados: {}, atualizado_em: nowIso, ultima_mensagem_id: inbound.messageId })
