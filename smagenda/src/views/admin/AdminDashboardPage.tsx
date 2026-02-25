@@ -21,7 +21,7 @@ export function AdminDashboardPage() {
     const run = async () => {
       setLoading(true)
       setError(null)
-      const { data, error: err } = await supabase.from('usuarios').select('id,ativo,plano,status_pagamento').order('created_at', { ascending: false }).limit(500)
+      const { data, error: err } = await supabase.from('usuarios').select('id,ativo,plano,status_pagamento').order('criado_em', { ascending: false }).limit(500)
       if (err) {
         setError(err.message)
         setLoading(false)
