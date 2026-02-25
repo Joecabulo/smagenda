@@ -9,6 +9,7 @@ import { formatBRMoney, minutesToTime, normalizeTimeHHMM, parseTimeToMinutes, to
 import { supabase } from '../../lib/supabase'
 import { sendCancelamentoWhatsapp, sendConfirmacaoWhatsapp } from '../../services/whatsappService'
 import { useAuth } from '../../state/auth/useAuth'
+import { playNotificationSound } from '../../lib/audio'
 
 function isMissingColumnErrorMessage(message: string, column: string) {
   const lower = String(message ?? '').toLowerCase()
@@ -634,8 +635,12 @@ export function FuncionarioAgendaPage() {
       const ag = { ...r, hora_inicio: horaInicio, hora_fim: horaFim } as unknown as Agendamento
 
       setAgendamentos((prev) => {
-        const exists = prev.some((x) => x.id === ag.id)
-        if (exists) return prev
+        const idx = prev.findIndex((x) => x.id === ag.id)
+        if (idx >= 0) {
+          const next = [...prev]
+          next[idx] = ag
+          return next
+        }
         const next = [...prev, ag]
         next.sort((a, b) => {
           if (a.data !== b.data) return a.data < b.data ? -1 : 1
@@ -652,6 +657,7 @@ export function FuncionarioAgendaPage() {
 
       const msg = `Novo agendamento: ${dateLabel} ${ag.hora_inicio} • ${ag.cliente_nome}`
       setSuccess(msg)
+      playNotificationSound()
 
       const browserNotifsEnabled = (() => {
         try {

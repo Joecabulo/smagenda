@@ -6,6 +6,8 @@ type UsuarioRow = {
   slug: string | null
   enviar_confirmacao: boolean | null
   enviar_lembrete: boolean | null
+  enviar_cancelamento: boolean | null
+  enviar_notificacao_novo_agendamento: boolean | null
   lembrete_horas_antes: number | null
   mensagem_lembrete: string | null
   mensagem_confirmacao: string | null
@@ -60,6 +62,7 @@ type UsuarioPartialRow = {
   whatsapp_instance_name: string | null
   slug: string | null
   enviar_confirmacao: boolean | null
+  enviar_notificacao_novo_agendamento: boolean | null
   mensagem_confirmacao: string | null
   nome_negocio: string | null
   telefone: string | null
@@ -69,6 +72,7 @@ type UsuarioPartialRow = {
 const defaultConfirmacao = `Olá {nome}!\n\nSeu agendamento foi confirmado:\n📅 {data} às {hora}\n✂️ {servico}\n💰 {preco}\n\nLocal: {endereco}\n\nNos vemos em breve!\n{nome_negocio}`
 
 const defaultFuncionarioNovoAgendamento = `Novo agendamento:\n📅 {data} às {hora}\n👤 {cliente_nome}\n✂️ {servico}\n📍 {endereco}`
+const defaultAdminNovoAgendamento = `Novo agendamento recebido!\n\n📅 {data} às {hora}\n👤 {cliente_nome}\n📱 {cliente_telefone}\n✂️ {servico}\n💰 {preco}\n📍 {endereco}\n\nProfissional: {profissional_nome}`
 
 const FN_VERSION = 'whatsapp-lembretes@2025-12-31'
 
@@ -663,7 +667,7 @@ Deno.serve(async (req) => {
     return jsonResponse(200, { ok: true, action: 'billing_daily', today: todayIso, updated, sent, skipped })
   }
 
-  if (action === 'funcionario_novo_agendamento') {
+  if (action === 'funcionario_novo_agendamento' || action === 'novo_agendamento') {
     const agendamentoId = (() => {
       if (!bodyJson || typeof bodyJson !== 'object') return null
       const raw = (bodyJson as Record<string, unknown>).agendamento_id
@@ -695,16 +699,22 @@ Deno.serve(async (req) => {
     const status = String(agData.status ?? '').trim().toLowerCase()
     if (status === 'cancelado') return jsonResponse(200, { ok: true, skipped: 'cancelado' })
 
-    const funcionarioTelefone = (agData.funcionario?.telefone ?? '').trim()
-    if (!sanitizePhoneDigits(funcionarioTelefone)) return jsonResponse(200, { ok: true, skipped: 'missing_funcionario_phone' })
-
-    const userSel = 'id,whatsapp_instance_name,slug,nome_negocio,telefone,endereco'
+    const userSel = 'id,whatsapp_instance_name,slug,nome_negocio,telefone,endereco,enviar_notificacao_novo_agendamento'
     const userRes = await adminClient.from('usuarios').select(userSel).eq('id', agData.usuario_id).maybeSingle()
     if (userRes.error) {
       if (isMissingColumnError(userRes.error.message) || isMissingTableError(userRes.error.message)) {
-        return jsonResponse(400, { error: 'schema_incomplete', message: userRes.error.message })
+        // Fallback if column missing, try without it
+        const userSelFallback = 'id,whatsapp_instance_name,slug,nome_negocio,telefone,endereco'
+        const userRes2 = await adminClient.from('usuarios').select(userSelFallback).eq('id', agData.usuario_id).maybeSingle()
+        if (userRes2.error) return jsonResponse(400, { error: 'load_user_failed', message: userRes2.error.message })
+        if (!userRes2.data) return jsonResponse(404, { error: 'usuario_not_found' })
+        // Assign data and default property
+        const d = userRes2.data as any
+        d.enviar_notificacao_novo_agendamento = true // Default true if column missing
+        userRes.data = d
+      } else {
+        return jsonResponse(400, { error: 'load_user_failed', message: userRes.error.message })
       }
-      return jsonResponse(400, { error: 'load_user_failed', message: userRes.error.message })
     }
     if (!userRes.data) return jsonResponse(404, { error: 'usuario_not_found' })
 
@@ -721,25 +731,55 @@ Deno.serve(async (req) => {
       hora: String(agData.hora_inicio ?? ''),
       cliente_nome: String(agData.cliente_nome ?? ''),
       servico: String(agData.servico?.nome ?? ''),
+      preco: agData.servico?.preco ? new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(agData.servico.preco) : 'R$ -',
       endereco,
       nome_negocio: String(uRow.nome_negocio ?? ''),
       cliente_telefone: String(agData.cliente_telefone ?? ''),
-      profissional_nome: String(agData.funcionario?.nome_completo ?? ''),
+      profissional_nome: String(agData.funcionario?.nome_completo ?? 'Não atribuído'),
     }
 
-    const text = interpolateTemplate(defaultFuncionarioNovoAgendamento, vars).trim()
-    if (!text) return jsonResponse(200, { ok: true, skipped: 'missing_message_data' })
+    const results = []
+    const ownerPhone = (uRow.telefone ?? '').trim()
+    const notifyOwner = (action === 'novo_agendamento') && (uRow.enviar_notificacao_novo_agendamento !== false)
 
-    const sendRes = await evolutionSendTextWithFallback({
-      apiUrl: globalApiUrl,
-      apiKey: globalApiKey,
-      instanceName,
-      phoneRaw: funcionarioTelefone,
-      text,
-    })
+    if (notifyOwner) {
+      if (sanitizePhoneDigits(ownerPhone)) {
+        const text = interpolateTemplate(defaultAdminNovoAgendamento, vars).trim()
+        const res = await evolutionSendTextWithFallback({
+          apiUrl: globalApiUrl,
+          apiKey: globalApiKey,
+          instanceName,
+          phoneRaw: ownerPhone,
+          text,
+        })
+        results.push({ target: 'owner', ok: res.ok, body: res.body })
+      } else {
+        results.push({ target: 'owner', skipped: 'invalid_phone' })
+      }
+    } else {
+      results.push({ target: 'owner', skipped: 'disabled' })
+    }
 
-    if (!sendRes.ok) return jsonResponse(502, { ok: false, error: 'evolution_error', details: sendRes.body, attempts: sendRes.attempts })
-    return jsonResponse(200, { ok: true, sent: true, usuario_id: uRow.id, agendamento_id: agendamentoId })
+    const funcionarioTelefone = (agData.funcionario?.telefone ?? '').trim()
+    if (sanitizePhoneDigits(funcionarioTelefone)) {
+      if (!notifyOwner || ownerPhone !== funcionarioTelefone) {
+        const text = interpolateTemplate(defaultFuncionarioNovoAgendamento, vars).trim()
+        const res = await evolutionSendTextWithFallback({
+          apiUrl: globalApiUrl,
+          apiKey: globalApiKey,
+          instanceName,
+          phoneRaw: funcionarioTelefone,
+          text,
+        })
+        results.push({ target: 'funcionario', ok: res.ok, body: res.body })
+      } else {
+        results.push({ target: 'funcionario', skipped: 'same_as_owner' })
+      }
+    } else {
+      results.push({ target: 'funcionario', skipped: 'missing_phone' })
+    }
+
+    return jsonResponse(200, { ok: true, results })
   }
 
   const agendamentoId = (() => {

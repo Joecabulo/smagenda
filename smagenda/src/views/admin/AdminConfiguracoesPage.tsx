@@ -3876,6 +3876,8 @@ grant execute on function public.public_create_agendamento_publico(uuid, date, t
   const sqlSoftDeleteServicos = useMemo(() => {
     return `alter table public.servicos add column if not exists deleted_at timestamptz default null;
 
+drop function if exists public.public_get_servicos_publicos(uuid);
+
 create or replace function public.public_get_servicos_publicos(p_usuario_id uuid)
 returns table (
   id uuid,
@@ -3927,6 +3929,7 @@ alter table public.usuarios add column if not exists bot_ativo boolean not null 
 alter table public.usuarios add column if not exists enviar_confirmacao boolean not null default true;
 alter table public.usuarios add column if not exists enviar_lembrete boolean not null default false;
 alter table public.usuarios add column if not exists enviar_cancelamento boolean not null default true;
+alter table public.usuarios add column if not exists enviar_notificacao_novo_agendamento boolean not null default true;
 alter table public.usuarios add column if not exists lembrete_horas_antes int not null default 24;
 alter table public.usuarios add column if not exists mensagem_confirmacao text;
 alter table public.usuarios add column if not exists mensagem_lembrete text;
@@ -4399,7 +4402,7 @@ create trigger agendamentos_whatsapp_confirmacao_trg
 after insert or update of status on public.agendamentos
 for each row execute function public.agendamentos_notify_whatsapp_confirmacao();
 
-create or replace function public.agendamentos_notify_whatsapp_funcionario_novo_agendamento()
+create or replace function public.agendamentos_notify_whatsapp_novo_agendamento()
 returns trigger
 language plpgsql
 security definer
@@ -4408,12 +4411,12 @@ as $$
 begin
   begin
     if TG_OP = 'INSERT' then
-      if NEW.funcionario_id is not null and coalesce(lower(NEW.status), '') <> 'cancelado' then
+      if coalesce(lower(NEW.status), '') <> 'cancelado' then
         begin
           perform net.http_post(
             url:='${supabaseProjectUrl}/functions/v1/whatsapp-lembretes',
             headers:='{ "Content-Type": "application/json", "apikey": "${supabaseAnonKey}", "Authorization": "Bearer ${supabaseAnonKey}", "x-cron-secret": "<CRON_SECRET>" }'::jsonb,
-            body:=jsonb_build_object('action', 'funcionario_novo_agendamento', 'agendamento_id', NEW.id::text)
+            body:=jsonb_build_object('action', 'novo_agendamento', 'agendamento_id', NEW.id::text)
           );
         exception
           when others then
@@ -4443,9 +4446,12 @@ end;
 $$;
 
 drop trigger if exists agendamentos_whatsapp_funcionario_novo_agendamento_trg on public.agendamentos;
-create trigger agendamentos_whatsapp_funcionario_novo_agendamento_trg
+drop function if exists public.agendamentos_notify_whatsapp_funcionario_novo_agendamento();
+
+drop trigger if exists agendamentos_whatsapp_novo_agendamento_trg on public.agendamentos;
+create trigger agendamentos_whatsapp_novo_agendamento_trg
 after insert or update of funcionario_id on public.agendamentos
-for each row execute function public.agendamentos_notify_whatsapp_funcionario_novo_agendamento();`
+for each row execute function public.agendamentos_notify_whatsapp_novo_agendamento();`
   }, [supabaseAnonKey, supabaseProjectUrl])
 
   const sqlAuditLogs = useMemo(() => {

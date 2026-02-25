@@ -9,6 +9,7 @@ import { PageTutorial, TutorialOverlay } from '../../components/ui/TutorialOverl
 import { formatBRMoney, minutesToTime, normalizeTimeHHMM, parseTimeToMinutes, toISODate } from '../../lib/dates'
 import { supabase } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
+import { playNotificationSound } from '../../lib/audio'
 
 function isMissingColumnErrorMessage(message: string, column: string) {
   const lower = String(message ?? '').toLowerCase()
@@ -730,9 +731,27 @@ export function DashboardPage() {
       if (notifiedIdsRef.current.has(id)) return
       notifiedIdsRef.current.add(id)
 
+      const servicoColsBase = 'id,nome,preco,duracao_minutos,cor'
+      const servicoColsWithCap = `${servicoColsBase},capacidade_por_horario`
+
+      const agColsBase = `id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(${servicoColsBase})`
+      const agColsWithQtd = `id,cliente_nome,cliente_telefone,qtd_vagas,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(${servicoColsBase})`
+      const agColsWithCap = `id,cliente_nome,cliente_telefone,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(${servicoColsWithCap})`
+      const agColsWithQtdAndCap = `id,cliente_nome,cliente_telefone,qtd_vagas,data,hora_inicio,hora_fim,status,funcionario_id,extras,servico:servico_id(${servicoColsWithCap})`
+
+      const agCols = isAcademia
+        ? qtdVagasColumnAvailable && capacidadePorHorarioColumnAvailable
+          ? agColsWithQtdAndCap
+          : qtdVagasColumnAvailable
+            ? agColsWithQtd
+            : capacidadePorHorarioColumnAvailable
+              ? agColsWithCap
+              : agColsBase
+        : agColsBase
+
       const { data: agRow, error: agErr } = await supabase
         .from('agendamentos')
-        .select('id,cliente_nome,data,hora_inicio,status')
+        .select(agCols)
         .eq('id', id)
         .eq('usuario_id', usuarioId)
         .maybeSingle()
@@ -740,20 +759,46 @@ export function DashboardPage() {
       if (agErr || !agRow) return
 
       const r = agRow as unknown as Record<string, unknown>
-      if (String(r.status ?? '').trim().toLowerCase() === 'cancelado') return
+      const horaInicio = normalizeTimeHHMM(String(r.hora_inicio ?? ''))
+      const horaFimRaw = r.hora_fim
+      const horaFim = horaFimRaw ? normalizeTimeHHMM(String(horaFimRaw)) : null
 
-      const data = String(r.data ?? '')
-      const hora = normalizeTimeHHMM(String(r.hora_inicio ?? ''))
-      const nome = String(r.cliente_nome ?? '').trim()
+      const ag = { ...r, hora_inicio: horaInicio, hora_fim: horaFim } as unknown as Agendamento
 
+      // Filters check
+      if (filterFuncionarioId && ag.funcionario_id !== filterFuncionarioId) return
+      if (viewMode === 'dia') {
+        if (ag.data !== dayKey) return
+      } else {
+        if (ag.data < weekStartKey || ag.data > weekEndKey) return
+      }
+
+      setAgendamentos((prev) => {
+        const idx = prev.findIndex((x) => x.id === ag.id)
+        if (idx >= 0) {
+          const next = [...prev]
+          next[idx] = ag
+          return next
+        }
+        const next = [...prev, ag]
+        next.sort((a, b) => {
+          if (a.data !== b.data) return a.data < b.data ? -1 : 1
+          return parseTimeToMinutes(a.hora_inicio) - parseTimeToMinutes(b.hora_inicio)
+        })
+        return next
+      })
+
+      const dataStr = String(ag.data ?? '')
+      const nome = String(ag.cliente_nome ?? '').trim()
       const dateLabel = (() => {
-        const parts = data.split('-')
-        if (parts.length !== 3) return data
+        const parts = dataStr.split('-')
+        if (parts.length !== 3) return dataStr
         return `${parts[2]}/${parts[1]}/${parts[0]}`
       })()
 
-      const msg = `Novo agendamento: ${dateLabel} ${hora}${nome ? ` • ${nome}` : ''}`
+      const msg = `Novo agendamento: ${dateLabel} ${ag.hora_inicio}${nome ? ` • ${nome}` : ''}`
       setSuccess(msg)
+      playNotificationSound()
 
       if (
         browserNotifsEnabled &&
@@ -763,32 +808,56 @@ export function DashboardPage() {
         document.visibilityState !== 'visible'
       ) {
         try {
-          new Notification('Novo agendamento', { body: `${dateLabel} ${hora}${nome ? ` • ${nome}` : ''}` })
+          new Notification('Novo agendamento', { body: `${dateLabel} ${ag.hora_inicio}${nome ? ` • ${nome}` : ''}` })
         } catch (e: unknown) {
           void e
         }
       }
     }
 
-    channel.on(
-      'postgres_changes',
-      {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'agendamentos',
-        filter: `usuario_id=eq.${usuarioId}`,
-      },
-      (payload) => {
-        void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
-      }
-    )
+    channel
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'agendamentos',
+          filter: `usuario_id=eq.${usuarioId}`,
+        },
+        (payload) => {
+          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'agendamentos',
+          filter: `usuario_id=eq.${usuarioId}`,
+        },
+        (payload) => {
+          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
+        }
+      )
 
     channel.subscribe()
 
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [browserNotifsEnabled, usuarioId])
+  }, [
+    browserNotifsEnabled,
+    usuarioId,
+    isAcademia,
+    qtdVagasColumnAvailable,
+    capacidadePorHorarioColumnAvailable,
+    viewMode,
+    dayKey,
+    weekStartKey,
+    weekEndKey,
+    filterFuncionarioId,
+  ])
 
   const resolveGroupStatusUi = (items: Agendamento[]) => {
     if (items.length === 0) return resolveStatusUi('pendente')

@@ -1,71 +1,14 @@
-[2025-02-25 15:55] - Simplificação: Mensagem de Confirmação
+[2025-02-25 20:25] - Implementação: Notificações em Tempo Real no Frontend (Site)
 Descrição: 
-- Simplificada a mensagem final de confirmação do agendamento para "Agendamento confirmado com sucesso!".
-- Removidos detalhes redundantes (data, hora, serviço, endereço) pois o sistema já envia uma notificação completa separadamente.
-Impacto: Evita duplicidade de informações para o usuário final e torna a interação mais direta.
-Testes Realizados: Deploy realizado.
-Dados Utilizados: N/A.
-Responsável: Agente IA
-Próximos Passos: Validar fluxo completo.
-
-[2025-02-25 16:05] - Deploy: Correção de JWT e Botão de Controle do Bot
-Descrição: 
-- Deploy realizado da Edge Function `whatsapp` com a flag `verify_jwt = false` para resolver o erro "supabase_gateway_invalid_jwt".
-- Funcionalidade de Botão Ativar/Desativar Bot agora está ativa em produção.
-- Correção na formatação da lista de serviços (bullet points e preços condicionais) aplicada.
-Impacto: Resolve problemas de autenticação na API e melhora a usabilidade do bot.
-Testes Realizados: Deploy bem-sucedido via CLI. UI verificada no código.
-Dados Utilizados: Produção.
-Responsável: Agente IA
-Próximos Passos: Monitorar logs para confirmar funcionamento correto.
-
-[2025-02-25 16:20] - Refatoração: Centralização de Lógica do WhatsApp
-Descrição: 
-- Refatorado `FuncionarioAgendaPage.tsx` para usar o serviço compartilhado `whatsappService.ts`.
-- Removidas implementações duplicadas de `sendConfirmacaoWhatsapp` e `sendCancelamentoWhatsapp`.
-- Confirmado que a configuração `verify_jwt = false` está presente em `supabase/functions/whatsapp/config.toml`.
-Impacto: Redução de código duplicado e manutenção centralizada da lógica de comunicação com o WhatsApp.
-Testes Realizados: Validação estática do código e imports.
+- Criado utilitário de som `src/lib/audio.ts` (beep simples via Web Audio API).
+- Atualizado `DashboardPage.tsx` (Painel do Dono) para:
+  - Escutar eventos `INSERT` e `UPDATE` na tabela `agendamentos`.
+  - Atualizar a lista de agendamentos em tempo real (sem precisar recarregar).
+  - Tocar som de notificação ao receber novo agendamento.
+  - Exibir toast de sucesso e notificação do navegador (se em background).
+- Atualizado `FuncionarioAgendaPage.tsx` (Agenda do Funcionário) para tocar som de notificação (já possuía atualização de lista).
+Impacto: Usuários agora recebem feedback visual e sonoro imediato ao receberem novos agendamentos enquanto estão com o site aberto.
+Testes Realizados: Validação lógica do código.
 Dados Utilizados: Código fonte.
 Responsável: Agente IA
-Próximos Passos: Monitorar logs e feedback do usuário.
-
-[2025-02-25 16:30] - Redeploy: Correção Persistente de JWT
-Descrição: 
-- Re-executado o deploy da função `whatsapp` com a flag `--no-verify-jwt` explicitamente, após relato de persistência do erro `supabase_gateway_invalid_jwt`.
-- Isso garante que a configuração de ignorar a validação de JWT no Gateway seja aplicada corretamente.
-Impacto: Restabelece o funcionamento das configurações e envios do WhatsApp.
-Testes Realizados: Deploy via CLI confirmado.
-Dados Utilizados: Produção.
-Responsável: Agente IA
-Próximos Passos: Solicitar validação do usuário.
-
-[2025-02-25 17:30] - Implementação: Soft Delete para Serviços
-Descrição: 
-- Implementado sistema de "soft delete" para a tabela `servicos` para resolver erro de chave estrangeira (`agendamentos_servico_id_fkey`) ao excluir serviços com histórico.
-- Criada função SQL `sqlSoftDeleteServicos` em `AdminConfiguracoesPage.tsx` que:
-  - Adiciona coluna `deleted_at` na tabela `servicos`.
-  - Atualiza função `public_get_servicos_publicos` para filtrar serviços deletados.
-- Atualizado frontend (`ServicosPage.tsx`) para realizar soft delete ao invés de delete físico.
-- Adicionado filtro `.is('deleted_at', null)` nas consultas de serviços em:
-  - `ServicosPage.tsx` (listagem admin)
-  - `DashboardPage.tsx` (listagem admin/app)
-  - `FuncionarioAgendaPage.tsx` (listagem app)
-  - `PaginaPublicaSettingsPage.tsx` (preview público)
-  - `AdminClienteDetalhesPage.tsx` (contagem admin)
-  - `supabase/functions/whatsapp/index.ts` (bot whatsapp)
-Impacto: Permite "excluir" serviços mantendo o histórico de agendamentos passados, evitando erros de integridade referencial.
-Testes Realizados: Validação estática do código e queries.
-Dados Utilizados: Código fonte.
-Responsável: Agente IA
-Próximos Passos: Usuário deve rodar o SQL "Soft Delete Serviços" na tela de Configurações > Avançado.
-
-[2025-02-25 19:40] - Correção: Erro de Build no Cloudflare
-Descrição: 
-- Removidas importações não utilizadas (`checkJwtProject`, `supabaseEnv`) nos arquivos `DashboardPage.tsx` e `FuncionarioAgendaPage.tsx`.
-- Esses arquivos causavam erro de build (`TS6133`) no pipeline de deploy do Cloudflare.
-Impacto: Permite que o processo de build (npm run build) seja concluído com sucesso.
-Testes Realizados: Validação estática do código (remoção de dead code).
-Dados Utilizados: Logs de erro do Cloudflare.
-Responsável: Agente IA
-Próximos Passos: Novo deploy automático pelo Cloudflare.
+Próximos Passos: Usuário testar recebimento de agendamento com o painel aberto.
