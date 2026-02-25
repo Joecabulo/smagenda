@@ -59,3 +59,13 @@ Testes Realizados: Validação estática do código e queries.
 Dados Utilizados: Código fonte.
 Responsável: Agente IA
 Próximos Passos: Usuário deve rodar o SQL "Soft Delete Serviços" na tela de Configurações > Avançado.
+
+[2025-02-25 19:40] - Correção: Erro de Build no Cloudflare
+Descrição: 
+- Removidas importações não utilizadas (`checkJwtProject`, `supabaseEnv`) nos arquivos `DashboardPage.tsx` e `FuncionarioAgendaPage.tsx`.
+- Esses arquivos causavam erro de build (`TS6133`) no pipeline de deploy do Cloudflare.
+Impacto: Permite que o processo de build (npm run build) seja concluído com sucesso.
+Testes Realizados: Validação estática do código (remoção de dead code).
+Dados Utilizados: Logs de erro do Cloudflare.
+Responsável: Agente IA
+Próximos Passos: Novo deploy automático pelo Cloudflare.

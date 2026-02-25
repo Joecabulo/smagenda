@@ -7,7 +7,7 @@ import { Card } from '../../components/ui/Card'
 import { Input } from '../../components/ui/Input'
 import { PageTutorial, TutorialOverlay } from '../../components/ui/TutorialOverlay'
 import { formatBRMoney, minutesToTime, normalizeTimeHHMM, parseTimeToMinutes, toISODate } from '../../lib/dates'
-import { checkJwtProject, supabase, supabaseEnv } from '../../lib/supabase'
+import { supabase } from '../../lib/supabase'
 import { useAuth } from '../../state/auth/useAuth'
 
 function isMissingColumnErrorMessage(message: string, column: string) {
