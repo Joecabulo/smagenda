@@ -4,6 +4,7 @@ import { newId } from './lib/id'
 import { extractAddressParts } from './lib/address'
 import { loadState, saveState, exportJson, importJson } from './lib/storage'
 import { geocode, health, placesDetails, placesTextSearch } from './lib/api'
+import { MapPanel } from './components/MapPanel'
 
 const PRESETS: ImportPreset[] = [
   {
@@ -368,6 +369,7 @@ export function App() {
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [installPrompt, setInstallPrompt] = useState<unknown>(null)
+  const [viewMode, setViewMode] = useState<'list' | 'map'>('list')
 
   const preset = useMemo(() => PRESETS.find((p) => p.key === presetKey) ?? PRESETS[0]!, [presetKey])
 
@@ -809,6 +811,9 @@ export function App() {
               Instalar
             </button>
           ) : null}
+          <button className="btn" onClick={() => setViewMode(viewMode === 'list' ? 'map' : 'list')}>
+            {viewMode === 'list' ? '🗺️ Mapa' : '📋 Lista'}
+          </button>
           <div className="chip">
             Total <b>{stats.total}</b>
           </div>
@@ -831,7 +836,19 @@ export function App() {
       </div>
 
       <div className="layout">
-        <div className="panel">
+        {viewMode === 'map' ? (
+          <div style={{ gridColumn: '1 / -1' }}>
+            <MapPanel
+                establishments={filtered}
+                selectedPlaceId={selectedPlaceId}
+                onSelectPlace={(pid) => {
+                  setSelectedPlaceId(pid)
+                }}
+                onCloseMap={() => setViewMode('list')}
+              />
+          </div>
+        ) : null}
+        <div className="panel" style={viewMode === 'map' ? { display: 'none' } : undefined}>
           <div className="panelHeader">
             <div className="toolbar">
               <div className="field" style={{ minWidth: 220 }}>
@@ -1012,7 +1029,7 @@ export function App() {
           </div>
         </div>
 
-        <div className="panel">
+        <div className="panel" style={viewMode === 'map' ? { display: 'none' } : undefined}>
           <div className="panelHeader">
             <div className="title">
               <div style={{ fontWeight: 800 }}>Detalhes</div>

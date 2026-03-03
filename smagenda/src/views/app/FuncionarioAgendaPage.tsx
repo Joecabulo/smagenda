@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AppShell } from '../../components/layout/AppShell'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
@@ -286,6 +286,7 @@ export function FuncionarioAgendaPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
 
   const [participantsOpen, setParticipantsOpen] = useState(false)
   const [participantsCtx, setParticipantsCtx] = useState<{
@@ -305,8 +306,6 @@ export function FuncionarioAgendaPage() {
     const id = typeof funcionarioId === 'string' ? funcionarioId.trim() : ''
     return id ? `smagenda:notifs:funcionario:${id}` : 'smagenda:notifs:funcionario'
   }, [funcionarioId])
-
-  const notifiedIdsRef = useRef<Set<string>>(new Set())
 
   const [blockStart, setBlockStart] = useState('')
   const [blockEnd, setBlockEnd] = useState('')
@@ -593,19 +592,26 @@ export function FuncionarioAgendaPage() {
       setError(e instanceof Error ? e.message : 'Erro ao carregar')
       setLoading(false)
     })
-  }, [canVerAgendaTodos, dayKey, filterFuncionarioId, funcionarioId, isAcademia, usuarioMasterId, viewMode, weekEndKey, weekStartKey])
+  }, [canVerAgendaTodos, dayKey, filterFuncionarioId, funcionarioId, isAcademia, usuarioMasterId, viewMode, weekEndKey, weekStartKey, refreshTrigger])
 
   useEffect(() => {
     if (!funcionarioId || !usuarioMasterId) return
     if (funcionario?.permissao !== 'funcionario') return
 
     const channel = supabase.channel(`agendamentos-funcionario:${funcionarioId}`)
-    const handleIncoming = async (idRaw: unknown) => {
-      const id = typeof idRaw === 'string' ? idRaw.trim() : ''
-      if (!id) return
-      if (notifiedIdsRef.current.has(id)) return
-      notifiedIdsRef.current.add(id)
+    const handleIncoming = async (idRaw: unknown, eventType: 'INSERT' | 'UPDATE' | 'DELETE') => {
+      // Always refresh data to ensure UI consistency
+      setRefreshTrigger((t) => t + 1)
 
+      if (eventType === 'DELETE') {
+        setSuccess('Agendamento removido')
+        playNotificationSound()
+        return
+      }
+
+      const id = typeof idRaw === 'string' ? idRaw.trim() : typeof idRaw === 'number' ? String(idRaw) : ''
+      if (!id) return
+      
       const { data: agRow, error: agErr } = await supabase
         .from('agendamentos')
         .select(
@@ -625,8 +631,11 @@ export function FuncionarioAgendaPage() {
 
       if (agErr || !agRow) return
       const r = agRow as unknown as Record<string, unknown>
-      if ((r.funcionario_id ?? null) !== funcionarioId) return
-      if (String(r.status ?? '').trim().toLowerCase() === 'cancelado') return
+      
+      // Se não pode ver agenda de todos, filtra apenas os seus
+      if (!canVerAgendaTodos) {
+        if ((r.funcionario_id ?? null) !== funcionarioId) return
+      }
 
       const horaInicio = normalizeTimeHHMM(String(r.hora_inicio ?? ''))
       const horaFimRaw = r.hora_fim
@@ -634,28 +643,18 @@ export function FuncionarioAgendaPage() {
 
       const ag = { ...r, hora_inicio: horaInicio, hora_fim: horaFim } as unknown as Agendamento
 
-      setAgendamentos((prev) => {
-        const idx = prev.findIndex((x) => x.id === ag.id)
-        if (idx >= 0) {
-          const next = [...prev]
-          next[idx] = ag
-          return next
-        }
-        const next = [...prev, ag]
-        next.sort((a, b) => {
-          if (a.data !== b.data) return a.data < b.data ? -1 : 1
-          return parseTimeToMinutes(a.hora_inicio) - parseTimeToMinutes(b.hora_inicio)
-        })
-        return next
-      })
-
       const dateLabel = (() => {
         const parts = String(ag.data ?? '').split('-')
         if (parts.length !== 3) return String(ag.data ?? '')
         return `${parts[2]}/${parts[1]}/${parts[0]}`
       })()
 
-      const msg = `Novo agendamento: ${dateLabel} ${ag.hora_inicio} • ${ag.cliente_nome}`
+      const status = String(ag.status ?? '').trim().toLowerCase()
+      let msgPrefix = eventType === 'INSERT' ? 'Novo agendamento' : 'Agendamento atualizado'
+      if (status === 'cancelado') msgPrefix = 'Agendamento CANCELADO'
+
+      const msg = `${msgPrefix}: ${dateLabel} ${ag.hora_inicio} • ${ag.cliente_nome}`
+      
       setSuccess(msg)
       playNotificationSound()
 
@@ -675,7 +674,7 @@ export function FuncionarioAgendaPage() {
         document.visibilityState !== 'visible'
       ) {
         try {
-          new Notification('Novo agendamento', { body: `${dateLabel} ${ag.hora_inicio} • ${ag.cliente_nome}` })
+          new Notification(msgPrefix, { body: `${dateLabel} ${ag.hora_inicio} • ${ag.cliente_nome}` })
         } catch (e: unknown) {
           void e
         }
@@ -692,7 +691,7 @@ export function FuncionarioAgendaPage() {
           filter: `usuario_id=eq.${usuarioMasterId}`,
         },
         (payload) => {
-          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
+          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id, 'INSERT')
         }
       )
       .on(
@@ -704,7 +703,19 @@ export function FuncionarioAgendaPage() {
           filter: `usuario_id=eq.${usuarioMasterId}`,
         },
         (payload) => {
-          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
+          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id, 'UPDATE')
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'agendamentos',
+          filter: `usuario_id=eq.${usuarioMasterId}`,
+        },
+        (payload) => {
+          void handleIncoming((payload as { old?: { id?: unknown } }).old?.id, 'DELETE')
         }
       )
 

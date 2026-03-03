@@ -1,10 +1,22 @@
+let audioCtx: AudioContext | null = null
+
 export function playNotificationSound() {
   if (typeof window === 'undefined') return
   try {
     const AudioContext = window.AudioContext || (window as any).webkitAudioContext
     if (!AudioContext) return
 
-    const ctx = new AudioContext()
+    if (!audioCtx) {
+      audioCtx = new AudioContext()
+    }
+
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {
+        // Ignore resume error if user interaction hasn't happened yet
+      })
+    }
+
+    const ctx = audioCtx
     const osc = ctx.createOscillator()
     const gain = ctx.createGain()
 

@@ -110,7 +110,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
     const channel = supabase.channel(`agendamentos-appshell:${usuarioId}:${funcionarioId ?? 'all'}`)
     const handleIncoming = async (idRaw: unknown) => {
-      const id = typeof idRaw === 'string' ? idRaw.trim() : ''
+      const id = typeof idRaw === 'string' ? idRaw.trim() : typeof idRaw === 'number' ? String(idRaw) : ''
       if (!id) return
       if (notifiedIdsRef.current.has(id)) return
       notifiedIdsRef.current.add(id)

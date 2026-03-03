@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AppShell } from '../../components/layout/AppShell'
 import { Badge } from '../../components/ui/Badge'
@@ -268,6 +268,7 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
 
   const browserNotifsKey = useMemo(() => {
     const id = typeof usuarioId === 'string' ? usuarioId.trim() : ''
@@ -285,8 +286,6 @@ export function DashboardPage() {
       return false
     }
   }, [browserNotifsEnabledLocal, browserNotifsKey])
-
-  const notifiedIdsRef = useRef<Set<string>>(new Set())
 
   const [participantsOpen, setParticipantsOpen] = useState(false)
   const [participantsCtx, setParticipantsCtx] = useState<{
@@ -504,7 +503,7 @@ export function DashboardPage() {
       setError(e instanceof Error ? e.message : 'Erro ao carregar')
       setLoading(false)
     })
-  }, [isAcademia, usuarioId, dayKey, filterFuncionarioId, viewMode, weekEndKey, weekStartKey])
+  }, [isAcademia, usuarioId, dayKey, filterFuncionarioId, viewMode, weekEndKey, weekStartKey, refreshTrigger])
 
   const selectedCreateServico = useMemo(() => servicos.find((s) => s.id === createServicoId) ?? null, [servicos, createServicoId])
   const createCapacidade = useMemo(() => {
@@ -725,12 +724,19 @@ export function DashboardPage() {
 
     const channel = supabase.channel(`agendamentos-usuario:${usuarioId}`)
 
-    const handleIncoming = async (idRaw: unknown) => {
-      const id = typeof idRaw === 'string' ? idRaw.trim() : ''
-      if (!id) return
-      if (notifiedIdsRef.current.has(id)) return
-      notifiedIdsRef.current.add(id)
+    const handleIncoming = async (idRaw: unknown, eventType: 'INSERT' | 'UPDATE' | 'DELETE') => {
+      // Always refresh data to ensure UI consistency
+      setRefreshTrigger((t) => t + 1)
 
+      if (eventType === 'DELETE') {
+        setSuccess('Agendamento removido')
+        playNotificationSound()
+        return
+      }
+
+      const id = typeof idRaw === 'string' ? idRaw.trim() : typeof idRaw === 'number' ? String(idRaw) : ''
+      if (!id) return
+      
       const servicoColsBase = 'id,nome,preco,duracao_minutos,cor'
       const servicoColsWithCap = `${servicoColsBase},capacidade_por_horario`
 
@@ -765,29 +771,7 @@ export function DashboardPage() {
 
       const ag = { ...r, hora_inicio: horaInicio, hora_fim: horaFim } as unknown as Agendamento
 
-      // Filters check
-      if (filterFuncionarioId && ag.funcionario_id !== filterFuncionarioId) return
-      if (viewMode === 'dia') {
-        if (ag.data !== dayKey) return
-      } else {
-        if (ag.data < weekStartKey || ag.data > weekEndKey) return
-      }
-
-      setAgendamentos((prev) => {
-        const idx = prev.findIndex((x) => x.id === ag.id)
-        if (idx >= 0) {
-          const next = [...prev]
-          next[idx] = ag
-          return next
-        }
-        const next = [...prev, ag]
-        next.sort((a, b) => {
-          if (a.data !== b.data) return a.data < b.data ? -1 : 1
-          return parseTimeToMinutes(a.hora_inicio) - parseTimeToMinutes(b.hora_inicio)
-        })
-        return next
-      })
-
+      // Notification Logic
       const dataStr = String(ag.data ?? '')
       const nome = String(ag.cliente_nome ?? '').trim()
       const dateLabel = (() => {
@@ -796,7 +780,12 @@ export function DashboardPage() {
         return `${parts[2]}/${parts[1]}/${parts[0]}`
       })()
 
-      const msg = `Novo agendamento: ${dateLabel} ${ag.hora_inicio}${nome ? ` • ${nome}` : ''}`
+      const status = String(ag.status ?? '').trim().toLowerCase()
+      let msgPrefix = eventType === 'INSERT' ? 'Novo agendamento' : 'Agendamento atualizado'
+      if (status === 'cancelado') msgPrefix = 'Agendamento CANCELADO'
+
+      const msg = `${msgPrefix}: ${dateLabel} ${ag.hora_inicio}${nome ? ` • ${nome}` : ''}`
+      
       setSuccess(msg)
       playNotificationSound()
 
@@ -808,7 +797,7 @@ export function DashboardPage() {
         document.visibilityState !== 'visible'
       ) {
         try {
-          new Notification('Novo agendamento', { body: `${dateLabel} ${ag.hora_inicio}${nome ? ` • ${nome}` : ''}` })
+          new Notification(msgPrefix, { body: `${dateLabel} ${ag.hora_inicio}${nome ? ` • ${nome}` : ''}` })
         } catch (e: unknown) {
           void e
         }
@@ -825,7 +814,7 @@ export function DashboardPage() {
           filter: `usuario_id=eq.${usuarioId}`,
         },
         (payload) => {
-          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
+          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id, 'INSERT')
         }
       )
       .on(
@@ -837,7 +826,19 @@ export function DashboardPage() {
           filter: `usuario_id=eq.${usuarioId}`,
         },
         (payload) => {
-          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id)
+          void handleIncoming((payload as { new?: { id?: unknown } }).new?.id, 'UPDATE')
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'agendamentos',
+          filter: `usuario_id=eq.${usuarioId}`,
+        },
+        (payload) => {
+          void handleIncoming((payload as { old?: { id?: unknown } }).old?.id, 'DELETE')
         }
       )
 
@@ -852,11 +853,7 @@ export function DashboardPage() {
     isAcademia,
     qtdVagasColumnAvailable,
     capacidadePorHorarioColumnAvailable,
-    viewMode,
-    dayKey,
-    weekStartKey,
-    weekEndKey,
-    filterFuncionarioId,
+    // Removed view filters dependencies as we now refresh everything
   ])
 
   const resolveGroupStatusUi = (items: Agendamento[]) => {
@@ -1209,6 +1206,8 @@ export function DashboardPage() {
                         Ativar notificações
                       </Button>
                     ) : null}
+
+
                     {canConfirmarAgendamento ? (
                       <Button onClick={openCreateModal}>Novo agendamento</Button>
                     ) : null}

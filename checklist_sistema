@@ -23,3 +23,80 @@ Testes Realizados: Validação de código e lógica de permissão.
 Dados Utilizados: Dados reais de produção (query em usuarios).
 Responsável: Agente IA
 Próximos Passos: Verificar se a lista de usuários carrega no Admin Dashboard.
+
+[2026-02-25 20:45] - Correção e Melhoria: Fix de Coluna e Controle de Bot em Avisos
+Descrição: 
+- AdminDashboardPage.tsx: Revertido ordenação para 'criado_em' após erro reportado (banco usa português).
+- AdminWhatsappAvisosPage.tsx: Implementado controle de ativação do Bot em massa.
+- Adicionado tratamento de erro visual caso a coluna 'bot_ativo' não exista no banco.
+Impacto: Correção de erro 500 no dashboard admin e nova funcionalidade de gestão de bots na página de avisos.
+Testes Realizados: Validação de tipos e lógica de UI.
+Dados Utilizados: Schema de produção inferido.
+Responsável: Agente IA
+Próximos Passos: Usuário deve rodar migration SQL se coluna 'bot_ativo' não existir.
+
+[2026-02-25 21:00] - Correção: Robustez do Sistema de Notificações
+Descrição: 
+- Refatorado src/lib/audio.ts para usar AudioContext singleton e tentar desbloqueio automático (Autoplay Policy).
+- Adicionado botão "Testar Alerta" na DashboardPage.tsx para diagnóstico e desbloqueio manual do áudio pelo usuário.
+Impacto: Permite aos usuários validarem e desbloquearem notificações sonoras que poderiam estar bloqueadas pelo navegador.
+Testes Realizados: Validação de lógica de Web Audio API e permissões de Notification.
+Dados Utilizados: Código fonte.
+Responsável: Agente IA
+Próximos Passos: Usuário testar clicando no botão e aguardar agendamento real.
+
+[2026-02-25 21:10] - Modificação: Realocação do Botão de Teste
+Descrição: 
+- Movido botão "🔔 Testar Som" de DashboardPage.tsx para AppShell.tsx (Header).
+- Agora o botão está visível em todas as páginas do sistema, ao lado do botão "Sair".
+Impacto: Garante visibilidade e acesso fácil ao teste de som independente da página ou resolução.
+Testes Realizados: Validação de posicionamento no layout global.
+Dados Utilizados: Código fonte.
+Responsável: Agente IA
+Próximos Passos: Usuário testar o botão no topo da página.
+
+[2026-02-25 21:30] - Correção Crítica: Notificações em Tempo Real e Varredura
+Descrição: 
+- DashboardPage.tsx e FuncionarioAgendaPage.tsx: Removido bloqueio de notificações subsequentes (notifiedIdsRef) que impedia a atualização da tela em caso de mudanças rápidas ou atualizações.
+- Implementado suporte explícito para eventos INSERT e UPDATE do Supabase Realtime com mensagens distintas.
+- Lógica de Notificação (Som/Toast) movida para ANTES dos filtros de visualização (Data/Funcionário). Agora o usuário é notificado de novos agendamentos mesmo que ocorram em datas ou para funcionários que não estão visíveis na tela atual.
+Impacto: Resolve a queixa de que o sistema "não varre" ou não avisa sobre novos agendamentos. Garante feedback imediato para qualquer inserção ou atualização relevante.
+Testes Realizados: Validação da lógica de fluxo de eventos e filtros.
+Dados Utilizados: Código fonte e feedback do usuário.
+Responsável: Agente IA
+Próximos Passos: Usuário validar recebimento de notificação ao criar agendamento em outra data/aba.
+
+[2026-02-25 21:45] - Correção Crítica: Cancelamentos e Visibilidade Total para Funcionários
+Descrição: 
+- FuncionarioAgendaPage.tsx: Ajustado filtro de notificações em tempo real. Agora funcionários com permissão de ver agenda completa recebem alertas de TODOS os agendamentos, não apenas os seus.
+- DashboardPage.tsx e FuncionarioAgendaPage.tsx: Implementado som e notificação específica para cancelamentos (UPDATE para status 'cancelado' e eventos DELETE).
+- Melhoria nas mensagens de alerta para distinguir claramente "Agendamento CANCELADO".
+Impacto: Garante que a equipe seja notificada imediatamente sobre cancelamentos e que gerentes/atendentes vejam toda a movimentação da agenda.
+Testes Realizados: Validação da lógica de permissões e estados de agendamento.
+Dados Utilizados: Código fonte.
+Responsável: Agente IA
+Próximos Passos: Validar fluxo de cancelamento em tempo real.
+
+[2026-02-25 22:00] - Ajuste Final: Remoção de Botão de Teste e Confirmação para Proprietários
+Descrição: 
+- AppShell.tsx: Removido botão "🔔 Testar Som" conforme solicitação do usuário, já que o som foi validado.
+- Validação de Lógica para Proprietários: Confirmado que a lógica implementada na DashboardPage.tsx já monitora TODOS os eventos da conta do usuário (INSERT/UPDATE/DELETE) sem filtrar por funcionário. Isso garante que proprietários sem funcionários cadastrados recebam todas as notificações normalmente.
+Impacto: Interface mais limpa e confirmação de que o fluxo de notificações atende ao caso de uso "apenas proprietário".
+Testes Realizados: Revisão de código e lógica de permissões.
+Dados Utilizados: Código fonte.
+Responsável: Agente IA
+Próximos Passos: Usuário validar uso em produção.
+
+[2026-03-03 10:45] - Implementação: Mapa de Geolocalização no Prospector
+Descrição:
+- Adicionado componente `MapPanel.tsx` utilizando `react-leaflet` e `leaflet`.
+- Implementado rastreamento de localização do usuário via `navigator.geolocation`.
+- Adicionado marcadores para estabelecimentos com cores baseadas no status (Novo, Visitado, etc.).
+- Modificado `App.tsx` do Prospector para incluir botão de alternância entre Lista e Mapa.
+- Configurado mapa para exibir apenas estabelecimentos filtrados na busca atual.
+- Integrado layout responsivo onde o mapa ocupa a área principal quando ativo.
+Impacto: Usuários agora podem visualizar geograficamente os leads e sua própria posição, facilitando o planejamento de visitas.
+Testes Realizados: Validação da lógica de componentes e integração de estado.
+Dados Utilizados: Dados reais de estabelecimentos (`state.establishments` filtrados).
+Responsável: Agente IA
+Próximos Passos: Usuário testar a precisão da localização e usabilidade em campo.
